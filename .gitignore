@@ -1,0 +1,47 @@
+# Rust build outputs (including the standalone fixture generator)
+target/
+/dist/
+**/*.rs.bk
+
+# AI agents, collaboration history and local permissions
+/ai-collab/
+.claude/
+.codex/
+.agents/
+.cursor/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+/.github/copilot-instructions.md
+/docs/context.md
+/docs/requirements.md
+/docs/module-map.md
+/docs/ui-theme-brief.md
+/docs/theme-references/
+/docs/reference/
+
+# Local experiments and generated acceptance evidence
+/scratchpad/
+/tests/evidence-*/
+/action.log
+/examples/prior-work/
+
+# Local caches, editors and OS metadata
+__pycache__/
+*.py[cod]
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.env
+.env.*
+!.env.example
+
+# Keep Cargo.lock, source, build scripts, screenshots, approved logos,
+# examples/data, examples/files and tests/fixtures in version control.
+# Do NOT ignore *.log / *.sst: these are the database samples and fixtures.
