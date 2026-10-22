@@ -1,4 +1,9 @@
-<h1><img src="logo/rocksvision-cat-small.png" width="48" height="48" alt="RocksVision logosu"> RocksVision</h1>
+<table>
+  <tr>
+    <td valign="middle"><img src="logo/rocksvision-cat-small.png" width="64" height="64" alt="RocksVision logo"></td>
+    <td valign="middle"><h1>RocksVision</h1></td>
+  </tr>
+</table>
 
 [English](README.md) · [Türkçe](README.tr.md)
 
