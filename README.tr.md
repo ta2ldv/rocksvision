@@ -10,7 +10,7 @@
 ## İçindekiler
 
 - [Hakkında](#hakkında)
-- [Ekran görüntüleri](#ekran-görüntüleri)
+- [UI ve temalar](#ui-ve-temalar)
 - [Kullanım](#kullanım)
 - [Derleme](#derleme)
 - [Durum ve sınırlamalar](#durum-ve-sınırlamalar)
@@ -30,14 +30,26 @@ Rust ve egui ile geliştirilmiştir; **RocksDB 10.4.2** dosya biçimlerini hedef
 
 RocksVision incelenen veritabanını değiştirmez; repair, replay veya compaction yapmaz. Bağımsız bir projedir; resmi bir RocksDB aracı değildir.
 
-## Ekran görüntüleri
+## UI ve temalar
 
 Bağımsız, ZSTD ile sıkıştırılmış bir SST: seçili kaydın **açılmış block byte’ları** vurgulanıyor.
 
 ![Autistic temasında yapı ağacı, alanlar, byte görünümü ve açıklamalar](screenshots/autistic.png)
 
-<details>
-<summary>Altı temayı inceleyin</summary>
+### Temalar
+
+**View → Theme** menüsünden görünümü değiştirin. Tema seçimi veriyi veya dosya içeriğini değiştirmez.
+
+| Tema | Görünüm |
+|---|---|
+| Autistic | Koyu gri ve sıcak kahverengi vurgular |
+| Matrix | Siyah zemin, lime yeşili terminal görünümü |
+| Amiga Workbench | Mavi zemin, beyaz yazı ve turuncu seçim |
+| Amiga Tool Style | Açık gri yüzeyler, koyu yazı ve mavi seçim |
+| XCopy | Siyah zemin, cyan ve sarı vurgular |
+| Wooden | Ahşap dokulu çerçeveler, pirinç tonları ve düz veri alanları |
+
+Altı temanın ekran görüntüleri:
 
 | Matrix | Amiga Workbench |
 |---|---|
@@ -47,16 +59,21 @@ Bağımsız, ZSTD ile sıkıştırılmış bir SST: seçili kaydın **açılmı�
 | **Wooden** | **Autistic** |
 | ![Wooden teması](screenshots/wooden.png) | ![Autistic teması](screenshots/autistic.png) |
 
-</details>
+### Menüler
 
-<details>
-<summary>Tema menüsü ve About</summary>
+| Menü | İşlev |
+|---|---|
+| File | Open File ile tek dosya, Open Folder ile veritabanı klasörü açma; Go to Offset ile byte konumuna gitme |
+| View | Arama, zoom, tema, panel görünürlüğü ve Reset View |
+| Help | RocksVision Help ve Keyboard Shortcuts |
+| RocksVision (macOS) | About, uygulamayı gizleme ve çıkış |
+
+macOS’ta menüler sistem menü çubuğundadır; diğer platformlarda pencere içi menü kullanılır. Aşağıdaki görsel **View → Theme** menüsünü ve panel seçeneklerini gösterir:
 
 ![macOS View menüsünden tema seçimi](screenshots/theme-menu.png)
 
 ![Taşlardan oluşan kedi gözü logosu ve TA2LDV imzalı About ekranı](screenshots/about.png)
 
-</details>
 
 ## Kullanım
 
@@ -69,6 +86,25 @@ Aşağıdaki derleme adımlarından sonra uygulamayı açın ve şu örnekleri d
 | **Open File…** | [`examples/files/wal-plain/000004.log`](examples/files/wal-plain/000004.log) — yanında başka dosya gerektirmeyen tek WAL |
 
 Dosya yolunu yazıp **Go** düğmesine de basabilirsiniz. [Örnek rehberi](examples/README.md); Bloom filter, index çeşitleri, compression, çoklu LSM seviyeleri, parçalı WAL ve açıkça adlandırılmış bozuk dosya senaryolarını anlatır. Dosyalar hazırdır; veri üretmeniz gerekmez.
+
+### Hazır örneklerle nasıl kullanılır?
+
+İki örnek türü vardır:
+
+- **`examples/data/`**: Her alt klasör tam bir veritabanı örneğidir. CURRENT, MANIFEST ve senaryonun SST/WAL dosyaları birlikte bulunur. **Open Folder…** ile `data/` üst klasörünü değil, `basic-db` veya `multilevel-db` gibi bir senaryo klasörünü seçin. Dosyalar arasındaki ilişkileri ve MANIFEST’te kayıtlı seviyeleri böyle inceleyebilirsiniz.
+- **`examples/files/`**: Her alt klasör tek başına incelenebilen bir dosya içerir. **Open File…** ile klasörü değil, içindeki `.sst`, `.log`, CURRENT veya MANIFEST dosyasını seçin. Bağımsız SST/WAL için çalışan bir veritabanı veya yan dosyalar gerekmez; bağlam olmadan belirlenemeyen bilgiler tahmin edilmez.
+
+1. İlk deneme için **Open Folder… → `examples/data/basic-db/`** seçin.
+2. Sol listeden CURRENT, MANIFEST, SST veya WAL dosyasına tıklayın; altındaki yapı ağacını genişletin.
+3. Ortadaki bir satırı seçin; altta ilgili byte’ları, sağda açıklamasını inceleyin.
+4. Bağımsız dosya denemek için **Open File… → `examples/files/sst-zstd/sst-zstd.sst`** açın. Sıkıştırılmış bir data block seçip **show decompressed block** düğmesiyle açılmış byte’lara geçin; **show file bytes** ile disk üzerindeki byte’lara dönün.
+5. WAL için **`examples/files/wal-plain/000004.log`** açın; fiziksel kayıtları ve çözümlenen işlemleri inceleyin.
+
+Karşılaştırma için `data/bloom-full`, `data/bloom-absent`, `data/index-partitioned`, `data/codec-*` ve `data/multilevel-db` klasörlerini deneyin. `files/corrupt-*` örnekleri kasıtlı olarak bozuktur: ilgili hatalı öğeyi seçince mevcut **Diagnosis** bilgilerini inceleyin. Normal örnekler de vardır; bütün dosyalar bozuk değildir. Ayrıntılı senaryolar ve beklenen sonuçlar [örnek rehberinde](examples/README.md) yer alır.
+
+**RocksDB hiç kurmamış olsanız ve kendinize ait bir veritabanınız bulunmasa bile RocksVision’ı deneyebilirsiniz.** Depoda, gerçek RocksDB 10.4.2 ile önceden üretilmiş küçük örnek veri setleri bulunur. Bunlar öğrenmek ve uygulamayı denemek için hazırlanmış hazır dosyalardır; RocksVision ile açmanız yeterlidir. RocksDB kurmanız, bir veritabanı çalıştırmanız veya veri üretmeniz gerekmez. RocksVision örnek dosyaları değiştirmeden okur.
+
+### Ekran yerleşimi
 
 **Ekran birbiriyle bağlantılı dört alandan oluşur:**
 

@@ -10,7 +10,7 @@
 ## Table of contents
 
 - [About](#about)
-- [Screenshots](#screenshots)
+- [UI and themes](#ui-and-themes)
 - [Usage](#usage)
 - [Build](#build)
 - [Status and limitations](#status-and-limitations)
@@ -30,14 +30,26 @@ Built with Rust and egui, it targets **RocksDB 10.4.2** file formats. It reads f
 
 RocksVision does not modify, repair, replay or compact the inspected database. It is an independent project, not an official RocksDB tool.
 
-## Screenshots
+## UI and themes
 
 A standalone ZSTD-compressed SST, with a decoded entry selected and its **decompressed block bytes** highlighted:
 
 ![RocksVision in the Autistic theme: structure, fields, bytes and explanation](screenshots/autistic.png)
 
-<details>
-<summary>Explore all six themes</summary>
+### Themes
+
+Choose a look from **View → Theme**. Changing the theme does not change the data or file contents.
+
+| Theme | Appearance |
+|---|---|
+| Autistic | Dark grey with warm brown accents |
+| Matrix | Black background with lime-green terminal styling |
+| Amiga Workbench | Blue surfaces, white text and orange selection |
+| Amiga Tool Style | Light grey surfaces, dark text and blue selection |
+| XCopy | Black background with cyan and yellow accents |
+| Wooden | Wood-textured chrome, brass accents and plain data surfaces |
+
+Screenshots of all six themes:
 
 | Matrix | Amiga Workbench |
 |---|---|
@@ -47,16 +59,21 @@ A standalone ZSTD-compressed SST, with a decoded entry selected and its **decomp
 | **Wooden** | **Autistic** |
 | ![Wooden theme](screenshots/wooden.png) | ![Autistic theme](screenshots/autistic.png) |
 
-</details>
+### Menus
 
-<details>
-<summary>Theme menu and About</summary>
+| Menu | Purpose |
+|---|---|
+| File | Open a standalone file or database directory; jump to a byte offset |
+| View | Search, zoom, themes, panel visibility and Reset View |
+| Help | RocksVision Help and Keyboard Shortcuts |
+| RocksVision (macOS) | About, Hide and Quit |
+
+macOS uses the system menu bar; other platforms use an in-window menu. The following screenshot shows **View → Theme** and the panel controls:
 
 ![Theme selection in the macOS View menu](screenshots/theme-menu.png)
 
 ![RocksVision About with the stone cat-eye logo and TA2LDV credit](screenshots/about.png)
 
-</details>
 
 ## Usage
 
@@ -69,6 +86,25 @@ Build and launch the application using the instructions below. Then try:
 | **Open File…** | [`examples/files/wal-plain/000004.log`](examples/files/wal-plain/000004.log) — one WAL, no companion files required |
 
 You can also enter a path and press **Go**. The [example guide](examples/README.md) covers Bloom filters, index variants, compression, multiple LSM levels, fragmented WALs and clearly labeled corrupt files. Examples are already included; no data-generation step is required.
+
+### How to use the included examples
+
+There are two kinds of examples:
+
+- **`examples/data/`**: Each subdirectory is a complete database example containing CURRENT, MANIFEST and the scenario’s SST/WAL files. Use **Open Folder…** and select a scenario such as `basic-db` or `multilevel-db`, not the parent `data/` directory. This lets you inspect file relationships and levels recorded in the MANIFEST.
+- **`examples/files/`**: Each subdirectory contains one file for standalone inspection. Use **Open File…** and select the actual `.sst`, `.log`, CURRENT or MANIFEST file, not its containing directory. Standalone SST/WAL inspection needs no running database or companion files; information that requires missing context is not guessed.
+
+1. Start with **Open Folder… → `examples/data/basic-db/`**.
+2. Select CURRENT, MANIFEST, an SST or a WAL in the left file list, then expand its structure tree.
+3. Select a row in the center to see the corresponding bytes below and its explanation on the right.
+4. Try **Open File… → `examples/files/sst-zstd/sst-zstd.sst`**. Select a compressed data block and use **show decompressed block** to inspect decoded bytes; use **show file bytes** to return to the stored bytes.
+5. Open **`examples/files/wal-plain/000004.log`** to explore physical WAL records and decoded operations.
+
+For comparisons, try `data/bloom-full`, `data/bloom-absent`, `data/index-partitioned`, `data/codec-*` and `data/multilevel-db`. The `files/corrupt-*` samples are intentionally damaged: select the affected element to inspect available **Diagnosis** information. Most examples are valid, not corrupt. The [example guide](examples/README.md) documents scenarios and expected observations.
+
+**You can try RocksVision even if you have never installed RocksDB and do not have a database of your own.** The repository includes small example datasets generated beforehand with real RocksDB 10.4.2. They are ready-made sample files for learning and trying the tool: simply open them in RocksVision. No RocksDB installation, running database or data-generation step is required. RocksVision reads the sample files without changing them.
+
+### Screen layout
 
 **The screen has four connected areas:**
 
