@@ -1,0 +1,43 @@
+# Phase B acceptance: derived (decompressed) offset space. SST block -> entry -> chip "show block (decompressed)" active ->
+# select a byte -> back to File. File: sst-zstd/data.sst (data blocks are zstd-compressed: 16-ish blocks; entries live in the
+# decompressed space). Placeholders: PATH_X/Y, BLOCK_X/Y (Data block @0 tree node), ENTRY_X/Y (entry row 0 in the table),
+# CHIP_X/Y (the space chip/button "show block (decompressed)"), CHIP_FILE_X/Y (chip/button that returns to the File space),
+# HEXBYTE_X/Y (a byte cell in the hex view), HEX_X/Y/W/H (hex panel rect), STATUS_X/Y/W/H.
+# Expected: selecting the block shows File space (stored bytes, zstd frame); selecting the entry shows the decompressed
+# chip; chip active -> hex view switches to 'block@0x0 (decompressed)' with decompressed length > stored length; clicking a
+# byte selects it with a block-local offset (status bar 'block@0x0 (decompressed) 0x...'); back to File -> stored bytes,
+# file offsets, selection cleared or mapped back consistently; the derived bytes never show file offsets.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/sst-zstd/data.sst
+key return
+sleep 2.5
+shot ds_00_open
+click {{BLOCK_X}} {{BLOCK_Y}}
+sleep 0.6
+shot ds_01_block_selected_file_space
+crop ds_01_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+click {{ENTRY_X}} {{ENTRY_Y}}
+sleep 0.6
+shot ds_02_entry_selected
+click {{CHIP_X}} {{CHIP_Y}}
+sleep 0.8
+shot ds_03_chip_active_decompressed
+crop ds_03_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+crop ds_03_status {{STATUS_X}} {{STATUS_Y}} {{STATUS_W}} {{STATUS_H}}
+click {{HEXBYTE_X}} {{HEXBYTE_Y}}
+sleep 0.6
+shot ds_04_byte_selected_in_derived_space
+crop ds_04_status {{STATUS_X}} {{STATUS_Y}} {{STATUS_W}} {{STATUS_H}}
+clipclear
+key c cmd
+sleep 0.4
+clipsave ds_04_cmd_c
+click {{CHIP_FILE_X}} {{CHIP_FILE_Y}}
+sleep 0.8
+shot ds_05_back_to_file
+crop ds_05_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+crop ds_05_status {{STATUS_X}} {{STATUS_Y}} {{STATUS_W}} {{STATUS_H}}
+note PASS: ds_03/04 label the space 'decompressed', byte count differs from ds_01; ds_05 returns to stored bytes with file offsets; ds_04_cmd_c.txt content is checked by hand against expected_clipboard.md rules (Cmd+C copy target)
+release_mods

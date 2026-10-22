@@ -1,0 +1,19 @@
+# Window sizes (points) at the current display scaling. Run once per macOS scaling setting
+# (100 % = default scaling; 150 % = switch display scaling in System Settings, then re-run).
+# Set SCALE=100|150 so shot names differ:  --set SCALE=100
+front
+winfo
+winsize 900 700
+shot win_{{SCALE}}_900
+winsize 1400 900
+shot win_{{SCALE}}_1400
+# optional: open a file at 1400 to show table density
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+shot win_{{SCALE}}_1400_file
+winsize 900 700
+sleep 0.5
+shot win_{{SCALE}}_900_file

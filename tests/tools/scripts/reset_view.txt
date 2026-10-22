@@ -1,0 +1,24 @@
+# Reset View: change everything, then reset. Menu items need coordinates from a screenshot of each menu.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+shot reset_00_default
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+shot reset_01_view_menu
+click {{THEME_MATRIX_X}} {{THEME_MATRIX_Y}}
+sleep 0.5
+click {{ZOOM_PLUS_X}} {{ZOOM_PLUS_Y}}
+click {{ZOOM_PLUS_X}} {{ZOOM_PLUS_Y}}
+click {{ROW1_X}} {{ROW1_Y}}
+click {{SEARCH_X}} {{SEARCH_Y}}
+type MANIFEST
+sleep 0.5
+drag {{PANEL_X1}} {{PANEL_Y1}} {{PANEL_X2}} {{PANEL_Y2}}
+shot reset_02_before_reset
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+click {{RESET_VIEW_X}} {{RESET_VIEW_Y}}
+sleep 1
+shot reset_03_after_reset

@@ -1,0 +1,5 @@
+# Pins the compiler used to build and verify RocksVision (rustup reads this file;
+# a non-rustup toolchain such as Homebrew rustc ignores it, the build scripts check `rustc -V`).
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"

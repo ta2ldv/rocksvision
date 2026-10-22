@@ -1,0 +1,84 @@
+# Phase B acceptance: Diagnosis section in Explanation for each corrupt example (examples/files/corrupt-*). For each file:
+# open from the path field, select the Invalid/Truncated TREE NODE, capture the Explanation panel, then select the
+# invalid FIELD ROW in the table and capture again. Placeholders per file (one screenshot per file to find them):
+#   <ID>_NODE_X/Y, <ID>_FIELD_X/Y with ID in SSTFLIP SSTTRUNC SSTFOOT WALFLIP WALTRUNC; shared: PATH_X/Y, EXPL_X/Y/W/H (Explanation panel rect).
+# Expected (see examples/README.md for byte offsets): failed check named, affected span (links to the byte space), expected vs observed
+# values where known, and whether decoded content is trustworthy; unknown evidence says unknown (nothing invented).
+#   SSTFLIP : Data block @0 checksum mismatch (trailer @0x144), span block bytes 0..323
+#   SSTTRUNC: Footer bad table magic 0x706d756a20786f66 (file cut at 3388 of unknown original size)
+#   SSTFOOT : Footer bad table magic 0x88e241b785f4cf08, expected 0x88e241b785f4cff7
+#   WALFLIP : Physical item @0x1e checksum mismatch stored/computed 2f7e1552 / 0ccd31b3
+#   WALTRUNC: Physical item @0x40 truncated, payload 14 of 29 bytes
+front
+# ---------- SSTFLIP
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/corrupt-sst-checksum-flip/corrupt-sst-checksum-flip.sst
+key return
+sleep 2.5
+click {{SSTFLIP_NODE_X}} {{SSTFLIP_NODE_Y}}
+sleep 0.6
+shot dg_sstflip_1_node
+crop dg_sstflip_1_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{SSTFLIP_FIELD_X}} {{SSTFLIP_FIELD_Y}}
+sleep 0.6
+shot dg_sstflip_2_field
+crop dg_sstflip_2_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+# ---------- SSTTRUNC
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/corrupt-sst-truncated/corrupt-sst-truncated.sst
+key return
+sleep 2.5
+click {{SSTTRUNC_NODE_X}} {{SSTTRUNC_NODE_Y}}
+sleep 0.6
+shot dg_ssttrunc_1_node
+crop dg_ssttrunc_1_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{SSTTRUNC_FIELD_X}} {{SSTTRUNC_FIELD_Y}}
+sleep 0.6
+shot dg_ssttrunc_2_field
+crop dg_ssttrunc_2_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+# ---------- SSTFOOT
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/corrupt-sst-bad-footer/corrupt-sst-bad-footer.sst
+key return
+sleep 2.5
+click {{SSTFOOT_NODE_X}} {{SSTFOOT_NODE_Y}}
+sleep 0.6
+shot dg_sstfoot_1_node
+crop dg_sstfoot_1_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{SSTFOOT_FIELD_X}} {{SSTFOOT_FIELD_Y}}
+sleep 0.6
+shot dg_sstfoot_2_field
+crop dg_sstfoot_2_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+# ---------- WALFLIP
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/corrupt-wal-checksum-flip/corrupt-wal-checksum-flip.log
+key return
+sleep 2.5
+click {{WALFLIP_NODE_X}} {{WALFLIP_NODE_Y}}
+sleep 0.6
+shot dg_walflip_1_node
+crop dg_walflip_1_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{WALFLIP_FIELD_X}} {{WALFLIP_FIELD_Y}}
+sleep 0.6
+shot dg_walflip_2_field
+crop dg_walflip_2_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+# ---------- WALTRUNC
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/corrupt-wal-truncated/corrupt-wal-truncated.log
+key return
+sleep 2.5
+click {{WALTRUNC_NODE_X}} {{WALTRUNC_NODE_Y}}
+sleep 0.6
+shot dg_waltrunc_1_node
+crop dg_waltrunc_1_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{WALTRUNC_FIELD_X}} {{WALTRUNC_FIELD_Y}}
+sleep 0.6
+shot dg_waltrunc_2_field
+crop dg_waltrunc_2_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+note PASS per file: the Explanation crops contain the failed check, span (clickable/highlights the bytes), expected vs observed where listed in the header, and a trust statement; nothing contradicts examples/README.md
+release_mods

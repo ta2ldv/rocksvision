@@ -1,0 +1,57 @@
+# Phase B acceptance: Reset View contract. Reset restores LAYOUT ONLY (panel widths, center split, panel visibility, zoom
+# 100 %, layout epoch) and keeps data state (file, selection, search text/matches, theme). Also the disabled-state tooltip:
+# when the layout is already default, Reset View is disabled and shows an explanatory tooltip on hover.
+# Placeholders: PATH_X/Y, ROW_SEL_X/Y, SEARCH_X/Y, VIEW_MENU_X/Y, RESET_VIEW_X/Y (menu item), RESET_BTN_X/Y (toolbar/status
+# Reset View control if present, else reuse the menu item position), NAV_SPLIT_X/Y + NAV_SPLIT_X2 (drag target), EXPL_SPLIT_X/Y + EXPL_SPLIT_X2,
+# CENTER_SPLIT_X/Y + CENTER_SPLIT_Y2, HIDE_BYTES_X/Y, ZOOM_IN_X/Y (toolbar +) , TIP_CROP_X/Y/W/H (rect around the tooltip).
+# Zoom 130 % = 3 zoom-in steps from 100 % (steps of 0.1; the layout ceiling must allow 1.3 - use a window >= 1400 wide).
+# Expected before->after: widths/split/visibility/zoom back to the 'default' shot; selection row, search text, theme, file unchanged.
+front
+winsize 1400 900
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+click {{SEARCH_X}} {{SEARCH_Y}}
+type MANIFEST
+sleep 0.5
+shot rv_00_default
+# --- disabled state: layout is default, Reset View must be disabled + tooltip
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+hover {{RESET_VIEW_X}} {{RESET_VIEW_Y}}
+sleep 1.5
+shot rv_01_disabled_menu_item
+crop rv_01_disabled_tooltip {{TIP_CROP_X}} {{TIP_CROP_Y}} {{TIP_CROP_W}} {{TIP_CROP_H}}
+key esc
+# --- change widths, split, visibility, zoom 130 %
+drag {{NAV_SPLIT_X}} {{NAV_SPLIT_Y}} {{NAV_SPLIT_X2}} {{NAV_SPLIT_Y}}
+drag {{EXPL_SPLIT_X}} {{EXPL_SPLIT_Y}} {{EXPL_SPLIT_X2}} {{EXPL_SPLIT_Y}}
+drag {{CENTER_SPLIT_X}} {{CENTER_SPLIT_Y}} {{CENTER_SPLIT_X}} {{CENTER_SPLIT_Y2}}
+click {{HIDE_BYTES_X}} {{HIDE_BYTES_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+sleep 0.6
+shot rv_02_changed
+# --- enabled state tooltip, then reset
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+hover {{RESET_VIEW_X}} {{RESET_VIEW_Y}}
+sleep 1.5
+shot rv_03_enabled_menu_item
+click {{RESET_VIEW_X}} {{RESET_VIEW_Y}}
+sleep 1
+shot rv_04_after_reset
+# --- disabled again right after reset
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+hover {{RESET_VIEW_X}} {{RESET_VIEW_Y}}
+sleep 1.5
+shot rv_05_disabled_after_reset
+crop rv_05_disabled_tooltip {{TIP_CROP_X}} {{TIP_CROP_Y}} {{TIP_CROP_W}} {{TIP_CROP_H}}
+key esc
+note PASS: rv_04 layout == rv_00 (compare panel edges/zoom text); selected row, search text 'MANIFEST' and theme identical; rv_01 and rv_05 show Reset View disabled with the same tooltip text; rv_03 enabled
+release_mods

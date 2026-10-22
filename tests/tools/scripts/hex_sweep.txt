@@ -1,0 +1,51 @@
+# Phase B acceptance: hex view click/drag/shift-click sweep. Click a byte, WAIT 3 s (no spinner/flicker/selection loss
+# while idle), shot; click another byte far to the right; drag from one byte to another; Shift+click extends; then a plain
+# click must collapse the selection again (shift not stuck). Compare the offsets in the status bar with the expectations.
+# File: sst-none/data.sst (uncompressed: hex offsets = file offsets). Placeholders: PATH_X/Y, ROW_SEL_X/Y (any table row so bytes load),
+# HEX_A_X/Y (a byte in the left part of a hex row), HEX_B_X/Y (a byte far right on a later row), HEX_C_X/Y (target of the drag),
+# HEX_D_X/Y (shift-click target), HEX_E_X/Y (plain click after), SB_X/Y/W/H (status bar rect), HEX_X/Y/W/H (hex panel rect),
+# and the offsets you expect (read from the hex gutter): EXP_A EXP_B EXP_DRAG EXP_SHIFT EXP_E (e.g. 0x1a, 0x3f, 0x1a..0x52 ...).
+# Expected: status bar 'selection: file 0x<off> ...' equals EXP_* each time; the hex highlight covers exactly that range; no change
+# of selection during the 3 s idle waits; no stuck modifier (the final plain click selects exactly one byte).
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/sst-none/data.sst
+key return
+sleep 2.5
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+sleep 1
+note STEP A: click byte A, expect {{EXP_A}}
+click {{HEX_A_X}} {{HEX_A_Y}}
+sleep 3
+shot hs_01_click_a_after_3s
+crop hs_01_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+crop hs_01_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+note STEP B: click byte B far right, expect {{EXP_B}}
+click {{HEX_B_X}} {{HEX_B_Y}}
+sleep 3
+shot hs_02_click_b_after_3s
+crop hs_02_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+crop hs_02_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+note STEP C: drag from A to C, expect {{EXP_DRAG}}
+drag {{HEX_A_X}} {{HEX_A_Y}} {{HEX_C_X}} {{HEX_C_Y}}
+sleep 3
+shot hs_03_drag_a_to_c_after_3s
+crop hs_03_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+crop hs_03_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+note STEP D: click A, then Shift+click D, expect {{EXP_SHIFT}}
+click {{HEX_A_X}} {{HEX_A_Y}}
+sleep 0.5
+shift_click {{HEX_D_X}} {{HEX_D_Y}}
+sleep 3
+shot hs_04_shift_click_after_3s
+crop hs_04_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+crop hs_04_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+note STEP E: plain click E afterwards, expect single byte {{EXP_E}} (shift must not be stuck)
+click {{HEX_E_X}} {{HEX_E_Y}}
+sleep 3
+shot hs_05_plain_click_after_shift
+crop hs_05_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+crop hs_05_hex {{HEX_X}} {{HEX_Y}} {{HEX_W}} {{HEX_H}}
+note PASS: five status crops show EXP_A, EXP_B, EXP_DRAG, EXP_SHIFT, EXP_E in order (read them off the crops, 2x resolution); action.log has the matching click/drag/shift_click lines and front=RocksVision on each
+release_mods

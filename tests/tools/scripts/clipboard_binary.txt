@@ -1,0 +1,36 @@
+# Binary preservation + 64 KiB cap. Needs a prior screenshot for every placeholder.
+front
+# wal-basic record 4: key bin\x00key, value 00 01 02 ff fe (5 bytes)
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/wal-basic/000004.log
+key return
+sleep 2
+shot bin_01_wal_open
+click {{BIN_ROW_X}} {{BIN_ROW_Y}}
+shot bin_02_selected
+clipclear
+rclick {{BIN_ROW_X}} {{BIN_ROW_Y}}
+click {{CM_VALUE_X}} {{CM_VALUE_Y}}
+sleep 1
+clipsave bin_copy_value
+clipclear
+rclick {{BIN_ROW_X}} {{BIN_ROW_Y}}
+click {{CM_HEX_X}} {{CM_HEX_Y}}
+sleep 1
+clipsave bin_copy_hex
+# wal-fragmented big-100k (102400 bytes): hex copy must be capped at 64 KiB with a note
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/wal-fragmented/000004.log
+key return
+sleep 3
+shot cap_01_open
+click {{BIG_ROW_X}} {{BIG_ROW_Y}}
+shot cap_02_selected
+clipclear
+rclick {{BIG_ROW_X}} {{BIG_ROW_Y}}
+click {{CM_HEX_X}} {{CM_HEX_Y}}
+sleep 2
+clipsave cap_copy_hex
+shot cap_03_note

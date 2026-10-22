@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 512 512" role="img" aria-labelledby="title"><title id="title">RocksVision — Round Stone Cat Eye</title><defs><clipPath id="iris"><circle cx="256" cy="256" r="190"/></clipPath></defs>
+<g clip-path="url(#iris)">
+<circle cx="256" cy="256" r="190" fill="#C48A35"/>
+<path d="M66 140 173 72 227 126 188 199 105 211Z" fill="#E5B75A"/>
+<path d="M173 72 276 55 303 131 227 126Z" fill="#F6D67D"/>
+<path d="M276 55 381 91 363 179 303 131Z" fill="#D7A54A"/>
+<path d="M381 91 452 180 400 239 363 179Z" fill="#BE8735"/>
+<path d="M452 180 458 290 383 308 400 239Z" fill="#996326"/>
+<path d="M458 290 402 390 333 355 383 308Z" fill="#B87A28"/>
+<path d="M402 390 303 453 284 377 333 355Z" fill="#895327"/>
+<path d="M303 453 188 447 207 364 284 377Z" fill="#AF7630"/>
+<path d="M188 447 98 366 160 307 207 364Z" fill="#D3993B"/>
+<path d="M98 366 55 254 105 211 160 307Z" fill="#E5B34D"/>
+<path d="M66 140 105 211 55 254Z" fill="#C39440"/>
+<path d="M105 211 188 199 223 251 160 307Z" fill="#F3CA69"/>
+<path d="M188 199 227 126 256 150 223 251Z" fill="#FFE399"/>
+<path d="M227 126 303 131 285 209 256 150Z" fill="#EBC269"/>
+<path d="M303 131 363 179 400 239 318 255 285 209Z" fill="#D9A947"/>
+<path d="M400 239 383 308 318 255Z" fill="#C28A30"/>
+<path d="M383 308 333 355 286 309 318 255Z" fill="#A76C27"/>
+<path d="M333 355 284 377 256 359 286 309Z" fill="#C38C3B"/>
+<path d="M284 377 207 364 223 303 256 359Z" fill="#DFA94E"/>
+<path d="M207 364 160 307 223 251 223 303Z" fill="#E8B95C"/>
+<path d="M256 116 279 191 294 254 278 316 256 397 235 316 218 254 235 191Z" fill="#142A29"/>
+<path d="M256 116 235 191 218 254 239 239Z" fill="#294139"/>
+<path d="M168 147 194 134 211 151 186 169Z" fill="#FFF3CB"/>
+</g></svg>

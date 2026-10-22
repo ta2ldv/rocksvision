@@ -1,0 +1,73 @@
+# Phase B acceptance: collapsing/restoring panels. Open a file first (done below), then:
+# header chevrons for navigation (left) and explanation (right), 'Hide bytes' in the bytes header, the thin restore strips,
+# and the View-menu checkmarks. Placeholders come from one screenshot of the default layout:
+#   NAV_CHEV_X/Y, EXPL_CHEV_X/Y (panel header chevrons), HIDE_BYTES_X/Y, STRIP_NAV_X/Y, STRIP_EXPL_X/Y, STRIP_BYTES_X/Y
+#   (restore strips that appear after collapsing), VIEW_MENU_X/Y, MENU_CROP_X/Y/W/H (rect of the open View menu)
+# Expected: each collapse frees its space for the remaining panels (no gap), a thin strip remains that restores on click,
+# View menu shows a checkmark per visible panel (navigation, explanation, bytes) and unchecked when collapsed, state is
+# identical after restore (widths as before, selection unchanged).
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+shot cr_00_default
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+shot cr_01_view_menu_all_checked
+crop cr_01_view_menu_all_checked_crop {{MENU_CROP_X}} {{MENU_CROP_Y}} {{MENU_CROP_W}} {{MENU_CROP_H}}
+key esc
+# --- navigation chevron
+click {{NAV_CHEV_X}} {{NAV_CHEV_Y}}
+sleep 0.5
+shot cr_02_nav_collapsed
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+shot cr_03_view_menu_nav_unchecked
+crop cr_03_view_menu_nav_unchecked_crop {{MENU_CROP_X}} {{MENU_CROP_Y}} {{MENU_CROP_W}} {{MENU_CROP_H}}
+key esc
+click {{STRIP_NAV_X}} {{STRIP_NAV_Y}}
+sleep 0.5
+shot cr_04_nav_restored
+# --- explanation chevron
+click {{EXPL_CHEV_X}} {{EXPL_CHEV_Y}}
+sleep 0.5
+shot cr_05_expl_collapsed
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+shot cr_06_view_menu_expl_unchecked
+crop cr_06_view_menu_expl_unchecked_crop {{MENU_CROP_X}} {{MENU_CROP_Y}} {{MENU_CROP_W}} {{MENU_CROP_H}}
+key esc
+click {{STRIP_EXPL_X}} {{STRIP_EXPL_Y}}
+sleep 0.5
+shot cr_07_expl_restored
+# --- Hide bytes
+click {{HIDE_BYTES_X}} {{HIDE_BYTES_Y}}
+sleep 0.5
+shot cr_08_bytes_hidden
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+shot cr_09_view_menu_bytes_unchecked
+crop cr_09_view_menu_bytes_unchecked_crop {{MENU_CROP_X}} {{MENU_CROP_Y}} {{MENU_CROP_W}} {{MENU_CROP_H}}
+key esc
+click {{STRIP_BYTES_X}} {{STRIP_BYTES_Y}}
+sleep 0.5
+shot cr_10_bytes_restored
+# --- all three collapsed, then restored via the View menu items
+click {{NAV_CHEV_X}} {{NAV_CHEV_Y}}
+click {{EXPL_CHEV_X}} {{EXPL_CHEV_Y}}
+click {{HIDE_BYTES_X}} {{HIDE_BYTES_Y}}
+sleep 0.5
+shot cr_11_all_collapsed
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+click {{VIEW_NAV_ITEM_X}} {{VIEW_NAV_ITEM_Y}}
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+click {{VIEW_EXPL_ITEM_X}} {{VIEW_EXPL_ITEM_Y}}
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+click {{VIEW_BYTES_ITEM_X}} {{VIEW_BYTES_ITEM_Y}}
+sleep 0.5
+shot cr_12_restored_via_menu
+note PASS: cr_12 equals cr_00 (panel widths, selection, scroll); every menu crop's checkmarks match the visible panels
+release_mods

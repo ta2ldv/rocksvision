@@ -1,0 +1,42 @@
+# Phase B acceptance: window resize sequence 1400 -> 1100 -> 900 -> minimum -> 1400 at FIXED zoom with BOTH side panels
+# visible and the SAME selected row throughout. Run once per display scaling; --set SCALE=100 (names the shots).
+# Placeholders (one prior screenshot at 1400): PATH_X/Y, ROW_SEL_X/Y (a row in the records table), and the crop rect of
+# the status bar at 1400 (SB_X SB_Y SB_W SB_H, points) - crops at other widths use the same rect clamped by the driver.
+# Zoom is NOT touched by this script: set it first (View menu, e.g. 100 %) and write the value in the note below.
+# Expected at every step: left (nav) and right (explanation) panels visible, byte region + records both visible, no
+# overlapping/clipped toolbar items, same row highlighted, status bar "selection: ..." text unchanged, no panel collapsed by itself.
+# 'minimum' = winsize 200 200: the app clamps to its own minimum window size; winfo logs the size actually reached
+# (the minimum is a property of the build, not asserted here; record it).
+front
+note zoom fixed by the operator before this run; scale={{SCALE}}
+winsize 1400 900
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+sleep 0.4
+winfo
+shot rs_{{SCALE}}_1_1400
+crop rs_{{SCALE}}_1_1400_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+winsize 1100 800
+sleep 0.5
+winfo
+shot rs_{{SCALE}}_2_1100
+winsize 900 700
+sleep 0.5
+winfo
+shot rs_{{SCALE}}_3_900
+winsize 200 200
+sleep 0.8
+winfo
+note MINIMUM reached (read the 'window now' line above)
+shot rs_{{SCALE}}_4_minimum
+winsize 1400 900
+sleep 0.8
+winfo
+shot rs_{{SCALE}}_5_back_1400
+crop rs_{{SCALE}}_5_back_1400_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+note PASS: shots 1 and 5 equal in layout (panel widths within 1 px/pt, same selected row, same status text); 2-4 keep both panels and the selected row visible; no user-visible state (zoom, selection) changed
+release_mods

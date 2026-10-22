@@ -1,0 +1,74 @@
+# Phase B acceptance: search-field keyboard navigation (Return = next match, Shift+Return = previous), one action per
+# physical keypress, focus retained, empty query is a no-op, path field Enter keeps meaning Go.
+# File: wal-basic (many records). Query "k" matches several rows (note the count n in 'Rows i / n' of the status bar).
+# Placeholders: PATH_X/Y, SEARCH_X/Y, SB_X/Y/W/H (status bar rect: shows the current match "Rows i / n"), TABLE_X/Y/W/H (records table rect).
+# Expected: Enter x3 -> match index advances 1,2,3 (wraps/stops as the current boundary behaviour with its explicit
+# indication); Shift+Enter x2 -> goes back 2; editing the query resets to the first match for the new text; empty query +
+# Enter does nothing (no notice, no selection change); Enter in the PATH field re-opens/Go and does NOT advance the search.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/wal-basic/000004.log
+key return
+sleep 2
+click {{SEARCH_X}} {{SEARCH_Y}}
+type k
+sleep 0.6
+shot se_00_typed
+crop se_00_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+key return
+sleep 0.4
+shot se_01_enter1
+crop se_01_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+key return
+sleep 0.4
+crop se_02_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+shot se_02_enter2
+key return
+sleep 0.4
+crop se_03_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+shot se_03_enter3
+note focus must still be in the search field here: type a char to prove it (then remove it)
+type x
+sleep 0.3
+shot se_03b_focus_proof
+key delete
+key return shift
+sleep 0.4
+crop se_04_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+shot se_04_shift_enter1
+key return shift
+sleep 0.4
+crop se_05_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+shot se_05_shift_enter2
+# --- edit the query
+key delete
+type e
+sleep 0.6
+shot se_06_edited_query
+crop se_06_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+key return
+sleep 0.4
+crop se_07_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+shot se_07_enter_after_edit
+# --- empty query: Enter and Shift+Enter are no-ops
+key a cmd
+key delete
+sleep 0.4
+key return
+key return shift
+sleep 0.4
+shot se_08_empty_query_enter
+crop se_08_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+# --- focus switch: type a query again, then go to the path field and press Enter there
+type k
+key return
+sleep 0.3
+crop se_09_before_path_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+click {{PATH_X}} {{PATH_Y}}
+key return
+sleep 1.5
+shot se_10_enter_in_path_field
+crop se_10_status {{SB_X}} {{SB_Y}} {{SB_W}} {{SB_H}}
+note PASS: se_10 shows the path 'Go' result (file re-opened or unchanged), match index NOT advanced by that Enter; se_08 unchanged vs se_07 selection; se_03b proves focus retained
+release_mods

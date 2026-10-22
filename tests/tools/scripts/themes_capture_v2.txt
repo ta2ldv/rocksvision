@@ -1,0 +1,45 @@
+# Phase B acceptance: six themes x {empty, selected row, hover row, hover button, Copy popup} with FULL-RESOLUTION crops.
+# ONE theme per run:  --set THEME=Matrix  (name as in the View menu; use a short id in file names, e.g. matrix).
+# Run six times: Stone, Matrix, ... (the six themes listed in the View menu) from a freshly launched, EMPTY app
+# (no file open) so shot 1 is the empty state. Placeholders from a prior screenshot:
+#   VIEW_MENU_X/Y, THEME_ITEM_X/Y (this theme's menu item), PATH_X/Y, ROW_SEL_X/Y (row to select), ROW_HOVER_X/Y (a different
+#   unselected row), TOOLBAR_BTN_X/Y (a toolbar button to hover), COPY_POPUP_ROW_X/Y (row to right-click)
+#   and crop rects (points): WIN_X/Y/W/H (whole window), ROW_CROP_X/Y/W/H (selected + hovered rows area), BTN_CROP_X/Y/W/H
+#   (toolbar around the hovered button incl. tooltip), POPUP_CROP_X/Y/W/H (context menu / Copy popup incl. shadow).
+# crop = full-resolution region of the preceding shot (Retina: 2 px per point; NAME.png keeps native pixels, NAME_s.png is
+# the downsized overview). Judge contrast/hover/selection on the crops, not on the _s overviews.
+front
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+click {{THEME_ITEM_X}} {{THEME_ITEM_Y}}
+sleep 0.8
+move {{WIN_X}} {{WIN_Y}}
+shot t2_{{THEME}}_1_empty
+crop t2_{{THEME}}_1_empty_win {{WIN_X}} {{WIN_Y}} {{WIN_W}} {{WIN_H}}
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2.5
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+move {{WIN_X}} {{WIN_Y}}
+sleep 0.5
+shot t2_{{THEME}}_2_selected
+crop t2_{{THEME}}_2_selected_win {{WIN_X}} {{WIN_Y}} {{WIN_W}} {{WIN_H}}
+crop t2_{{THEME}}_2_selected_rows {{ROW_CROP_X}} {{ROW_CROP_Y}} {{ROW_CROP_W}} {{ROW_CROP_H}}
+hover {{ROW_HOVER_X}} {{ROW_HOVER_Y}}
+sleep 0.5
+shot t2_{{THEME}}_3_hover_row
+crop t2_{{THEME}}_3_hover_row_rows {{ROW_CROP_X}} {{ROW_CROP_Y}} {{ROW_CROP_W}} {{ROW_CROP_H}}
+hover {{TOOLBAR_BTN_X}} {{TOOLBAR_BTN_Y}}
+sleep 1.5
+shot t2_{{THEME}}_4_hover_button
+crop t2_{{THEME}}_4_hover_button_btn {{BTN_CROP_X}} {{BTN_CROP_Y}} {{BTN_CROP_W}} {{BTN_CROP_H}}
+rclick {{COPY_POPUP_ROW_X}} {{COPY_POPUP_ROW_Y}}
+sleep 0.6
+shot t2_{{THEME}}_5_copy_popup
+crop t2_{{THEME}}_5_copy_popup_crop {{POPUP_CROP_X}} {{POPUP_CROP_Y}} {{POPUP_CROP_W}} {{POPUP_CROP_H}}
+key esc
+sleep 0.4
+shot t2_{{THEME}}_6_popup_closed
+note PASS (judge on the crops): selected row and hovered row distinguishable from each other and from the background; hover on the button visible; popup text/background contrast readable; no leftover popup in shot 6
+release_mods

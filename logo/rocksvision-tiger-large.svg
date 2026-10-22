@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+<title id="title">RocksVision — Tiger Stone Eye</title>
+<desc id="desc">Original angular stone eye with a taut rising tiger brow and faceted amber iris. Transparent background.</desc>
+<g transform="translate(0 42)"><polygon points="42,260 98,211 133,239 111,272 76,282" fill="#354A52"/>
+<polygon points="42,260 98,211 88,249" fill="#667A7D"/>
+<polygon points="109,202 173,173 188,210 143,234" fill="#6D7978"/>
+<polygon points="109,202 173,173 149,200" fill="#A3AAA0"/>
+<polygon points="185,168 247,165 255,200 202,207" fill="#858B7C"/>
+<polygon points="185,168 247,165 219,183" fill="#BBC0A4"/>
+<polygon points="259,165 323,151 339,183 301,202 269,200" fill="#6E7C71"/>
+<polygon points="259,165 323,151 300,178" fill="#9CA88B"/>
+<polygon points="335,148 394,119 388,164 351,188" fill="#596C64"/>
+<polygon points="335,148 394,119 369,153" fill="#8FA18D"/>
+<polygon points="401,119 471,95 441,157 402,181 396,163" fill="#3F5753"/>
+<polygon points="401,119 471,95 432,137" fill="#768E7E"/>
+<polygon points="449,168 418,221 376,257 350,245 373,211 406,188" fill="#334F4C"/>
+<polygon points="449,168 418,221 406,188" fill="#667E6D"/>
+<polygon points="365,267 326,299 292,310 280,286 315,267 342,254" fill="#3F5B53"/>
+<polygon points="365,267 326,299 315,267" fill="#6D8370"/>
+<polygon points="278,315 225,324 197,305 215,282 258,288" fill="#667264"/>
+<polygon points="278,315 225,324 242,298" fill="#92A080"/>
+<polygon points="183,301 135,288 121,273 148,249 183,270 202,282" fill="#475E55"/>
+<polygon points="183,301 135,288 148,249" fill="#7E8F75"/>
+<path d="m214 213 44-5 40-6 24 22-7 34-31 27-45 5-36-18-13-27Z" fill="#D58A25"/>
+<path d="m214 213 44-5 40-6-22 29-43 3Z" fill="#F5C45E"/>
+<path d="m298 202 24 22-7 34-29-8-10-19Z" fill="#E5A735"/>
+<path d="m315 258-31 27-45 5 8-25 39-15Z" fill="#A75A1E"/>
+<path d="m239 290-36-18-13-27 24-32 19 21-5 24 19 7Z" fill="#E8A742"/>
+<path d="m249 216 21-1 15 23-7 27-22 10-19-18-2-23Z" fill="#142A29"/>
+<path d="m249 216 21-1-19 19-16 0Z" fill="#2D4840"/>
+<path d="m219 220 14-4 8 8-15 6Z" fill="#FFF1B3"/></g>
+</svg>

@@ -1,0 +1,31 @@
+# One theme per run: --set THEME=Matrix  (names as in the View menu).
+# Start from an EMPTY state (app freshly launched, no file open).
+front
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+click {{THEME_ITEM_X}} {{THEME_ITEM_Y}}
+sleep 0.6
+shot th_{{THEME}}_1_empty
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+move {{ROW_OTHER_X}} {{ROW_OTHER_Y}}
+sleep 0.4
+shot th_{{THEME}}_2_selected_row
+hover {{ROW_HOVER_X}} {{ROW_HOVER_Y}}
+sleep 0.4
+shot th_{{THEME}}_3_hover_unselected_row
+hover {{TOOLBAR_BTN_X}} {{TOOLBAR_BTN_Y}}
+sleep 0.5
+shot th_{{THEME}}_4_hover_toolbar_button
+click {{VIEW_MENU_X}} {{VIEW_MENU_Y}}
+sleep 0.4
+shot th_{{THEME}}_5_view_menu_open
+key esc
+# derived hex label (selection with a byte span in the hex pane)
+click {{HEX_LABEL_ROW_X}} {{HEX_LABEL_ROW_Y}}
+hover {{HEX_LABEL_X}} {{HEX_LABEL_Y}}
+sleep 0.4
+shot th_{{THEME}}_6_hex_derived_label

@@ -1,0 +1,60 @@
+# Clipboard checks. Run: SHOT_DIR=<dir> gui-drive.py --set PATH_X=.. script clipboard.txt
+# Placeholders need a prior screenshot (path field, row 1, context-menu items). Built-ins: {{FIXTURES}}.
+# Menu labels: "Copy value", "Copy hex (max 64 KiB)", "Copy offset", "Copy row (TSV)".
+front
+# --- open CURRENT, select row 1 ("contents")
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/CURRENT
+key return
+sleep 2
+click {{ROW1_X}} {{ROW1_Y}}
+shot clip_01_current_row1
+# --- Copy value
+clipclear
+rclick {{ROW1_X}} {{ROW1_Y}}
+shot clip_02_ctxmenu
+click {{CM_VALUE_X}} {{CM_VALUE_Y}}
+sleep 1
+clip
+clipsave copy_value
+shot clip_03_after_value
+# --- Copy hex
+clipclear
+rclick {{ROW1_X}} {{ROW1_Y}}
+click {{CM_HEX_X}} {{CM_HEX_Y}}
+sleep 1
+clipsave copy_hex
+# --- Copy offset
+clipclear
+rclick {{ROW1_X}} {{ROW1_Y}}
+click {{CM_OFFSET_X}} {{CM_OFFSET_Y}}
+sleep 1
+clipsave copy_offset
+# --- Copy row (TSV)
+clipclear
+rclick {{ROW1_X}} {{ROW1_Y}}
+click {{CM_ROW_X}} {{CM_ROW_Y}}
+sleep 1
+clipsave copy_row
+shot clip_04_after_row
+# --- sst-zstd: first entry of block 0 (rows depend on the app tree; re-shoot to locate)
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/sst-zstd/data.sst
+key return
+sleep 2
+shot clip_05_sst_open
+click {{SST_ENTRY_X}} {{SST_ENTRY_Y}}
+shot clip_06_sst_entry
+clipclear
+rclick {{SST_ENTRY_X}} {{SST_ENTRY_Y}}
+click {{CM_VALUE_X}} {{CM_VALUE_Y}}
+sleep 1
+clipsave sst_copy_value
+clipclear
+rclick {{SST_ENTRY_X}} {{SST_ENTRY_Y}}
+click {{CM_HEX_X}} {{CM_HEX_Y}}
+sleep 1
+clipsave sst_copy_hex
+shot clip_07_sst_after

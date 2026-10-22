@@ -1,0 +1,52 @@
+# Slow-job behaviour with the harness build (every backend call sleeps 4 s: resolve, scan, page reads).
+# Launch (not by this driver; the app must be started by the coordinator and be frontmost):
+#   cargo build --release --features harness    # CARGO_TARGET_DIR=target/tester
+#   ROCKSVISION_HARNESS_DELAY_MS=4000 target/tester/release/rocksvision tests/fixtures/db-levels &
+# Run: SHOT_DIR=<dir> python3 -I tests/tools/gui-drive.py --set CANCEL_X=.. script tests/tools/scripts/harness_slowjob.txt
+# Placeholders from screenshots: status-bar Cancel button, hex-panel "Retry"/"Load bytes" button, two file-list rows
+# (FILE_A = 000014.sst, FILE_B = 000026.sst), one records-table row in file B.
+# Expected texts (src/app/state.rs busy_label, ui/panels/status.rs, nav.rs, hex.rs):
+#   status bar right: spinner + "Opening…" (resolve) -> "Scanning folder…" -> "Reading bytes…" / "Decoding…", with a Cancel button
+#   nav panel: "Scanning folder…" (spinner); after Cancel: "Folder scan cancelled"; scan done: "N WAL · N SST · N MANIFEST · CURRENT yes"
+#   hex panel: "Loading bytes…" (spinner) -> after Cancel "⏹ Loading cancelled" + button "Load bytes"; read error "✖ Could not read bytes: ..." + "Retry"
+#   status bar left after open: "<label> · <file name>" then "selection: ...", copy note, "Rows i / n (current table)" when searching
+front
+sleep 0.5
+shot slow_00_start_resolving
+# 0-4 s: path is being resolved ("Opening…"), 4-8 s: folder scan ("Scanning folder…" in nav panel and status bar)
+sleep 5
+shot slow_01_scanning_progress_and_cancel_visible
+# Cancel the scan: status bar Cancel (Esc is equivalent)
+click {{CANCEL_X}} {{CANCEL_Y}}
+sleep 0.5
+shot slow_02_after_cancel
+# Folder is shown with "Folder scan cancelled"; no file is open. Open file A from the file list (page read delayed 4 s)
+sleep 6
+click {{FILE_A_X}} {{FILE_A_Y}}
+sleep 1
+shot slow_03_file_a_loading_bytes
+# While A's bytes are loading: Cancel -> hex panel shows "⏹ Loading cancelled" / "Load bytes"
+click {{CANCEL_X}} {{CANCEL_Y}}
+sleep 0.5
+shot slow_04_bytes_cancelled
+# Load bytes (retry) -> "Loading bytes…" again, then bytes appear after ~4 s
+click {{LOAD_BYTES_X}} {{LOAD_BYTES_Y}}
+sleep 1
+shot slow_05_retry_loading
+sleep 5
+shot slow_06_bytes_loaded_file_a
+# Late-completion test: open B, then A, then B again within the 4 s delay (A's and the first B's page reads stay
+# in flight), let B load, select a row in B, then wait for the older delayed answers to land.
+click {{FILE_B_X}} {{FILE_B_Y}}
+sleep 1
+click {{FILE_A_X}} {{FILE_A_Y}}
+sleep 0.3
+click {{FILE_B_X}} {{FILE_B_Y}}
+sleep 6
+click {{ROW_B_X}} {{ROW_B_Y}}
+shot slow_07_file_b_selected_before_late_answers
+# A's delayed answers (and earlier B's) have long arrived by now; nothing may change the current file/selection.
+sleep 9
+shot slow_08_after_late_completions
+# PASS criteria (compare 07 vs 08 and the status bar): same file name "000026.sst" after the dot, same "selection: ..." text,
+# same selected row highlight, hex panel shows B's bytes; no "stale"/"error" text, no flicker back to A.

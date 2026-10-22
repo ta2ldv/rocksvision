@@ -1,0 +1,52 @@
+[package]
+name = "rocksvision"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only inspector for RocksDB 10.4.2 WAL, SST, CURRENT and MANIFEST files"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "rocksvision"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rocksvision"
+path = "src/main.rs"
+
+[features]
+# Test harness build: Worker::spawn wraps file I/O in a DelayBackend when
+# ROCKSVISION_HARNESS_DELAY_MS is set. Release builds (no feature) never sleep.
+harness = []
+
+[dependencies]
+eframe = { version = "0.36", features = ["persistence"] }
+egui_extras = "0.36"
+rfd = { version = "0.17", default-features = false }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
+flate2 = "1.1"
+bzip2 = "0.4"
+zstd = { version = "0.13", default-features = false }
+snap = "1"
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64", "xxh3"] }
+
+# Linux file dialogs: rfd's xdg-desktop-portal backend needs `pollster` (feature xdg-portal) and
+# the wayland feature for parenting; without them rfd does not compile on Linux (rfd 0.17.2
+# Cargo.toml features `xdg-portal = ["pollster"]`, `wayland = [wayland-backend, ...]`). Portal
+# talks D-Bus via a dlopen'ed libdbus-1; zenity is rfd's fallback. No GTK.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }
+
+# Native menu bar (src/ui/platform/macos.rs): the same objc2 crate versions winit/rfd already
+# pull in (Cargo.lock), only extra AppKit features are enabled. No new crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSMenu", "NSMenuItem", "NSEvent", "NSCell", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "unwind"

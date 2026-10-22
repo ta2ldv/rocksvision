@@ -1,0 +1,15 @@
+[package]
+name = "fixture-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone crate: deliberately NOT a workspace member.
+[workspace]
+
+[dependencies]
+rocksdb = { version = "=0.24.0", default-features = false, features = ["snappy", "lz4", "zstd", "zlib", "bzip2", "multi-threaded-cf"] }
+# Same crate rocksdb resolves to; used directly only for C-API calls the Rust wrapper does not expose
+# (SingleDelete, SstFileWriter::delete_range).
+librocksdb-sys = { version = "=0.17.3", default-features = false }
+sha2 = "0.10"

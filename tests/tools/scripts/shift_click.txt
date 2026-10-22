@@ -1,0 +1,19 @@
+# Shift-click range/extend selection. Placeholders: three rows R1<R2<R3 of a loaded file, plus hex bytes.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+shot shift_01_open
+click {{R1_X}} {{R1_Y}}
+shot shift_02_row1
+shift_click {{R3_X}} {{R3_Y}}
+sleep 0.5
+shot shift_03_after_shift_click
+# modifier must not stick: plain click afterwards must select only R2
+click {{R2_X}} {{R2_Y}}
+shot shift_04_plain_click_after
+shift_click {{R3_X}} {{R3_Y}}
+shot shift_05_second_shift_click
+release_mods
