@@ -1,0 +1,24 @@
+# Task 0005 acceptance: diagnosis of a WAL whose LAST fragment is missing. Fixture corrupt/wal-missing-last.log (98304 B = 3 blocks,
+# cut exactly at 0x18000; FIRST @0x5eec + 2 MIDDLE, no LAST). Expected: the Logical records node and the last logical record (WriteBatch @0x5eec,
+# 73983 B in 3 fragments, value 102400 declared / 73958 available) state that the record is INCOMPLETE because the closing LAST fragment is missing
+# (file ends at a fragment boundary), distinct from a physically truncated fragment (see corrupt/wal-cut-in-middle.log). All physical blocks are Present.
+# Placeholders: PATH_X/Y, LOGICAL_NODE_X/Y (tree node 'Logical records'), LASTREC_X/Y (last row of the logical-records table, '0x5eec' / big-100k),
+# EXPL_X/Y/W/H (Explanation panel rect), TABLE_X/Y/W/H (table rect), STATUS_X/Y/W/H (status bar rect).
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/corrupt/wal-missing-last.log
+key return
+sleep 2.5
+click {{LOGICAL_NODE_X}} {{LOGICAL_NODE_Y}}
+sleep 1
+shot dml_01_logical_node
+crop dml_01_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{LASTREC_X}} {{LASTREC_Y}}
+sleep 1
+shot dml_02_last_record
+crop dml_02_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+crop dml_02_table {{TABLE_X}} {{TABLE_Y}} {{TABLE_W}} {{TABLE_H}}
+crop dml_02_status {{STATUS_X}} {{STATUS_Y}} {{STATUS_W}} {{STATUS_H}}
+note PASS: dml_01/02 Explanation names a missing LAST fragment (logical record incomplete) without claiming physical corruption of the 3 present fragments; no false 'ok' for the record; action.log lines match each click with front=RocksVision
+release_mods

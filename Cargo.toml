@@ -1,6 +1,6 @@
 [package]
 name = "rocksvision"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Read-only inspector for RocksDB 10.4.2 WAL, SST, CURRENT and MANIFEST files"
 license = "Apache-2.0"
@@ -43,6 +43,12 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "w
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSMenu", "NSMenuItem", "NSEvent", "NSCell", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
+# Windows GUI subsystem (src/main.rs): AttachConsole(ATTACH_PARENT_PROCESS) so --dump/--help/errors
+# still print from a terminal. Same windows-sys version already locked (winit, etc.); only the
+# Console feature is enabled (windows-sys 0.61.2 Cargo.toml: Win32_System_Console). No new crates.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
 
 [profile.release]
 opt-level = 3

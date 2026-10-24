@@ -65,6 +65,12 @@ impl AppState {
         AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new() }
     }
 
+    /// Test helper: a state with an idle worker, for UI tests (panels never name `app::jobs`).
+    #[cfg(test)]
+    pub fn idle_for_tests() -> Self {
+        AppState::new(Worker::spawn(std::sync::Arc::new(|| {})))
+    }
+
     // ---------------- read-only component views (for panels) ----------------
 
     pub fn session(&self) -> &DocumentSession {

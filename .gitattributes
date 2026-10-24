@@ -1,0 +1,20 @@
+# Line endings: sources, docs and scripts are text (normalized to LF in the repository).
+# RocksDB data, fixtures and images are binary byte-for-byte inputs: never convert them
+# (core.autocrlf on Windows would otherwise change fixture bytes and hashes).
+* text=auto
+*.sh text eol=lf
+*.ps1 text eol=crlf
+
+tests/fixtures/** -text
+examples/** -text
+examples/**/*.md text
+logo/** -text
+screenshots/** -text
+*.sst -text
+*.log -text
+MANIFEST-* -text
+CURRENT -text
+OPTIONS-* -text
+IDENTITY -text
+*.png -text
+*.icns -text

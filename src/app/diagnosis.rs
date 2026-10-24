@@ -4,6 +4,7 @@
 //! statements and never appear under Diagnosis. Wording states the observed fact only; it never
 //! names a physical cause.
 
+use crate::format::log::is_read_error;
 use crate::model::{CheckKind, DecodedValue, Diagnostic, Space, Span, Status, Trust, View};
 
 /// Text shown when the parser recorded no value for a line.
@@ -142,6 +143,8 @@ fn at(s: &Span) -> String {
 pub fn trust_text(d: &Diagnostic) -> String {
     match (d.trusted, d.check, d.span) {
         (Trust::Untrusted, c, _) if is_checksum(c) => "Not trustworthy: checksum failed".into(),
+        // A record the reader discards (fragmented record left open at end of file).
+        (Trust::Untrusted, CheckKind::Truncation, _) => "Not trustworthy: decoded from an incomplete record; RocksDB does not apply it".into(),
         (_, CheckKind::Truncation, Some(s)) => format!("Decoded up to {}; the rest is missing", at(&s)),
         (_, CheckKind::Truncation, None) => "Decoded up to the end of the available bytes; the rest is missing".into(),
         (Trust::Untrusted, c, _) => format!("Not trustworthy: {} failed", check_label(c).to_lowercase()),
@@ -190,7 +193,8 @@ pub fn statement_diag<'a>(status: Status, candidates: impl IntoIterator<Item = &
         Status::Limited => CheckKind::Limit,
         _ => return None,
     };
-    candidates.into_iter().find(|d| d.check == want)
+    // A read error leaves the element Unknown (nothing is guessed about unread bytes).
+    candidates.into_iter().find(|d| d.check == want || (status == Status::Unknown && is_read_error(d)))
 }
 
 /// How an element with this status (and optional diagnostic) is explained; None for good statuses.
@@ -248,9 +252,9 @@ pub fn node_failures(view: &View, node_status: Option<Status>, node_diag: Option
     let extra = view.diagnostics.iter().chain(node_diag);
     for d in extra {
         if !out.iter().any(|f| f.diag.as_ref() == Some(d)) {
-            // A diagnostic of a check that does not mean corruption (limit, unsupported) is
+            // A diagnostic that does not mean corruption (limit, unsupported, read error) is
             // not a failure of the node.
-            if matches!(d.check, CheckKind::Limit | CheckKind::Unsupported) {
+            if matches!(d.check, CheckKind::Limit | CheckKind::Unsupported) || is_read_error(d) {
                 continue;
             }
             // A truncation diagnostic is a Truncated failure even under a node without a status.
@@ -390,6 +394,84 @@ mod tests {
         let mut i = crate::inspect::open(&fx("tests/fixtures/wal-basic/000004.log")).unwrap();
         assert!(i.children(&NodeKind::Root, &|| false).iter().all(|c| c.contains.is_none()));
         assert_eq!(failure_counts(&node_failures(&i.view(&NodeKind::Root, &|| false), None, None)), None);
+    }
+
+    /// 0009 item 4: a fragmented WAL record left open by EOF (complete FIRST + 2 MIDDLE, no
+    /// LAST) is marked in the tree (Physical blocks, Logical records, every block / fragment of
+    /// the record, the record node), summarised at the root ("1 truncated") and diagnosed:
+    /// Truncation over start..EOF, expected a LAST fragment, observed EOF, Untrusted, the
+    /// reader's documented recovery. A cut inside a MIDDLE names that fragment. The valid
+    /// fragmented control has no marker and no failure.
+    #[test]
+    fn wal_record_without_last_is_diagnosed() {
+        use crate::format::log::{open_tail, RECOVER_OPEN_AT_EOF};
+        let mut i = crate::inspect::open(&fx("tests/fixtures/corrupt/wal-missing-last.log")).unwrap();
+        let root = i.children(&NodeKind::Root, &|| false);
+        assert!(root.iter().take(2).all(|c| c.contains == Some(Status::Truncated) && c.status == Status::Present), "{root:?}");
+        let blocks = i.children(&root[0].kind, &|| false);
+        assert!(blocks.iter().all(|b| b.contains == Some(Status::Truncated)), "blocks 0..2 hold the record: {blocks:?}");
+        let b0 = i.children(&NodeKind::LogBlock(0), &|| false);
+        let marked: Vec<_> = b0.iter().filter(|c| c.contains.is_some()).map(|c| c.kind.clone()).collect();
+        assert_eq!(marked, vec![NodeKind::LogFragment(0x5eec)], "only the FIRST of the open record in block 0");
+        assert!(i.children(&NodeKind::LogBlock(2), &|| false).iter().all(|c| c.contains == Some(Status::Truncated)));
+        // Root summary and Diagnosis.
+        let v = i.view(&NodeKind::Root, &|| false);
+        let fails = node_failures(&v, None, None);
+        assert_eq!(failure_counts(&fails), Some((Status::Truncated, "1 truncated".into())), "{fails:?}");
+        let d = fails[0].diag.clone().unwrap();
+        assert_eq!((d.check, d.trusted, d.recovery), (CheckKind::Truncation, Trust::Untrusted, RECOVER_OPEN_AT_EOF));
+        assert_eq!(d.span, Some(Span::file(0x5eec, 0x18000 - 0x5eec)));
+        let g = diagnosis(Status::Truncated, Some(&d));
+        assert_eq!(label(&g, "Expected").text, "LAST fragment");
+        assert_eq!(label(&g, "Observed").text, "end of file at 0x18000");
+        assert!(label(&g, "Finding").text.contains("no LAST fragment before end of file (FIRST @0x5eec + 2 MIDDLE; 73983 payload bytes collected)"), "{g:?}");
+        assert!(label(&g, "Decoded content").text.starts_with("Not trustworthy: decoded from an incomplete record"));
+        assert!(label(&g, "Reader").text.contains("kPointInTimeRecovery (default)"));
+        for l in &g.lines {
+            for w in ["disk", "crash", "dying", "hardware"] {
+                assert!(!l.text.contains(w), "{l:?}");
+            }
+        }
+        // The record node and its view say which fragment is missing; same diagnostic.
+        assert!(i.children(&root[1].kind, &|| false).iter().filter(|c| matches!(c.kind, NodeKind::LogRecord(_))).all(|c| c.status == Status::Present), "earlier records stay ✔");
+        let recs = i.children(&NodeKind::LogRecords { start: 0x3f48, page: 1 }, &|| false);
+        let r = recs.iter().find(|c| c.kind == NodeKind::LogRecord(0x5eec)).expect("open record on the second tree page");
+        assert_eq!((r.status, r.label.ends_with("3 frag, no LAST)")), (Status::Truncated, true), "{}", r.label);
+        assert_eq!(r.diag.as_deref(), Some(&d));
+        assert!(recs.iter().filter(|c| c.kind != r.kind).all(|c| c.status == Status::Present), "earlier records stay ✔");
+        let rv = i.view(&NodeKind::LogRecord(0x5eec), &|| false);
+        let last = rv.rows.iter().find(|row| row.field.name == "LAST fragment").unwrap();
+        assert_eq!((last.field.status, last.field.value.as_str()), (Status::Truncated, "missing: end of file at 0x18000 after FIRST + 2 MIDDLE"));
+        // Bounded scan: one block back finds only the last MIDDLE, the start stays unknown.
+        let rr = crate::io::RangeReader::open(&fx("tests/fixtures/corrupt/wal-missing-last.log")).unwrap();
+        let t = open_tail(&rr, 1).unwrap().unwrap();
+        assert_eq!((t.start, t.from, t.middles), (None, 0x10000, 1));
+        assert!(t.diagnostic().note.contains("FIRST before the scanned blocks"));
+        // Cut inside the 2nd MIDDLE: named in the record view.
+        let mut i = crate::inspect::open(&fx("tests/fixtures/corrupt/wal-cut-in-middle.log")).unwrap();
+        let rv = i.view(&NodeKind::LogRecord(0x5eec), &|| false);
+        let last = rv.rows.iter().find(|row| row.field.name == "LAST fragment").unwrap();
+        assert_eq!(last.field.value, "missing: MIDDLE at 0x10000 cut off by end of file");
+        let d = last.field.diag.as_deref().unwrap();
+        assert_eq!((d.trusted, d.expected.clone(), d.observed.clone()), (Trust::Untrusted, Some(DecodedValue::U64(32761)), Some(DecodedValue::U64(16384))));
+        assert!(d.note.contains("MIDDLE fragment at 0x10000 is cut off by the end of file (16384 of 32761 payload bytes): the file ends inside this fragment"), "{}", d.note);
+        // Root, record and tree markers describe the same thing: the record from 0x5eec to EOF.
+        assert_eq!((d.check, d.recovery, d.span), (CheckKind::Truncation, RECOVER_OPEN_AT_EOF, Some(Span::file(0x5eec, 0x14007 - 0x5eec))));
+        let fails = node_failures(&i.view(&NodeKind::Root, &|| false), None, None);
+        assert_eq!(failure_counts(&fails), Some((Status::Truncated, "1 truncated".into())), "{fails:?}");
+        assert_eq!(fails[0].diag.as_ref(), Some(d), "root Diagnosis = record diagnostic");
+        let root = i.children(&NodeKind::Root, &|| false);
+        assert!(i.children(&root[0].kind, &|| false).iter().all(|b| b.contains == Some(Status::Truncated)), "blocks 0..2 hold the record");
+        let b0 = i.children(&NodeKind::LogBlock(0), &|| false);
+        assert_eq!(b0.iter().filter(|c| c.contains.is_some()).map(|c| c.kind.clone()).collect::<Vec<_>>(), vec![NodeKind::LogFragment(0x5eec)]);
+        let b2 = i.children(&NodeKind::LogBlock(2), &|| false);
+        assert_eq!((b2.len(), b2[0].status), (1, Status::Truncated), "the cut fragment keeps its physical status: {b2:?}");
+        // Valid fragmented control.
+        let mut i = crate::inspect::open(&fx("tests/fixtures/wal-fragmented/000004.log")).unwrap();
+        let root = i.children(&NodeKind::Root, &|| false);
+        assert!(root.iter().all(|c| c.contains.is_none()));
+        assert_eq!(failure_counts(&node_failures(&i.view(&NodeKind::Root, &|| false), None, None)), None);
+        assert!(i.children(&root[1].kind, &|| false).iter().all(|c| c.status == Status::Present && !c.label.contains("no LAST")));
     }
 
     /// Missing values are stated, never silently left out; Unsupported/Unknown are not Diagnosis.

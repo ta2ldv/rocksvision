@@ -3,7 +3,7 @@
 //! item maps to one `app::Action`; the same action is used by the toolbar, the panel chevrons
 //! and the keyboard. `shortcut_table()` is the single source of shortcut text.
 
-use super::theme::THEMES;
+use super::theme::{Tokens, THEMES};
 use crate::app::{Action, AppState, Panel};
 use eframe::egui;
 
@@ -290,7 +290,7 @@ pub fn tip_in(text: &str, c: MenuCmd, l: KeyLabels) -> String {
 
 /// In-window menu for platforms without a native menu bar: the same tree, minus the
 /// application-menu items that only exist natively. Returns the chosen command.
-pub fn show_fallback(ui: &mut egui::Ui, st: &AppState, nodes: &[MenuNode]) -> Option<MenuCmd> {
+pub fn show_fallback(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, nodes: &[MenuNode]) -> Option<MenuCmd> {
     let mut chosen = None;
     for n in nodes {
         match n {
@@ -305,6 +305,7 @@ pub fn show_fallback(ui: &mut egui::Ui, st: &AppState, nodes: &[MenuNode]) -> Op
                     b = b.shortcut_text(s.label());
                 }
                 let mut r = ui.add_enabled(enabled, b);
+                tok.menu_item_hover(ui, &r);
                 if let Some(t) = tip {
                     r = r.on_hover_text(self::tip(t, *cmd));
                 }
@@ -314,11 +315,12 @@ pub fn show_fallback(ui: &mut egui::Ui, st: &AppState, nodes: &[MenuNode]) -> Op
                 }
             }
             MenuNode::Submenu { title, items: sub } => {
-                ui.menu_button(*title, |ui| {
-                    if let Some(c) = show_fallback(ui, st, sub) {
+                let r = ui.menu_button(*title, |ui| {
+                    if let Some(c) = show_fallback(ui, st, tok, sub) {
                         chosen = Some(c);
                     }
                 });
+                tok.menu_item_hover(ui, &r.response);
             }
             MenuNode::Separator => {
                 ui.separator();

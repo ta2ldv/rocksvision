@@ -1,0 +1,57 @@
+# Task 0005 acceptance: hex paging at a narrow window. File: wal-fragmented/000004.log (228608 B > 64 KiB page => 4 pages of 0x10000).
+# Window 900x900, BOTH panels (hex + ASCII/text) visible. Must show first / middle / last page with the page controls readable:
+# "page ▶" on page 1 (prev disabled), both "◀ page" and "page ▶" in the middle, "◀ page" on the last page (next disabled); label 'page N/4 · 0x..'.
+# Then zoom to the layout ceiling (zoom-in until the + control stops changing the zoom text): the page group may switch to compact "◀ / ▶" but
+# must never be clipped or overlap; no horizontal overflow of the hex panel.
+# Placeholders (take from one screenshot): PATH_X/Y, ROOT_X/Y (tree node 'WAL file' so the whole file is in the byte space),
+# PAGE_PREV_X/Y, PAGE_NEXT_X/Y (the page buttons), HEXBAR_X/Y/W/H (rect of the hex toolbar/page group), HEX_X/Y/W/H (hex panel rect),
+# ZOOM_IN_X/Y (zoom + control), ZOOM_LABEL_X/Y/W/H (zoom text rect).
+front
+winsize 900 900
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/wal-fragmented/000004.log
+key return
+sleep 2.5
+click {{ROOT_X}} {{ROOT_Y}}
+sleep 1
+winfo
+note STEP 1: first page expected 'page 1/4', prev disabled
+shot pg_01_first
+crop pg_01_first_bar {{HEXBAR_X}} {{HEXBAR_Y}} {{HEXBAR_W}} {{HEXBAR_H}}
+note STEP 2: middle page (2 clicks of next) expected 'page 3/4' or 'page 2/4', both buttons enabled
+click {{PAGE_NEXT_X}} {{PAGE_NEXT_Y}}
+sleep 0.8
+shot pg_02_second
+click {{PAGE_NEXT_X}} {{PAGE_NEXT_Y}}
+sleep 0.8
+shot pg_03_middle
+crop pg_03_middle_bar {{HEXBAR_X}} {{HEXBAR_Y}} {{HEXBAR_W}} {{HEXBAR_H}}
+note STEP 3: last page (extra clicks are harmless once next is disabled) expected 'page 4/4', next disabled
+click {{PAGE_NEXT_X}} {{PAGE_NEXT_Y}}
+sleep 0.8
+click {{PAGE_NEXT_X}} {{PAGE_NEXT_Y}}
+sleep 0.8
+shot pg_04_last
+crop pg_04_last_bar {{HEXBAR_X}} {{HEXBAR_Y}} {{HEXBAR_W}} {{HEXBAR_H}}
+note STEP 4: back one page with prev
+click {{PAGE_PREV_X}} {{PAGE_PREV_Y}}
+sleep 0.8
+shot pg_05_back_one
+note STEP 5: zoom to the ceiling at 900 wide (7 clicks: more than the steps needed; the label must stop growing)
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+sleep 1
+shot pg_06_zoom_ceiling
+crop pg_06_zoom_label {{ZOOM_LABEL_X}} {{ZOOM_LABEL_Y}} {{ZOOM_LABEL_W}} {{ZOOM_LABEL_H}}
+crop pg_06_hex_bar {{HEXBAR_X}} {{HEXBAR_Y}} {{HEXBAR_W}} {{HEXBAR_H}}
+click {{PAGE_NEXT_X}} {{PAGE_NEXT_Y}}
+sleep 0.8
+shot pg_07_zoom_ceiling_next
+note PASS: pg_01 first page has 'page ▶' (prev disabled); pg_03 shows both buttons; pg_04 has '◀ page' (next disabled); at the ceiling pg_06/pg_07 page group not clipped, hex and text panels both visible, no horizontal overflow; action.log shows each click with front=RocksVision
+release_mods

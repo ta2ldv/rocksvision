@@ -1,6 +1,6 @@
 #!/bin/sh
 # One command: builds dist/macos-x64/RocksVision.app (x86_64-apple-darwin, macOS 11+),
-# plus BUILD-INFO.txt, THIRD-PARTY-LICENSES.md, SHA256SUMS and
+# plus BUILD-INFO.txt, LICENSE, THIRD-PARTY-LICENSES.md, SHA256SUMS and
 # dist/rocksvision-<version>-macos-x64.zip (+ .sha256). See docs/BUILD.md.
 # On an Intel Mac this is a native build. On an Apple Silicon Mac it is a cross build: the
 # x86_64 standard library is added with rustup (`rustup target add x86_64-apple-darwin`); the

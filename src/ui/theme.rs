@@ -592,6 +592,21 @@ impl Tokens {
         }
     }
 
+    /// Hover outline of a popup / menu item (Copy… popup, in-window fallback menu, context
+    /// menus): the same `outline` stroke buttons get from `apply_theme`. Needed because egui's
+    /// menu style (`egui::containers::menu::menu_style`, egui 0.36) sets `hovered.bg_stroke` to
+    /// NONE inside popups. None for unhovered or disabled items.
+    pub fn menu_item_outline(&self, hovered: bool, enabled: bool) -> Option<Stroke> {
+        (hovered && enabled).then(|| Stroke::new(self.w.border_width, self.p.outline))
+    }
+
+    /// Paints `menu_item_outline` around a popup item's response (call right after adding it).
+    pub fn menu_item_hover(&self, ui: &egui::Ui, resp: &egui::Response) {
+        if let Some(s) = self.menu_item_outline(resp.hovered(), resp.enabled()) {
+            ui.painter().rect_stroke(resp.rect, self.w.rounding, s, egui::StrokeKind::Inside);
+        }
+    }
+
     /// Light top/left, dark bottom/right edge lines (Raised bevel only).
     pub fn bevel(&self, painter: &egui::Painter, rect: egui::Rect) {
         if self.w.bevel != Bevel::Raised {
@@ -879,6 +894,30 @@ mod tests {
     fn workbench_hover_is_visible() {
         let p = theme_by_id("amiga-workbench").palette;
         assert!(contrast(p.hover_bg, p.canvas) >= 1.5 && contrast(p.hover_bg, p.panel) >= 1.5);
+    }
+
+    /// 0009 item 3: egui's popup style drops the hovered stroke, so popup/menu items get the
+    /// `outline` token painted explicitly (Workbench: 2 pt orange 0xFFAA33 on `button_hover`),
+    /// in every theme, only when hovered and enabled, and visible on the popup fill.
+    #[test]
+    fn popup_items_get_the_outline_on_hover() {
+        let ctx = egui::Context::default();
+        let mut cache = Vec::new();
+        let _ = apply_theme(&ctx, theme_by_id("amiga-workbench"), &mut cache);
+        let mut style = (*ctx.global_style()).clone();
+        assert_ne!(style.visuals.widgets.hovered.bg_stroke, Stroke::NONE);
+        egui::containers::menu::menu_style(&mut style);
+        assert_eq!(style.visuals.widgets.hovered.bg_stroke, Stroke::NONE, "egui popups keep the hovered stroke now; helper may be redundant");
+        let wb = Tokens::from_def(theme_by_id("amiga-workbench"));
+        assert_eq!(wb.menu_item_outline(true, true), Some(Stroke::new(2.0, c(0xFFAA33))));
+        for t in THEMES {
+            let tok = Tokens::from_def(t);
+            assert_eq!(tok.menu_item_outline(true, true), Some(Stroke::new(t.widgets.border_width, t.palette.outline)), "{}", t.id);
+            assert!(tok.menu_item_outline(true, true).unwrap().width >= 1.0, "{}", t.id);
+            assert_eq!(tok.menu_item_outline(false, true), None);
+            assert_eq!(tok.menu_item_outline(true, false), None, "disabled items get no outline");
+            assert!(contrast(t.palette.outline, t.palette.button_hover) >= 3.0 && contrast(t.palette.outline, t.palette.menu) >= 3.0, "{}", t.id);
+        }
     }
 
     #[test]

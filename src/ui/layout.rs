@@ -40,6 +40,8 @@ pub struct LayoutDefaults {
     pub toolbar_reserved: f32,
     pub search_width: f32,
     pub goto_width: f32,
+    /// Minimum size of a glyph-only button (compact hex paging "◀" / "▶").
+    pub glyph_button: [f32; 2],
     pub progress_width: f32,
     /// Vertical padding added to the font height for table rows / headers.
     pub row_pad: f32,
@@ -82,6 +84,7 @@ pub const LAYOUT: &LayoutDefaults = &LayoutDefaults {
     toolbar_reserved: 900.0,
     search_width: 220.0,
     goto_width: 170.0,
+    glyph_button: [24.0, 20.0],
     progress_width: 160.0,
     row_pad: 8.0,
     header_pad: 10.0,
@@ -238,8 +241,13 @@ pub fn side_max(window_w: f32, center: f32, strip: f32, left: Option<(f32, f32)>
 
 // ------------------------------------------------------------------ wrapping groups
 
-/// Greedy row packing of atomic groups: index of the first group of every row.
+/// Safety margin of `pack_rows` (sub-point rounding of measured widths, frame strokes).
+pub const PACK_SLACK: f32 = 2.0;
+
+/// Greedy row packing of atomic groups: index of the first group of every row. A row keeps
+/// `PACK_SLACK` points free so rounding never pushes its last group past the edge.
 pub fn pack_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<usize> {
+    let avail = avail - PACK_SLACK;
     let mut starts = Vec::new();
     let mut x = f32::INFINITY;
     for (i, w) in widths.iter().enumerate() {
@@ -337,6 +345,10 @@ impl Measured {
         let lines = hex_header_lines(self.hex_groups, self.hex_gap, center_w - 2.0 * LAYOUT.center_margin[0]).iter().max().copied().unwrap_or(0) + 1;
         lines as f32 * self.hex_line_h + self.hex_ruler_h + LAYOUT.bytes_min_rows * self.hex_row_h + self.hex_pad_h
     }
+    /// Window width the widest toolbar group needs on a row of its own (frame margins + slack).
+    fn widest_toolbar_group(&self) -> f32 {
+        self.toolbar_groups.iter().copied().fold(0.0, f32::max) + 2.0 * LAYOUT.center_margin[0] + PACK_SLACK
+    }
     /// Height at window width `w` with the panels at their minimum (the center gets the rest).
     fn height_at(&self, w: f32, nav: bool, explain: bool) -> f32 {
         let center_w = (w - self.panels_w(nav, explain) + center_min(&self.hex)).max(center_min(&self.hex));
@@ -347,7 +359,7 @@ impl Measured {
     /// taken at width `need_w` (most toolbar rows / header lines), so a window that is at least
     /// `need_w` wide never needs more: the linear zoom ceiling built on it cannot clip.
     pub fn need(&self, nav: bool, explain: bool) -> (f32, f32) {
-        let widest = self.toolbar_groups.iter().copied().fold(0.0, f32::max) + 2.0 * LAYOUT.center_margin[0];
+        let widest = self.widest_toolbar_group();
         let w = self.panels_w(nav, explain).max(widest) + LAYOUT.layout_margin_w;
         (w, self.height_at(w, nav, explain))
     }
@@ -357,7 +369,7 @@ impl Measured {
     /// horizontal scrolling, and the toolbar + status + records minimum + bytes (header, ruler,
     /// three byte rows) fit the height.
     pub fn fits(&self, w: f32, h: f32, nav: bool, explain: bool) -> bool {
-        let widest = self.toolbar_groups.iter().copied().fold(0.0, f32::max) + 2.0 * LAYOUT.center_margin[0];
+        let widest = self.widest_toolbar_group();
         widest <= w && self.panels_w(nav, explain) + LAYOUT.layout_margin_w <= w && self.height_at(w, nav, explain) <= h
     }
 }

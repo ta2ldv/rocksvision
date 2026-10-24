@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # One command: builds dist/ubuntu-x64/rocksvision on Ubuntu 22.04 or 24.04 (x86_64), plus
-# BUILD-INFO.txt, README-runtime.txt, THIRD-PARTY-LICENSES.md, SHA256SUMS and
+# BUILD-INFO.txt, README-runtime.txt, LICENSE, THIRD-PARTY-LICENSES.md, SHA256SUMS and
 # dist/rocksvision-<version>-ubuntu-x64.tar.gz (+ .sha256). See docs/BUILD.md.
 # Usage: scripts/build-ubuntu-x64.sh   (from any directory; paths with spaces are fine)
 #
-# Build prerequisites are installed with apt (sudo asks for your password; without sudo the
-# script stops and lists the command). Rust comes from the pinned rustup-init (lib/common.sh).
+# Build prerequisites are installed with apt (passwordless `sudo -n` when available, e.g. CI;
+# otherwise sudo asks for your password on a terminal; without either the script stops and
+# lists the command). Rust comes from the pinned rustup-init (lib/common.sh).
 # Runtime libraries are NOT installed; missing ones are reported (README-runtime.txt).
 set -euo pipefail
 RV_SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
@@ -40,7 +41,11 @@ if [ -n "$need" ]; then
   if [ "$(id -u)" = 0 ]; then
     rv_log "installing build prerequisites: $need"
     apt-get update && apt-get install -y $need || rv_die "apt-get install failed"
-  elif command -v sudo >/dev/null 2>&1; then
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    # Passwordless sudo (CI runners, cached credentials): never prompts.
+    rv_log "installing build prerequisites with sudo -n: $need"
+    sudo -n apt-get update && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y $need || rv_die "sudo -n apt-get install failed"
+  elif command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
     rv_log "installing build prerequisites with sudo (may ask for your password): $need"
     sudo apt-get update && sudo apt-get install -y $need || rv_die "sudo apt-get install failed"
   else
@@ -48,10 +53,14 @@ if [ -n "$need" ]; then
   fi
 fi
 
-rv_ensure_rust x86_64-unknown-linux-gnu
-rv_build ""
+# Explicit --target: a configured build.target / CARGO_BUILD_TARGET cannot end up labelled
+# ubuntu-x64; the ELF header is checked as well.
+rv_ensure_rust x86_64-unknown-linux-gnu x86_64-unknown-linux-gnu
+rv_build x86_64-unknown-linux-gnu
+rv_check_elf_x86_64 "$RV_BIN"
 rv_stage_dist ubuntu-x64
 cp "$RV_BIN" "$RV_DIST/$RV_EXE"
+cp "$ROOT/LICENSE" "$RV_DIST/LICENSE"
 cp "$ROOT/THIRD-PARTY-LICENSES.md" "$RV_DIST/THIRD-PARTY-LICENSES.md"
 cat >"$RV_DIST/README-runtime.txt" <<EOF
 RocksVision $RV_VERSION for Ubuntu 22.04 / 24.04 x86_64 (GNU libc)

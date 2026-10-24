@@ -63,6 +63,9 @@ pub const LOG_BLOCKS_PER_GROUP: u64 = 256;
 pub const SST_TREE_CHILDREN: usize = 1000;
 pub const SST_DATA_PAGE: usize = 500;
 pub const RESTARTS_LISTED: usize = 10_000;
+/// Log blocks read backwards from the end of a WAL/MANIFEST to find the FIRST fragment of a
+/// record left open at end of file (missing LAST); beyond this the start is reported unknown.
+pub const OPEN_TAIL_BLOCKS: u64 = 64;
 
 // ---- application ----
 pub struct Limits {

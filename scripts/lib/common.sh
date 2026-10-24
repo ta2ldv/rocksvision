@@ -68,7 +68,7 @@ rv_cleanup() {
 # missing ones are listed together.
 rv_require_inputs() {
   miss=""
-  for f in Cargo.toml Cargo.lock rust-toolchain.toml THIRD-PARTY-LICENSES.md src/main.rs "$@"; do
+  for f in Cargo.toml Cargo.lock rust-toolchain.toml LICENSE THIRD-PARTY-LICENSES.md src/main.rs "$@"; do
     [ -f "$ROOT/$f" ] || miss="$miss
   $f"
   done
@@ -142,7 +142,8 @@ rv_ensure_rust() {
   fi
   if rv_have_rustup; then
     rv_log "toolchain $RV_RUST_PIN via rustup (installed once, reused afterwards)"
-    rustup toolchain install "$RV_RUST_PIN" --profile minimal >&2 || rv_die "rustup could not install toolchain $RV_RUST_PIN"
+    # --no-self-update: never replace rustup itself during a build (same as build-windows-x64.ps1).
+    rustup toolchain install "$RV_RUST_PIN" --profile minimal --no-self-update >&2 || rv_die "rustup could not install toolchain $RV_RUST_PIN"
     if [ -n "$target" ]; then
       rustup target add --toolchain "$RV_RUST_PIN" "$target" >&2 || rv_die "rustup could not add target $target"
     fi
@@ -161,6 +162,22 @@ rv_ensure_rust() {
       rv_die "the standard library for $target is not installed and this cargo/rustc ($(command -v rustc)) is not managed by rustup, so it cannot be added. Nothing was installed. Install rustup (e.g. 'brew install rustup' or https://rustup.rs) and re-run."
     fi
   fi
+  # Toolchain phase check BEFORE any build: the selected cargo must start and rustc must run on
+  # the expected host, so a later failure is never misreported as a cargo/lockfile problem.
+  cv=$(cd "$ROOT" && rv_cargo -V 2>&1) || rv_die "[toolchain] cargo of toolchain $RV_RUST_PIN did not start: $cv. cargo build was not run; Cargo.lock is not involved."
+  rhost=$(cd "$ROOT" && rv_rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+  [ "$rhost" = "$host" ] || rv_die "[toolchain] rustc host is '${rhost:-unknown}', expected $host. Nothing was built."
+  rv_log "toolchain ok: $cv; rustc host $rhost"
+}
+
+# Checks that <file> is a 64-bit little-endian x86-64 ELF executable (header bytes, no `file`
+# dependency): e_ident "\177ELF", EI_CLASS 2, EI_DATA 1, e_machine 0x3e at offset 18.
+rv_check_elf_x86_64() {
+  hdr=$(od -An -tx1 -N20 "$1" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')
+  case "$hdr" in
+    "7f 45 4c 46 02 01 "*" 3e 00") ;;
+    *) rv_die "$1 is not an x86-64 ELF executable (header: $hdr): refusing to label it" ;;
+  esac
 }
 
 # rv_build [<target triple>] — cargo build --release --locked; sets RV_BIN and RV_FRESH.
@@ -171,11 +188,23 @@ rv_ensure_rust() {
 # the cache is reused). Anything else is an error, never a stale success.
 rv_build() {
   target=${1:-}
-  if [ -n "$target" ]; then set -- --target "$target"; else set --; fi
+  if [ -n "$target" ]; then
+    set -- --target "$target"
+  else
+    # Native build without --target: a CARGO_BUILD_TARGET would silently build something else.
+    # (A build.target in a cargo config file is caught by the per-platform architecture check.)
+    [ -z "${CARGO_BUILD_TARGET:-}" ] || rv_die "[target] CARGO_BUILD_TARGET=$CARGO_BUILD_TARGET is set; this script builds for the host. Unset it and re-run. Nothing was built."
+    set --
+  fi
   rv_log "cargo build --release --locked $*"
   # rustup selects the toolchain from the working directory; run in a subshell inside ROOT.
   if ! (cd "$ROOT" && rv_cargo build --release --locked --message-format=json-render-diagnostics "$@") >"$RV_TMP/cargo.json"; then
-    rv_die "cargo build failed (see above). If cargo says the lock file needs to be updated, Cargo.lock is stale for Cargo.toml: this build uses --locked and never rewrites it."
+    # Phase split: ask cargo (offline, writes nothing) whether Cargo.lock satisfies Cargo.toml.
+    if (cd "$ROOT" && rv_cargo metadata --locked --offline --format-version 1 >/dev/null 2>"$RV_TMP/meta.err"); then :; fi
+    if grep -Eq 'lock file .*needs to be updated|--locked was passed' "$RV_TMP/meta.err"; then
+      rv_die "[lockfile] Cargo.lock does not match Cargo.toml and this build uses --locked (it never rewrites Cargo.lock). Update Cargo.lock in the source tree (cargo update -p <changed crate>), then re-run."
+    fi
+    rv_die "[cargo build] cargo build --release --locked failed (see the compiler output above). Cargo.lock matched Cargo.toml (or could not be checked offline); the toolchain check before the build passed."
   fi
   art=$(grep '"reason":"compiler-artifact"' "$RV_TMP/cargo.json" | grep '"kind":\["bin"\]' | grep -F "\"name\":\"$RV_EXE\"" | grep '"executable":"' | tail -n1 || true)
   [ -n "$art" ] || rv_die "cargo did not report the $RV_EXE executable (no bin compiler-artifact message)"

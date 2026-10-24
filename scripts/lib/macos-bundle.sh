@@ -60,6 +60,7 @@ rv_macos_bundle() {
   mkdir -p "$RV_APP/Contents/MacOS" "$RV_APP/Contents/Resources"
   cp "$bin" "$RV_APP/Contents/MacOS/$RV_EXE"
   iconutil -c icns "$iconset" -o "$RV_APP/Contents/Resources/AppIcon.icns"
+  cp "$ROOT/LICENSE" "$RV_APP/Contents/Resources/LICENSE"
   cp "$ROOT/THIRD-PARTY-LICENSES.md" "$RV_APP/Contents/Resources/THIRD-PARTY-LICENSES.md"
 
   cat >"$RV_APP/Contents/Info.plist" <<PLIST
@@ -105,6 +106,7 @@ rv_macos_build() {
   lipo -archs "$RV_BIN" 2>/dev/null | grep -qw "$arch" || rv_die "$RV_BIN is not a $triple binary ($(lipo -archs "$RV_BIN" 2>/dev/null || true))"
   rv_stage_dist "$platform"
   rv_macos_bundle "$RV_BIN" "$RV_DIST" 11.0
+  cp "$ROOT/LICENSE" "$RV_DIST/LICENSE"
   cp "$ROOT/THIRD-PARTY-LICENSES.md" "$RV_DIST/THIRD-PARTY-LICENSES.md"
   rv_build_info "$RV_DIST/BUILD-INFO.txt" "$platform" "$triple"
   rv_sha256sums "$RV_DIST"

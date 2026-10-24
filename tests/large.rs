@@ -59,23 +59,31 @@ fn large_wal_dump_is_bounded_and_search_works() {
     assert_eq!(len, BLOCKS * 32768);
     eprintln!("built {} MiB in {:?}", len >> 20, t0.elapsed());
 
-    // --- dump under /usr/bin/time -l ---
+    // --- dump (macOS: under /usr/bin/time -l for max RSS; other OSes: run directly, RSS NOT measured) ---
     let bin = env!("CARGO_BIN_EXE_rocksvision");
     let t = Instant::now();
+    #[cfg(target_os = "macos")]
     let out = Command::new("/usr/bin/time").arg("-l").arg(bin).args(["--dump"]).arg(&p).args(["--limit", "50"]).output().expect("spawn /usr/bin/time");
+    #[cfg(not(target_os = "macos"))]
+    let out = Command::new(bin).args(["--dump"]).arg(&p).args(["--limit", "50"]).output().expect("spawn rocksvision");
     let wall = t.elapsed();
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(out.status.success(), "dump failed: {err}");
-    let rss_bytes: u64 = err
-        .lines()
-        .find(|l| l.contains("maximum resident set size"))
-        .and_then(|l| l.split_whitespace().next())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| panic!("no RSS in time output: {err}"));
-    eprintln!("LARGE-DUMP wall={wall:?} maxrss={} MiB ({} B) stdout={} B", rss_bytes >> 20, rss_bytes, stdout.len());
+    #[cfg(target_os = "macos")]
+    {
+        let rss_bytes: u64 = err
+            .lines()
+            .find(|l| l.contains("maximum resident set size"))
+            .and_then(|l| l.split_whitespace().next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no RSS in time output: {err}"));
+        eprintln!("LARGE-DUMP wall={wall:?} maxrss={} MiB ({} B) stdout={} B", rss_bytes >> 20, rss_bytes, stdout.len());
+        assert!(rss_bytes < 200 * 1000 * 1000, "max RSS {rss_bytes} B >= 200 MB");
+    }
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("LARGE-DUMP wall={wall:?} stdout={} B (max RSS not measured on this OS)", stdout.len());
     assert!(wall < Duration::from_secs(60), "dump took {wall:?}");
-    assert!(rss_bytes < 200 * 1000 * 1000, "max RSS {rss_bytes} B >= 200 MB");
     assert!(stdout.contains("node limit 50 reached") || stdout.lines().count() > 20, "dump output unexpectedly short");
     assert!(stdout.contains("8192"), "block count not reported");
     // first records decode as Present and are not flagged

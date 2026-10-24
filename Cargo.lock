@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "rocksvision"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bzip2",
  "eframe",
@@ -2778,6 +2778,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "rfd",
  "snap",
+ "windows-sys 0.61.2",
  "xxhash-rust",
  "zstd",
 ]

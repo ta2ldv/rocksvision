@@ -246,14 +246,18 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                 let has_key = r.field.key_bytes.is_some();
                 resp.context_menu(|ui| {
                     for (k, label, enabled) in [(CopyKind::Value, "Copy value", true), (CopyKind::Key, "Copy key", has_key), (CopyKind::Hex, "Copy hex (max 64 KiB)", has_span), (CopyKind::Offset, "Copy offset", has_span), (CopyKind::RowTsv, "Copy row (TSV)", true)] {
-                        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        let item = ui.add_enabled(enabled, egui::Button::new(label));
+                        tok.menu_item_hover(ui, &item);
+                        if item.clicked() {
                             copy_act = Some((i, k));
                             ui.close();
                         }
                     }
                     if r.field.link.is_some() || r.field.open_path.is_some() {
                         ui.separator();
-                        if ui.button("Follow link ›").clicked() {
+                        let item = ui.button("Follow link ›");
+                        tok.menu_item_hover(ui, &item);
+                        if item.clicked() {
                             dbl = Some(i);
                             ui.close();
                         }

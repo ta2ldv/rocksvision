@@ -4,7 +4,7 @@ One screenshot per theme, captured from the final build of handoff 0007 (bundle 
 | File | Theme (View › Theme) |
 |---|---|
 | autistic.png | Autistic (default) |
-| matrix.png | Matrix |
+| matrix.png | Matrix (regenerated 2026-10-24 from v0.1.1 build e13410d7… after the toolbar fix; same scene) |
 | amiga-workbench.png | Amiga Workbench |
 | amiga-tool-style.png | Amiga Tool Style |
 | xcopy.png | XCopy |

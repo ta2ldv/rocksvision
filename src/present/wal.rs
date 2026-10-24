@@ -5,7 +5,7 @@ use super::common::{error_view, explained, of_fields, st_cell};
 use crate::format::codec::compression_name;
 use crate::format::log::{self, FragRole, Logical, Phys, PhysKind, BLOCK_SIZE};
 use crate::model::{DecodedValue as DV, FieldKind as K};
-use crate::limits::{LIST_KEEP_COMPRESSED, LIST_KEEP_MANIFEST, LIST_KEEP_WAL, LOG_BLOCKS_PER_GROUP as BLOCKS_PER_GROUP, MAX_OPS_LISTED, MAX_RECORD_BYTES, RECORDS_PER_PAGE};
+use crate::limits::{LIST_KEEP_COMPRESSED, LIST_KEEP_MANIFEST, LIST_KEEP_WAL, LOG_BLOCKS_PER_GROUP as BLOCKS_PER_GROUP, MAX_OPS_LISTED, MAX_RECORD_BYTES, OPEN_TAIL_BLOCKS, RECORDS_PER_PAGE};
 use crate::manifest;
 use crate::model::*;
 use crate::util::{bytes_preview, human_size};
@@ -64,18 +64,37 @@ pub fn batch_fields(tag: Option<u8>, facts: &[Fact]) -> Vec<Field> {
 }
 
 impl LogInspector {
-    /// Physical items cut off by the end of the file (only the last block can end early) and
-    /// their diagnostics. Bounded: one 32 KiB block read. Records whose missing fragments would
-    /// follow a complete FIRST/MIDDLE item are not counted here.
+    /// Problems at the end of the file and their diagnostics: physical items cut off by it (only
+    /// the last block can end early) and a fragmented record left open by it (complete FIRST /
+    /// MIDDLE fragments, no LAST; `log::open_tail`). Bounded: the last block, plus at most
+    /// `OPEN_TAIL_BLOCKS` blocks backwards while the tail consists of MIDDLE fragments.
     fn eof_truncation(&self) -> Vec<Diagnostic> {
+        self.eof_problems().0
+    }
+
+    /// `eof_truncation` plus the file offset where the affected items start (tree markers:
+    /// every block / fragment from there to the end carries ✂).
+    fn eof_problems(&self) -> (Vec<Diagnostic>, Option<u64>) {
         let n = log::block_count(self.len());
         if n == 0 {
-            return Vec::new();
+            return (Vec::new(), None);
         }
-        match self.scan_block(n - 1) {
-            Ok((items, _)) => items.iter().filter(|p| p.kind == PhysKind::Truncated).filter_map(|p| p.diagnostic()).collect(),
-            Err(_) => Vec::new(),
+        let tail = log::open_tail(self.reader(), OPEN_TAIL_BLOCKS).ok().flatten();
+        // A cut item that continues the open record is described by the record's diagnostic
+        // (which carries the physical detail), not by a second, physical one.
+        let in_tail = |p: &Phys| tail.as_ref().and_then(|t| t.cut.as_ref()).is_some_and(|c| c.offset == p.offset);
+        let (mut v, mut from) = match self.scan_block(n - 1) {
+            Ok((items, _)) => {
+                let cut: Vec<&Phys> = items.iter().filter(|p| p.kind == PhysKind::Truncated && !in_tail(p)).collect();
+                (cut.iter().filter_map(|p| p.diagnostic()).collect::<Vec<_>>(), cut.first().map(|p| p.offset))
+            }
+            Err(_) => (Vec::new(), None),
+        };
+        if let Some(t) = tail {
+            from = Some(from.map_or(t.from, |f| f.min(t.from)));
+            v.push(t.diagnostic());
         }
+        (v, from)
     }
 
     pub fn root_children(&self) -> Vec<Child> {
@@ -96,11 +115,12 @@ impl LogInspector {
         match k {
             NodeKind::Root => self.root_children(),
             NodeKind::LogBlocks { first, count } => {
-                // The last block (which alone can end early) carries the truncation marker.
+                // Blocks holding the end-of-file problem (a cut-off item in the last block, or
+                // the fragments of a record left open by EOF) carry the truncation marker.
                 let last = log::block_count(self.len()).saturating_sub(1);
-                let in_range = |s: u64, c: u64| (s..s + c).contains(&last);
-                let trunc = if in_range(*first, *count) { (!self.eof_truncation().is_empty()).then_some(Status::Truncated) } else { None };
-                let mark = |s: u64, c: u64| if in_range(s, c) { trunc } else { None };
+                // Only ranges within OPEN_TAIL_BLOCKS of the end can hold them (no scan otherwise).
+                let lo = if first + count + OPEN_TAIL_BLOCKS > last { self.eof_problems().1.map(|o| o / BLOCK_SIZE) } else { None };
+                let mark = |s: u64, c: u64| lo.filter(|&lo| s <= last && s + c > lo).map(|_| Status::Truncated);
                 if *count > BLOCKS_PER_GROUP {
                     let mut g = Vec::new();
                     let mut s = *first;
@@ -119,16 +139,22 @@ impl LogInspector {
                 }
             }
             NodeKind::LogBlock(b) => match self.scan_block(*b) {
-                Ok((items, _)) => items
-                    .iter()
-                    .map(|p| {
-                        let label = match p.kind {
-                            PhysKind::Record => format!("0x{:x} {} len {}", p.offset, log::type_name(p.rtype), p.len),
-                            k => format!("0x{:x} {:?}", p.offset, k),
-                        };
-                        Child::new(label, NodeKind::LogFragment(p.offset)).leaf().status(stale(p.status(), p.log_number, self.expected_log())).diag(p.diagnostic())
-                    })
-                    .collect(),
+                Ok((items, _)) => {
+                    // Fragments of a record left open by EOF: tree marker only.
+                    let last = log::block_count(self.len()).saturating_sub(1);
+                    let from = if b + OPEN_TAIL_BLOCKS > last { self.eof_problems().1 } else { None };
+                    items
+                        .iter()
+                        .map(|p| {
+                            let label = match p.kind {
+                                PhysKind::Record => format!("0x{:x} {} len {}", p.offset, log::type_name(p.rtype), p.len),
+                                k => format!("0x{:x} {:?}", p.offset, k),
+                            };
+                            let open = from.filter(|&f| p.offset >= f && p.kind == PhysKind::Record).map(|_| Status::Truncated);
+                            Child::new(label, NodeKind::LogFragment(p.offset)).leaf().status(stale(p.status(), p.log_number, self.expected_log())).diag(p.diagnostic()).contains(open)
+                        })
+                        .collect()
+                }
                 Err(e) => vec![Child::new(format!("read error: {e}"), NodeKind::LogBlock(*b)).leaf().status(Status::Invalid)],
             },
             NodeKind::LogRecords { start, page } => {
@@ -148,7 +174,8 @@ impl LogInspector {
                         log::type_name(l.rtype)
                     };
                     let leaf = mode == LogMode::Manifest || l.role == FragRole::Meta;
-                    let mut c = Child::new(format!("0x{:x} {kind} ({} B, {} frag)", l.start, l.total_len, l.frag_count), NodeKind::LogRecord(l.start)).status(l.status).diag(l.diag.clone());
+                    let no_last = if l.no_last { ", no LAST" } else { "" };
+                    let mut c = Child::new(format!("0x{:x} {kind} ({} B, {} frag{no_last})", l.start, l.total_len, l.frag_count), NodeKind::LogRecord(l.start)).status(l.status).diag(l.diag.clone());
                     c.leaf = leaf;
                     out.push(c);
                     off = l.end;
@@ -461,6 +488,7 @@ impl LogInspector {
         let mode = self.mode();
         let comp = self.wal_compression().unwrap_or(0);
         let expected = self.expected_log();
+        let eof = self.len();
         let Some(l) = self.record(off) else {
             return error_view("Record", Status::Unknown, "no record at this offset");
         };
@@ -491,6 +519,14 @@ impl LogInspector {
         }
         if (l.frags.len() as u64) < l.frag_count {
             f.push(Field::new("more fragments", None, format!("{} not listed", l.frag_count - l.frags.len() as u64)).status(Status::Limited));
+        }
+        if l.no_last {
+            // Stated explicitly: the end of file closed this record before its LAST fragment.
+            let after = match l.frags.last() {
+                Some(fr) if fr.crc_ok.is_none() => format!("{} at 0x{:x} cut off by end of file", if fr.header_len > 0 { log::type_name(fr.rtype) } else { "fragment header" }, fr.offset),
+                _ => format!("end of file at 0x{eof:x} after FIRST + {} MIDDLE", l.frag_count.saturating_sub(1)),
+            };
+            f.push(Field::new("LAST fragment", None, format!("missing: {after}")).kind(K::RecordType).status(Status::Truncated).diag(l.diag.clone()).explain(l.note.clone()));
         }
         let data = &l.data;
         if !l.data_complete() {
@@ -569,7 +605,15 @@ impl LogInspector {
 
 fn header_variant(l: &Logical) -> String {
     let rec = l.frags.first().map(|f| f.header_len == 11).unwrap_or(false);
-    let shape = if l.frag_count <= 1 { log::type_name(l.rtype).to_string() } else { format!("FIRST..LAST ×{}", l.frag_count) };
+    let shape = if l.no_last && l.frag_count <= 1 {
+        "FIRST, no LAST".to_string()
+    } else if l.no_last {
+        format!("FIRST..MIDDLE ×{}, no LAST", l.frag_count)
+    } else if l.frag_count <= 1 {
+        log::type_name(l.rtype).to_string()
+    } else {
+        format!("FIRST..LAST ×{}", l.frag_count)
+    };
     format!("{shape} ({})", if rec { "recyclable 11 B" } else { "legacy 7 B" })
 }
 

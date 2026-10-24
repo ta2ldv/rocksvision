@@ -1,0 +1,39 @@
+# Task 0005 acceptance: Reset View (Shift+Cmd+R) before/after on one file. Layout only: widths, split, visibility, zoom return to default;
+# selection, search text, theme and file unchanged. Start from the default layout (fresh app or a prior Reset View).
+# Steps: zoom 130 % (3 steps of 0.1), drag the navigation width, drag the center split, hide Explanation via its chevron, shot, Shift+Cmd+R, shot.
+# Window 1400x900 so that 130 % fits under the layout ceiling.
+# Placeholders: PATH_X/Y, ROW_SEL_X/Y (a table row), ZOOM_IN_X/Y, NAV_SPLIT_X/Y + NAV_SPLIT_X2 (drag target x), CENTER_SPLIT_X/Y + CENTER_SPLIT_Y2,
+# EXPL_CHEVRON_X/Y (the chevron that hides the Explanation panel), STATUS_X/Y/W/H (status bar rect), ZOOM_LABEL_X/Y/W/H (zoom text rect).
+front
+winsize 1400 900
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/db-levels/MANIFEST-000005
+key return
+sleep 2
+click {{ROW_SEL_X}} {{ROW_SEL_Y}}
+sleep 0.5
+shot rvba_00_default
+crop rvba_00_zoom {{ZOOM_LABEL_X}} {{ZOOM_LABEL_Y}} {{ZOOM_LABEL_W}} {{ZOOM_LABEL_H}}
+note STEP 1: zoom to 130 %
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+click {{ZOOM_IN_X}} {{ZOOM_IN_Y}}
+sleep 0.5
+crop rvba_01_zoom {{ZOOM_LABEL_X}} {{ZOOM_LABEL_Y}} {{ZOOM_LABEL_W}} {{ZOOM_LABEL_H}}
+note STEP 2: drag navigation width
+drag {{NAV_SPLIT_X}} {{NAV_SPLIT_Y}} {{NAV_SPLIT_X2}} {{NAV_SPLIT_Y}}
+note STEP 3: drag center split
+drag {{CENTER_SPLIT_X}} {{CENTER_SPLIT_Y}} {{CENTER_SPLIT_X}} {{CENTER_SPLIT_Y2}}
+note STEP 4: hide Explanation via chevron
+click {{EXPL_CHEVRON_X}} {{EXPL_CHEVRON_Y}}
+sleep 0.8
+shot rvba_02_changed
+note STEP 5: Shift+Cmd+R (Reset View)
+key r cmd shift
+sleep 1
+shot rvba_03_after_reset
+crop rvba_03_zoom {{ZOOM_LABEL_X}} {{ZOOM_LABEL_Y}} {{ZOOM_LABEL_W}} {{ZOOM_LABEL_H}}
+crop rvba_03_status {{STATUS_X}} {{STATUS_Y}} {{STATUS_W}} {{STATUS_H}}
+note PASS: rvba_03 layout == rvba_00 (nav width, center split, Explanation visible, zoom 100 %); selected row and file unchanged; action.log has the key r cmd shift line with front=RocksVision, release_mods at end
+release_mods

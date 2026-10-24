@@ -362,3 +362,15 @@ Copies of pristine fixtures with exactly one controlled damage each. Originals u
 | wal-zstd/OPTIONS-000007 | 7719 |
 
 Total: 70 files, 3468994 bytes. SHA-256 of every file above: `SHA256SUMS` (`shasum -a 256 -c SHA256SUMS` from this directory).
+
+
+## Added for task 0005 (handoff 0009): fragmented-WAL cut fixtures
+Appended after the 70-file set above (Total: 72 files; SHA256SUMS has 72 lines). Both are byte-exact prefixes of `wal-fragmented/000004.log` (made with `head -c N`). The 100 KiB record `big-100k` (sequence 301) is FIRST @24300 (0x5eec, payload 8461) + MIDDLE @32768 (0x8000, payload 32761) + MIDDLE @65536 (0x10000, payload 32761) + LAST @98304 (0x18000, payload 28442); block size 32768, legacy 7 B headers. Control (valid, no copy): `wal-fragmented/000004.log`.
+
+| file | size | cut | expected view |
+|---|---|---|---|
+| corrupt/wal-missing-last.log | 98304 | exactly at 0x18000 = end of the second MIDDLE (3 full blocks; LAST header never written) | Physical: all 3 blocks and all fragments intact (CRC ok), nothing truncated. Logical: the record @0x5eec is INCOMPLETE (FIRST + 2 MIDDLE = 8461+32761+32761 = 73983 B, no LAST); `big-100k` declares value length 102400 but only 73958 B available. 300 FULL records before it are valid. |
+| corrupt/wal-cut-in-middle.log | 81927 | 0x14007 = 0x10000 + 7 + 16384, inside the second MIDDLE's payload | Physical: block 2 is 16391 B; the fragment @0x10000 declares len 32761 but only 16384 payload B exist -> physically TRUNCATED fragment (CRC cannot be checked). Logical: record @0x5eec incomplete (57606 B reassembled, value 57581 B of 102400). |
+
+SHA-256: wal-missing-last.log `3c204cf6e2a1886d3d3c66c80a7c1a181b36d945fd973d60b246a38b289de923`; wal-cut-in-middle.log `7c92d92ec9bc5f34308529e9ad91520f4c9de20cb00153b6eba6c63c32f954f1`.
+Distinction a good UI should make: missing-last = logical record incomplete (all bytes present are structurally valid); cut-in-middle = physical fragment truncated (file ends mid-fragment).

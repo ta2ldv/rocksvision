@@ -1,0 +1,253 @@
+# RocksVision native release builds (macOS arm64, macOS Intel x64, Ubuntu x64, Windows x64).
+#
+# Owner steps (ta2ldv):
+#   1. Commit this workflow and push it to the default branch (the push itself runs nothing).
+#   2. Optional dry run: Actions > "release-build" > Run workflow (workflow_dispatch) on a branch:
+#      builds, tests and packages all four platforms and uploads 7-day artifacts only. Never
+#      touches any release, even when run against a tag.
+#   3. Set Cargo.toml version to X.Y.Z (>= 0.1.1), commit, push, create tag vX.Y.Z on that commit.
+#   4. Make sure "immutable releases" is OFF for the repository (see below), then publish a
+#      release for vX.Y.Z on GitHub (published, not draft). The workflow builds the commit the tag
+#      points to and, when all four builds and checks pass, uploads the four archives + .sha256
+#      files to THAT release. It never creates another release and never overwrites an asset.
+#
+# Gating matrix:
+#   ordinary branch push / pull request / schedule  -> no trigger, nothing runs
+#   tag push alone                                  -> no trigger, nothing runs
+#   draft release created or edited                 -> no trigger (only `release: published`)
+#   release published (or run/re-run) by non-owner  -> every job skipped (actor + triggering_actor)
+#   workflow_dispatch by ta2ldv                     -> build/test/package + artifacts only
+#   published v0.1.0 (also if re-published), or any tag not strictly vMAJOR.MINOR.PATCH >= 0.1.1
+#                                                   -> validate fails, nothing built or uploaded
+#   tag != Cargo.toml version at the tagged commit  -> validate fails
+#   release missing/draft, or an asset name exists  -> validate fails; re-checked before upload
+#   GitHub API error/network failure on that check  -> fails closed (logged distinctly)
+#   any platform build/check fails                  -> no upload
+#   repository other than ta2ldv/rocksvision (fork) -> no release write
+#   two runs for the same tag                       -> serialized (concurrency group)
+#
+# Visibility window: a published release is public immediately, so it is visible WITHOUT these
+# assets until the upload job finishes (build + test time of the slowest platform).
+# Immutable releases: per GitHub docs (to verify: docs.github.com "Immutable releases"), once a
+# release is published with immutable releases enabled, its assets cannot be added, changed or
+# deleted; the recommended pattern there is draft -> attach assets -> publish. This flow adds
+# assets AFTER publication, so it only works with immutable releases OFF (the asset check refuses
+# a release whose REST `immutable` field is true; field name to verify).
+#
+# Runner labels (checked against actions/runner-images README, 2026-10-24): macos-13 is retired;
+# macos-15-intel is the x86_64 macOS image, macos-15 the arm64 one (macos-14 is deprecated).
+# Action revisions are pinned by commit SHA (tag in the comment, looked up via git ls-remote).
+
+name: release-build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    if: github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.src.outputs.sha }}
+    steps:
+      # Release event: the tag the release points to, never the branch tip.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.ref }}
+          persist-credentials: false
+      - name: Source (commit pinned for all later jobs)
+        id: src
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ "$EVENT" = release ]; then
+            tagsha=$(git rev-parse "refs/tags/$TAG^{commit}")
+            [ "$sha" = "$tagsha" ] || { echo "error: checkout $sha != tag $TAG commit $tagsha" >&2; exit 1; }
+          fi
+          printf 'event: %s\nref: %s\ntag: %s\nsha: %s\n' "$EVENT" "$REF" "${TAG:--}" "$sha"
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+      - name: Validate tag against Cargo.toml at the tagged commit (release only)
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/ci/validate-tag.sh "$TAG"
+      - name: Release exists and no asset is present yet (release only, fail-closed)
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          v=${TAG#v}
+          names=()
+          for f in "rocksvision-$v-macos-arm64.zip" "rocksvision-$v-macos-x64.zip" \
+            "rocksvision-$v-ubuntu-x64.tar.gz" "rocksvision-$v-windows-x64.zip"; do
+            names+=("$f" "$f.sha256")
+          done
+          bash scripts/ci/check-release-absent.sh "$REPO" "$TAG" "${names[@]}"
+      - name: Manual run note
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "workflow_dispatch: build/test/package + artifacts only; no release is touched."
+
+  build:
+    needs: validate
+    if: github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
+    name: ${{ matrix.platform }} (${{ matrix.runner }}; build, cargo test, CLI smoke)
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-15
+            triple: aarch64-apple-darwin
+            build: sh scripts/build-macos-arm64.sh
+            test_args: ''
+            bin: dist/macos-arm64/RocksVision.app/Contents/MacOS/rocksvision
+          - platform: macos-x64
+            runner: macos-15-intel
+            triple: x86_64-apple-darwin
+            build: sh scripts/build-macos-x64.sh
+            test_args: --target x86_64-apple-darwin
+            bin: dist/macos-x64/RocksVision.app/Contents/MacOS/rocksvision
+          - platform: ubuntu-x64
+            runner: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            build: bash scripts/build-ubuntu-x64.sh
+            test_args: --target x86_64-unknown-linux-gnu
+            bin: dist/ubuntu-x64/rocksvision
+          - platform: windows-x64
+            runner: windows-2022
+            triple: x86_64-pc-windows-msvc
+            build: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-x64.ps1
+            test_args: --target x86_64-pc-windows-msvc
+            bin: dist/windows-x64/rocksvision.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Source and versions
+        id: meta
+        env:
+          SHA: ${{ needs.validate.outputs.sha }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)
+          rust=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | head -n1)
+          [ -n "$version" ] && [ -n "$rust" ]
+          printf 'sha: %s\nversion: %s\nrust: %s\n' "$SHA" "$version" "$rust"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "rust=$rust" >>"$GITHUB_OUTPUT"
+      - name: Cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.triple }}-rust${{ steps.meta.outputs.rust }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.triple }}-rust${{ steps.meta.outputs.rust }}-
+      # Same one-command scripts as local builds. Unattended: rustup is preinstalled or bootstrapped
+      # by the script, apt uses passwordless sudo -n, the Windows image already has the VS 2022
+      # MSVC toolset (vswhere finds it, the Build Tools installer is skipped).
+      - name: Build and package (platform script, unattended)
+        run: ${{ matrix.build }}
+      - name: Check dist (version, target, LICENSE, checksums)
+        run: bash scripts/ci/check-dist.sh "${{ matrix.platform }}" "${{ matrix.triple }}"
+      # All four platforms: the suite verifies checksums in pure Rust (no shasum).
+      - name: Test (cargo test --release --locked)
+        env:
+          RUST: ${{ steps.meta.outputs.rust }}
+          TEST_ARGS: ${{ matrix.test_args }}
+        # shellcheck disable=SC2086
+        run: rustup run "$RUST" cargo test --release --locked $TEST_ARGS
+      - name: CLI smoke (--dump of a bundled WAL; not GUI evidence)
+        env:
+          BIN: ${{ matrix.bin }}
+        run: |
+          out=$("$BIN" --dump examples/files/wal-plain/000004.log)
+          [ -n "$out" ] || { echo "error: --dump printed nothing" >&2; exit 1; }
+          printf '%s\n' "$out" | head -n 5
+      - name: Upload artifacts (7 days)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rocksvision-${{ matrix.platform }}
+          path: dist/rocksvision-${{ steps.meta.outputs.version }}-${{ matrix.platform }}.*
+          if-no-files-found: error
+          retention-days: 7
+
+  release-assets:
+    needs: [validate, build]
+    if: >-
+      github.event_name == 'release' &&
+      github.repository == 'ta2ldv/rocksvision' &&
+      github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Download build artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rocksvision-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify the eight release files
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          v=${TAG#v}
+          cd release-assets
+          want="rocksvision-$v-macos-arm64.zip rocksvision-$v-macos-x64.zip rocksvision-$v-ubuntu-x64.tar.gz rocksvision-$v-windows-x64.zip"
+          n=0
+          for f in $want; do
+            [ -f "$f" ] && [ -f "$f.sha256" ] || { echo "error: $f or $f.sha256 missing" >&2; exit 1; }
+            tr -d '\r' <"$f.sha256" | sha256sum -c -
+            n=$((n + 2))
+          done
+          [ "$(find . -type f | wc -l)" -eq "$n" ] || { echo "error: unexpected extra files:" >&2; ls -la >&2; exit 1; }
+      - name: Re-check release exists and assets are absent (write token)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          names=()
+          for f in release-assets/*; do names+=("${f##*/}"); done
+          bash scripts/ci/check-release-absent.sh "$REPO" "$TAG" "${names[@]}"
+      # No --clobber: gh refuses an asset name that already exists (to verify on first real run;
+      # the check above already fails in that case). Never creates a release.
+      - name: Upload assets to the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" --repo "$REPO" release-assets/*

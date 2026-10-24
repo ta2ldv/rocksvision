@@ -14,7 +14,7 @@ use crate::app::hex::{HexState, PageState};
 use crate::app::{Action, AppState, Panel};
 use crate::limits::LIMITS;
 use crate::model::{Space, Span, SpaceInfo, Status};
-use crate::ui::layout::{ascii_col, byte_at, byte_col, choose_bytes_per_row, hex_header_lines, hex_row_chars, offset_digits, HexMetrics, LAYOUT};
+use crate::ui::layout::{ascii_col, byte_at, byte_col, choose_bytes_per_row, hex_header_lines, hex_row_chars, offset_digits, HexMetrics, LAYOUT, PACK_SLACK};
 use crate::ui::menu::{self, MenuCmd};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText, Sense};
@@ -152,10 +152,13 @@ fn header(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut HexMemory, a
             for g in (0..n_groups).filter(|g| lines[*g] == line) {
                 let r = ui.horizontal(|ui| match g {
                     0 => group_space(ui, st, tok, acts),
-                    1 => group_paging(ui, hex, acts),
+                    1 => mem.groups[1] = group_paging(ui, hex.page_base(), hex.size(), acts),
                     _ => group_goto(ui, st, acts),
                 });
-                mem.groups[g] = r.response.rect.width();
+                // Paging plans its line with the wide width (it falls back to compact itself).
+                if g != 1 {
+                    mem.groups[g] = r.response.rect.width();
+                }
             }
         });
         line_h = line_h.max(r.response.rect.height());
@@ -198,18 +201,76 @@ fn group_space(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Ac
     hide_button(ui, acts);
 }
 
-/// Group B: ◀ page · "page 1/1 · 0x0..0x10 of 16 bytes" · page ▶ (the label never wraps).
-fn group_paging(ui: &mut egui::Ui, hex: &HexState, acts: &mut Vec<Action>) {
-    let page = LIMITS.hex_page_bytes;
-    let pages = hex.size().div_ceil(page).max(1);
-    let cur = hex.page_base() / page;
-    if ui.add_enabled(cur > 0, egui::Button::new("◀ page")).clicked() {
-        acts.push(Action::HexPage(hex.page_base() - page));
+/// Texts of the paging group B for the page at `base` of a `size`-byte space with `page`-byte
+/// pages: the wide label, the compact label, and the tooltips that keep every detail.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PagingText {
+    /// "page 2/3 · 0x10000..0x20000 of 150000 bytes"
+    pub wide: String,
+    /// "2/3"
+    pub compact: String,
+    /// "Page 2 of 3 · 0x10000..0x20000 of 150000 bytes · 64 KiB per page"
+    pub tip: String,
+    /// "Previous page (0x0..0x10000)"; None on the first page.
+    pub prev: Option<(u64, String)>,
+    /// "Next page (0x20000..0x24a10)"; None on the last page.
+    pub next: Option<(u64, String)>,
+}
+
+pub fn paging_text(base: u64, size: u64, page: u64) -> PagingText {
+    let pages = size.div_ceil(page).max(1);
+    let cur = base / page;
+    let end = |b: u64| b.saturating_add(page).min(size);
+    let range = format!("0x{base:x}..0x{:x}", end(base));
+    let per = if page % 1024 == 0 { format!("{} KiB", page / 1024) } else { format!("{page} bytes") };
+    PagingText {
+        wide: format!("page {}/{pages} · {range} of {size} bytes", cur + 1),
+        compact: format!("{}/{pages}", cur + 1),
+        tip: format!("Page {} of {pages} · {range} of {size} bytes · {per} per page", cur + 1),
+        prev: (cur > 0).then(|| (base - page, format!("Previous page (0x{:x}..0x{:x})", base - page, base))),
+        next: (cur + 1 < pages).then(|| (base + page, format!("Next page (0x{:x}..0x{:x})", base + page, end(base + page)))),
     }
-    ui.add(egui::Label::new(format!("page {}/{} · 0x{:x}..0x{:x} of {} bytes", cur + 1, pages, hex.page_base(), (hex.page_base() + page).min(hex.size()), hex.size())).wrap_mode(egui::TextWrapMode::Extend));
-    if ui.add_enabled(cur + 1 < pages, egui::Button::new("page ▶")).clicked() {
-        acts.push(Action::HexPage(hex.page_base() + page));
+}
+
+/// Group B: "◀ page · page 1/3 · 0x0..0x10000 of 150000 bytes · page ▶" when it fits the rest of
+/// its header line, otherwise the compact "◀ · 1/3 · ▶" (chosen per frame from the measured wide
+/// width; the label never wraps and the full text is in the tooltips). Both buttons are always
+/// shown (disabled at the ends). Returns the wide width, which plans the header lines.
+fn group_paging(ui: &mut egui::Ui, base: u64, size: u64, acts: &mut Vec<Action>) -> f32 {
+    let t = paging_text(base, size, LIMITS.hex_page_bytes);
+    let pad = 2.0 * ui.spacing().button_padding.x;
+    let color = ui.visuals().text_color();
+    let width = |s: &str, style: egui::TextStyle| {
+        let font = style.resolve(ui.style());
+        ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font, color).size().x)
+    };
+    let wide_w = width("◀ page", egui::TextStyle::Button) + width(&t.wide, egui::TextStyle::Body) + width("page ▶", egui::TextStyle::Button) + 2.0 * pad + 2.0 * ui.spacing().item_spacing.x;
+    let compact = wide_w + PACK_SLACK > ui.available_width();
+    let (prev, label, next) = if compact { ("◀", &t.compact, "▶") } else { ("◀ page", &t.wide, "page ▶") };
+    let next_w = (width(next, egui::TextStyle::Button) + pad).max(LAYOUT.glyph_button[0]);
+    let label_text_w = width(label, egui::TextStyle::Body);
+    let button = |s: &str| egui::Button::new(s).min_size(egui::vec2(LAYOUT.glyph_button[0], LAYOUT.glyph_button[1]));
+    let r = ui.add_enabled(t.prev.is_some(), button(prev)).on_disabled_hover_text("First page");
+    if let Some((to, tip)) = &t.prev {
+        if r.on_hover_text(tip).clicked() {
+            acts.push(Action::HexPage(*to));
+        }
     }
+    if compact {
+        // Even "n/N" may not fit beside the buttons (huge spaces): elide it, keep "▶" reachable.
+        let room = (ui.available_width() - next_w - ui.spacing().item_spacing.x - PACK_SLACK).max(0.0);
+        let label_w = label_text_w.min(room);
+        ui.allocate_ui(egui::vec2(label_w, ui.spacing().interact_size.y), |ui| ui.add(egui::Label::new(label.as_str()).truncate()).on_hover_text(&t.tip));
+    } else {
+        ui.add(egui::Label::new(label.as_str()).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(&t.tip);
+    }
+    let r = ui.add_enabled(t.next.is_some(), button(next)).on_disabled_hover_text("Last page");
+    if let Some((to, tip)) = &t.next {
+        if r.on_hover_text(tip).clicked() {
+            acts.push(Action::HexPage(*to));
+        }
+    }
+    wide_w
 }
 
 /// Group C: Go-to field + Go to.
@@ -406,8 +467,67 @@ fn centered(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui)) {
 
 #[cfg(test)]
 mod tests {
-    use super::row_selection;
+    use super::*;
     use crate::model::{Space, Span};
+    use crate::ui::layout::center_min;
+    use crate::ui::theme::{apply_theme, THEMES};
+
+    #[test]
+    fn paging_text_first_middle_last() {
+        let p = 65536;
+        let first = paging_text(0, 150000, p);
+        assert_eq!((first.wide.as_str(), first.compact.as_str()), ("page 1/3 · 0x0..0x10000 of 150000 bytes", "1/3"));
+        assert_eq!(first.tip, "Page 1 of 3 · 0x0..0x10000 of 150000 bytes · 64 KiB per page");
+        assert_eq!(first.prev, None);
+        assert_eq!(first.next, Some((0x10000, "Next page (0x10000..0x20000)".into())));
+        let mid = paging_text(0x10000, 150000, p);
+        assert_eq!(mid.compact, "2/3");
+        assert_eq!(mid.prev, Some((0, "Previous page (0x0..0x10000)".into())));
+        assert_eq!(mid.next, Some((0x20000, "Next page (0x20000..0x249f0)".into())));
+        let last = paging_text(0x20000, 150000, p);
+        assert_eq!((last.compact.as_str(), last.next.is_none()), ("3/3", true));
+        let one = paging_text(0, 16, p);
+        assert_eq!((one.compact.as_str(), one.prev.is_none(), one.next.is_none()), ("1/1", true, true));
+    }
+
+    /// 0009 item 1: at 4 bytes per row (the center at its minimum = both side panels at the
+    /// minimum window, and at the zoom ceiling, which keeps the same logical center) the paging
+    /// group — both buttons included — ends inside the byte area for the first, middle and last
+    /// page of multi-page files, in every theme and at zoom 1.0 and 2.0. With room it stays wide.
+    #[test]
+    fn paging_group_fits_the_four_byte_center() {
+        for t in THEMES {
+            for z in [1.0f32, 2.0] {
+                let ctx = egui::Context::default();
+                let _ = apply_theme(&ctx, t, &mut Vec::new());
+                ctx.set_zoom_factor(z);
+                for size in [102_400u64, 150_000, 10_000_000_000_000_000_000] {
+                    let bases = [0, (size / 2) / 65536 * 65536, (size - 1) / 65536 * 65536];
+                    for base in bases {
+                        for wide_room in [false, true] {
+                            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0 * z, 900.0 * z))), ..Default::default() };
+                            let _ = ctx.run_ui(input, |ui| {
+                                let m = metrics(ui, size);
+                                // The hex area inside the center margins at 4 bytes per row.
+                                let avail = if wide_room { 1000.0 } else { center_min(&m) - 2.0 * LAYOUT.center_margin[0] };
+                                assert!(wide_room || choose_bytes_per_row(4, avail, &m) == 4, "{}: center is not at 4 B/row", t.id);
+                                let rect = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(avail, 200.0));
+                                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                                let mut acts = Vec::new();
+                                let mut wide = 0.0;
+                                let r = child.horizontal(|ui| wide = group_paging(ui, base, size, &mut acts));
+                                let w = r.response.rect.width();
+                                assert!(r.response.rect.right() <= rect.right() + 0.5, "{} z{z} size {size} base {base:#x}: group {w} > center {avail}", t.id);
+                                if wide_room && wide + PACK_SLACK <= avail {
+                                    assert!((w - wide).abs() < 2.0, "{}: wide width {wide} vs drawn {w}", t.id);
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// Selection painting per row is byte-absolute: the same span highlights the same bytes at
     /// 16, 8 and 4 bytes per row.

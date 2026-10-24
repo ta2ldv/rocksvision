@@ -155,6 +155,141 @@ pub const RECOVER_RESYNC: &str = "the scanner resynchronizes at the next offset 
 pub const RECOVER_RESTART: &str = "log_reader.cc reports the partial record as corruption and restarts at the interrupting fragment";
 pub const RECOVER_SKIP: &str = "the record is skipped";
 pub const RECOVER_CAP: &str = "the first bytes up to the cap are kept; the rest is not decoded";
+/// RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord, `case kEof` with `in_fragmented_record`:
+/// the partial record is cleared; with kAbsoluteConsistency or kPointInTimeRecovery (the
+/// default `wal_recovery_mode`, include/rocksdb/options.h) it also calls ReportCorruption.
+pub const RECOVER_OPEN_AT_EOF: &str = "RocksDB's log reader (10.4.2 log_reader.cc) discards a record left incomplete at end of file; with wal_recovery_mode kPointInTimeRecovery (default) or kAbsoluteConsistency it also reports \"error reading trailing data due to encountering EOF\". RocksVision shows the collected fragments";
+/// A read of the file failed while a fragmented record was being collected (not end of file).
+/// model::CheckKind has no I/O kind: the diagnostic uses `Structure`, status Unknown, and this
+/// recovery text identifies it (`is_read_error`).
+pub const RECOVER_READ_ERROR: &str = "reading stops at the read error; the fragments read before it are shown, nothing is assumed about the rest";
+
+/// True for the diagnostic of a read error (not a format problem of the bytes).
+pub fn is_read_error(d: &Diagnostic) -> bool {
+    d.recovery == RECOVER_READ_ERROR
+}
+
+/// A continuation fragment physically cut off by the end of file (the file ends inside its
+/// header or payload), as the last item of a record left open at EOF.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutFrag {
+    pub offset: u64,
+    pub rtype: u8,
+    /// The header was read far enough to know type and length.
+    pub header_known: bool,
+    /// Declared payload length (header length field).
+    pub len: u64,
+    /// Payload bytes present before EOF.
+    pub avail: u64,
+}
+
+impl CutFrag {
+    fn of(p: &Phys) -> Self {
+        CutFrag { offset: p.offset, rtype: p.rtype, header_known: p.header_len > 0 || p.rtype != 0, len: u64::from(p.len), avail: p.payload_avail }
+    }
+}
+
+/// A fragmented logical record left open at end of file: FIRST (+ MIDDLE …) fragments and then
+/// EOF, no LAST; the last fragment may itself be cut off by EOF (`cut`). Found by `open_tail`
+/// (bounded backward scan) or `read_logical`; both build the same diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenTail {
+    /// Header offset of the FIRST fragment; None when it lies before the scanned blocks.
+    pub start: Option<u64>,
+    /// Earliest fragment header found (= `start` when known).
+    pub from: u64,
+    /// Complete MIDDLE fragments after FIRST (counted within the scan).
+    pub middles: u64,
+    /// Payload bytes of the fragments found (of a cut fragment: the bytes present).
+    pub collected: u64,
+    /// File length.
+    pub eof: u64,
+    /// The trailing continuation fragment the end of file cuts off, if any.
+    pub cut: Option<CutFrag>,
+}
+
+impl OpenTail {
+    /// "FIRST @0x5eec + 2 MIDDLE" (or "2 MIDDLE from 0x…, FIRST before the scanned blocks").
+    pub fn shape(&self) -> String {
+        match self.start {
+            Some(s) => format!("FIRST @0x{s:x} + {} MIDDLE", self.middles),
+            None => format!("{} MIDDLE from 0x{:x}, FIRST before the scanned blocks (not read)", self.middles, self.from),
+        }
+    }
+    /// Truncation over the record's bytes (start..EOF). Untrusted: RocksDB discards the record.
+    /// Expected a LAST fragment, observed the end of file; with a cut fragment, its declared vs
+    /// present payload length (the physical detail: the file ends inside that fragment).
+    pub fn diagnostic(&self) -> Diagnostic {
+        let span = Some(Span::file(self.from, self.eof.saturating_sub(self.from)));
+        let (note, e, o) = match &self.cut {
+            None => (
+                format!("The logical record has no LAST fragment before end of file ({}; {} payload bytes collected).", self.shape(), self.collected),
+                Some(DecodedValue::Text("LAST fragment".into())),
+                Some(DecodedValue::Text(format!("end of file at 0x{:x}", self.eof))),
+            ),
+            Some(c) => {
+                let (what, bytes, e, o) = if c.header_known {
+                    (format!("{} fragment", type_name(c.rtype)), format!(" ({} of {} payload bytes)", c.avail, c.len), Some(DecodedValue::U64(c.len)), Some(DecodedValue::U64(c.avail)))
+                } else {
+                    ("fragment header".to_string(), String::new(), None, None)
+                };
+                let note = format!(
+                    "The {what} at 0x{:x} is cut off by the end of file{bytes}: the file ends inside this fragment, so the logical record ({}, then the cut fragment; {} payload bytes collected) has no LAST fragment.",
+                    c.offset,
+                    self.shape(),
+                    self.collected
+                );
+                (note, e, o)
+            }
+        };
+        Diagnostic::new(CheckKind::Truncation, span, Trust::Untrusted, RECOVER_OPEN_AT_EOF, note).values(e, o)
+    }
+}
+
+/// The record left open at end of file, if the last record-bearing item is a complete FIRST or
+/// MIDDLE fragment, or an item cut off by EOF preceded by one (a cut continuation; the same
+/// rule `read_logical` applies). Bounded: reads at most `max_blocks` blocks backwards from the
+/// end. None when the tail ends with FULL/LAST/metadata, a cut-off item without an open
+/// record before it (reported by `Phys::diagnostic`), an inconsistent sequence (reported by
+/// `read_logical`) or a read error.
+pub fn open_tail(r: &dyn RangeRead, max_blocks: u64) -> io::Result<Option<OpenTail>> {
+    let n = block_count(r.len());
+    let mut t = OpenTail { start: None, from: 0, middles: 0, collected: 0, eof: r.len(), cut: None };
+    let mut seen = false;
+    for b in (n.saturating_sub(max_blocks)..n).rev() {
+        let (items, _) = scan_block(r, b)?;
+        for p in items.iter().rev() {
+            if matches!(p.kind, PhysKind::BlockTrailer | PhysKind::ZeroFill) {
+                continue;
+            }
+            if p.kind == PhysKind::Truncated && !seen && t.cut.is_none() {
+                // Only the trailing item can be cut by EOF; the record it continues decides.
+                t.cut = Some(CutFrag::of(p));
+                t.collected += p.payload_avail;
+                t.from = p.offset;
+                continue;
+            }
+            if p.kind != PhysKind::Record {
+                return Ok(None);
+            }
+            match role(p.rtype) {
+                FragRole::Middle => {
+                    t.middles += 1;
+                    t.collected += p.payload_avail;
+                    t.from = p.offset;
+                    seen = true;
+                }
+                FragRole::First => {
+                    t.collected += p.payload_avail;
+                    (t.start, t.from) = (Some(p.offset), p.offset);
+                    return Ok(Some(t));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+    Ok(seen.then_some(t))
+}
 
 pub fn block_count(file_len: u64) -> u64 {
     file_len.div_ceil(BLOCK_SIZE)
@@ -392,6 +527,9 @@ pub struct Logical {
     pub decompressed_from: Option<u64>,
     /// The problem behind a non-Present `status` (its `note` equals `note`).
     pub diag: Option<Diagnostic>,
+    /// A fragmented record (FIRST …) that the end of file closed before its LAST fragment:
+    /// either after a complete fragment or inside a cut-off one.
+    pub no_last: bool,
 }
 
 impl Logical {
@@ -432,8 +570,20 @@ pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logica
     let mut cur: Option<Logical> = None;
     loop {
         let Some((p, payload)) = it.next() else {
+            // PhysIter also ends on a read error: that is not the end of the file.
+            if let (Some(mut l), Some(e)) = (cur.take_if(|_| it.error.is_some()), it.error.as_ref()) {
+                let at = it.block * BLOCK_SIZE; // the block whose read failed
+                let note = format!("read error at 0x{at:x}: {e}; the record's remaining fragments could not be read ({} fragment(s), {} payload bytes read before it)", l.frag_count, l.total_len);
+                l.fail(Status::Unknown, CheckKind::Structure, Trust::Untrusted, RECOVER_READ_ERROR, note);
+                return Some(l);
+            }
             if let Some(mut l) = cur {
-                l.fail(Status::Truncated, CheckKind::Truncation, Trust::Partial, RECOVER_EOF, "file ends before the LAST fragment".into());
+                let t = OpenTail { start: Some(l.start), from: l.start, middles: l.frag_count.saturating_sub(1), collected: l.total_len, eof: r.len(), cut: None };
+                let d = t.diagnostic();
+                l.status = Status::Truncated;
+                l.note = d.note.clone();
+                l.diag = Some(d);
+                l.no_last = true;
                 return Some(l);
             }
             return None;
@@ -446,11 +596,18 @@ pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logica
             if p.kind != PhysKind::Record {
                 append(l, &p, &payload, keep);
                 l.end = p.end;
-                let note = format!("fragment at 0x{:x}: {:?}", p.offset, p.kind);
                 if p.kind == PhysKind::Truncated {
-                    l.fail(Status::Truncated, CheckKind::Truncation, Trust::Partial, RECOVER_EOF, note);
-                    l.truncated_by(&p);
+                    // The end of file cuts a continuation fragment: no LAST follows. Same
+                    // diagnostic as `open_tail` (root) for this record.
+                    // frag_count includes FIRST and the cut fragment.
+                    let t = OpenTail { start: Some(l.start), from: l.start, middles: l.frag_count.saturating_sub(2), collected: l.total_len, eof: r.len(), cut: Some(CutFrag::of(&p)) };
+                    let d = t.diagnostic();
+                    l.status = Status::Truncated;
+                    l.note = d.note.clone();
+                    l.diag = Some(d);
+                    l.no_last = true;
                 } else {
+                    let note = format!("fragment at 0x{:x}: {:?}", p.offset, p.kind);
                     l.fail(Status::Invalid, CheckKind::Length, Trust::Untrusted, RECOVER_RESYNC, note);
                 }
                 return cur;
@@ -490,6 +647,7 @@ pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logica
             log_number: p.log_number,
             decompressed_from: None,
             diag: None,
+            no_last: false,
         };
         append(&mut l, &p, &payload, keep);
         match p.kind {
@@ -544,4 +702,89 @@ fn append(l: &mut Logical, p: &Phys, payload: &[u8], keep: usize) {
     let room = keep.saturating_sub(l.data.len());
     l.data.extend_from_slice(&payload[..payload.len().min(room)]);
     l.total_len += payload.len() as u64;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::MemReader;
+    use crate::util::crc_mask;
+    use std::time::SystemTime;
+
+    /// One legacy fragment filling a whole block (7 B header + 32761 B payload).
+    fn block_fragment(rtype: u8) -> Vec<u8> {
+        let mut b = vec![0u8; BLOCK_SIZE as usize];
+        let len = BLOCK_SIZE as usize - HEADER_SIZE;
+        b[4..6].copy_from_slice(&(len as u16).to_le_bytes());
+        b[6] = rtype;
+        for (i, x) in b[HEADER_SIZE..].iter_mut().enumerate() {
+            *x = i as u8;
+        }
+        let crc = crc_mask(crc32c(&b[6..]));
+        b[0..4].copy_from_slice(&crc.to_le_bytes());
+        b
+    }
+
+    /// Reads fail from `fail_at` on (an I/O error, not end of data).
+    struct FailingReader {
+        inner: MemReader,
+        fail_at: u64,
+    }
+
+    impl RangeRead for FailingReader {
+        fn len(&self) -> u64 {
+            self.inner.len()
+        }
+        fn read_at(&self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+            if off >= self.fail_at {
+                return Err(io::Error::other("injected read failure"));
+            }
+            self.inner.read_at(off, buf)
+        }
+        fn modified(&self) -> io::Result<SystemTime> {
+            self.inner.modified()
+        }
+    }
+
+    /// A read error while collecting a fragmented record is reported as a read error (status
+    /// Unknown, the failing offset and the error), not as a record missing its LAST fragment.
+    #[test]
+    fn read_error_is_not_end_of_file() {
+        let mut data = block_fragment(2); // FIRST
+        data.extend(block_fragment(3)); // MIDDLE
+        data.extend(block_fragment(4)); // LAST
+        let ok = MemReader::new(data.clone());
+        let l = read_logical(&ok, 0, 16).unwrap();
+        assert_eq!((l.status, l.frag_count, l.no_last), (Status::Present, 3, false), "control: {}", l.note);
+
+        let r = FailingReader { inner: MemReader::new(data), fail_at: BLOCK_SIZE };
+        let l = read_logical(&r, 0, 16).unwrap();
+        assert_eq!((l.status, l.no_last, l.frag_count), (Status::Unknown, false, 1), "{}", l.note);
+        let d = l.diag.as_ref().unwrap();
+        assert!(is_read_error(d) && d.trusted == Trust::Untrusted, "{d:?}");
+        assert!(d.note.starts_with("read error at 0x8000: injected read failure"), "{}", d.note);
+        assert!(!d.note.contains("LAST"), "{}", d.note);
+        // The open-tail scan reports nothing on a read error (no false EOF claim).
+        assert!(open_tail(&r, 64).is_err());
+    }
+
+    /// A trailing MIDDLE cut by EOF continues the open record: `open_tail` and `read_logical`
+    /// build the same diagnostic over FIRST..EOF.
+    #[test]
+    fn cut_continuation_belongs_to_the_open_record() {
+        let mut data = block_fragment(2);
+        data.extend(block_fragment(3));
+        let cut = block_fragment(3);
+        data.extend_from_slice(&cut[..HEADER_SIZE + 100]);
+        let r = MemReader::new(data);
+        let t = open_tail(&r, 64).unwrap().expect("open tail");
+        assert_eq!((t.start, t.from, t.middles, t.cut.as_ref().map(|c| (c.offset, c.len, c.avail))), (Some(0), 0, 1, Some((0x10000, 32761, 100))));
+        let l = read_logical(&r, 0, 16).unwrap();
+        assert_eq!((l.status, l.no_last), (Status::Truncated, true));
+        assert_eq!(l.diag, Some(t.diagnostic()));
+        // A cut item after a complete FULL record is not an open record.
+        let mut full = block_fragment(1);
+        full.extend_from_slice(&block_fragment(1)[..HEADER_SIZE + 100]);
+        assert_eq!(open_tail(&MemReader::new(full), 64).unwrap(), None);
+    }
 }
