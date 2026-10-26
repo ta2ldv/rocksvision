@@ -245,7 +245,7 @@ fn sha256sums_lists_every_example_file_once() {
             if p.is_dir() {
                 walk(&p, base, out);
             } else if !p.file_name().unwrap().to_string_lossy().starts_with('.') {
-                out.insert(p.strip_prefix(base).unwrap().to_string_lossy().into_owned());
+                out.insert(portable_rel(&p, base));
             }
         }
     }
@@ -253,4 +253,37 @@ fn sha256sums_lists_every_example_file_once() {
     walk(&ex("data"), &ex(""), &mut disk);
     walk(&ex("files"), &ex(""), &mut disk);
     assert_eq!(listed, disk, "SHA256SUMS vs files on disk");
+}
+
+/// Path of `p` relative to `base` in the portable SHA256SUMS form: components joined with '/'
+/// on every OS (Windows' `read_dir` yields `\`-separated paths; the checksum file is written with '/').
+/// Component text is kept verbatim (case, dots, nesting), so different paths stay different.
+fn portable_rel(p: &Path, base: &Path) -> String {
+    p.strip_prefix(base)
+        .unwrap_or_else(|_| panic!("{} is not under {}", p.display(), base.display()))
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+#[test]
+fn portable_rel_joins_components_with_slash_and_keeps_distinct_paths() {
+    // Built with `join`, so the native separator is used on each OS ('\' on Windows, '/' elsewhere).
+    let base = Path::new("examples");
+    let p = base.join("data").join("basic-db").join("000008.log");
+    assert_eq!(portable_rel(&p, base), "data/basic-db/000008.log");
+    // genuinely different paths must not collapse into one representation
+    let a = portable_rel(&base.join("data").join("a").join("b"), base);
+    let b = portable_rel(&base.join("data").join("a-b"), base);
+    let c = portable_rel(&base.join("data").join("ab"), base);
+    let set: BTreeSet<_> = [a.as_str(), b.as_str(), c.as_str()].into_iter().collect();
+    assert_eq!(set.len(), 3, "{a} / {b} / {c}");
+    assert_eq!((a.as_str(), b.as_str(), c.as_str()), ("data/a/b", "data/a-b", "data/ab"));
+    // case and dotted names are preserved verbatim
+    assert_eq!(portable_rel(&base.join("Files").join("MANIFEST-000005"), base), "Files/MANIFEST-000005");
+    assert_eq!(portable_rel(&base.join("files").join("sst.v2").join("x.sst"), base), "files/sst.v2/x.sst");
+    // the real checksum list is '/'-separated and never contains a backslash
+    let sums = std::fs::read_to_string(ex("SHA256SUMS")).unwrap();
+    assert!(sums.lines().all(|l| !l.contains('\\') && l.split_once("  ").map_or(false, |(_, p)| p.contains('/'))));
 }
