@@ -11,4 +11,16 @@ rv_init
 rv_require_host Darwin arm64
 # Native host build (no --target): the binary is target/release/rocksvision; rv_macos_build
 # checks the rustc host and the Mach-O architecture (lipo), so a configured foreign target fails.
+# No AppleDouble "._*" entries (extended attributes) in the archive.
+export COPYFILE_DISABLE=1
 rv_macos_build macos-arm64 "" aarch64-apple-darwin
+# ditto -c -k (scripts/lib) still stores extended attributes (com.apple.provenance) as "._*"
+# entries; rebuild the archive from the published folder without them (zip -X, no .DS_Store).
+z="$ROOT/dist/$RV_EXE-$RV_VERSION-macos-arm64.zip"
+(cd "$ROOT/dist" && rm -f "$z" && zip -X -r -y -q "$z" macos-arm64 -x '*.DS_Store')
+rv_archive_sum "$z"
+if unzip -Z1 "$z" | grep -q '\(^\|/\)\._'; then
+  echo "error: $z contains AppleDouble ._ entries" >&2
+  exit 1
+fi
+printf 'Archive without AppleDouble entries: %s\nSHA-256: %s\n' "$z" "$(cut -d' ' -f1 "$z.sha256")"

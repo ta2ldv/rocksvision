@@ -59,6 +59,82 @@ pub fn span_cells(span: &Option<Span>) -> (String, String) {
     }
 }
 
+/// "[0x0,0x59)": a half-open file range.
+pub fn range(a: u64, b: u64) -> String {
+    format!("[0x{a:x},0x{b:x})")
+}
+
+/// "89 B (0x59)": a byte count in decimal and hex.
+pub fn bytes_dec_hex(n: u64) -> String {
+    format!("{n} B (0x{n:x})")
+}
+
+/// Explanation of the file length row: metadata, not bytes of the file.
+pub const SIZE_EXPLAIN: &str = "File length reported by the file system, not stored in or decoded from the file's bytes.";
+
+/// The file length row: file-system metadata (no offset, no length, no interpretations).
+pub fn size_row(len: u64) -> Row {
+    let f = Field::new("size", None, crate::util::human_size(len)).dv(DecodedValue::U64(len)).enc("file system metadata").explain(SIZE_EXPLAIN);
+    Row { cells: vec![f.name.clone(), "—".into(), "—".into(), f.value.clone(), f.encoding.clone(), String::new(), st_cell(f.status)], field: f }
+}
+
+/// Location lines of a physical structure (`[start, end)` in the file): file range and stored
+/// size; contents and trailer ranges when they differ from the whole; decompressed length kept
+/// separate; the next structure (link) or the gap before it (link).
+pub struct Location {
+    pub start: u64,
+    pub end: u64,
+    /// Contents range (before a trailer), if the structure has one.
+    pub contents: Option<(u64, u64)>,
+    pub trailer: Option<(u64, u64)>,
+    /// Header range (log fragments).
+    pub header: Option<(u64, u64)>,
+    pub decompressed: Option<u64>,
+    /// Next known structure: its start and node; or None at the end of the file.
+    pub next: Option<(u64, NodeKind)>,
+    /// Gap before the next structure, as a node (`[end, next)`).
+    pub gap: Option<NodeKind>,
+    pub eof: u64,
+}
+
+impl Location {
+    /// Sets the view's location lines and extent (the structure's file range).
+    pub fn apply(&self, v: &mut View) {
+        v.location = self.lines();
+        v.extent = Some(Span::file(self.start, self.end.saturating_sub(self.start)));
+    }
+
+    pub fn lines(&self) -> Vec<WhereLine> {
+        let line = |text: String| WhereLine { text, link: None };
+        let stored = self.end.saturating_sub(self.start);
+        let mut v = vec![line(format!("file {} · stored {}", range(self.start, self.end), bytes_dec_hex(stored)))];
+        let mut parts = Vec::new();
+        if let Some((a, b)) = self.header {
+            parts.push(format!("header {} = {} B", range(a, b), b - a));
+        }
+        if let Some((a, b)) = self.contents {
+            let last = if b > a { format!(", last byte 0x{:x}", b - 1) } else { String::new() };
+            parts.push(format!("{} {} = {}{last}", if self.header.is_some() { "payload" } else { "contents" }, range(a, b), bytes_dec_hex(b - a)));
+        }
+        if let Some((a, b)) = self.trailer {
+            parts.push(format!("trailer {} = {} B", range(a, b), b - a));
+        }
+        if !parts.is_empty() {
+            v.push(line(parts.join(" · ")));
+        }
+        if let Some(n) = self.decompressed {
+            v.push(line(format!("decompressed {} (block-local offsets, not file bytes)", bytes_dec_hex(n))));
+        }
+        match (&self.gap, &self.next) {
+            (Some(g), Some((at, _))) => v.push(WhereLine { text: format!("gap {} before the next structure ›", range(self.end, *at)), link: Some(Target { node: g.clone(), span: Some(Span::file(self.end, at - self.end)) }) }),
+            (None, Some((at, k))) => v.push(WhereLine { text: format!("next structure at 0x{at:x} ›"), link: Some(Target { node: k.clone(), span: None }) }),
+            _ if self.end >= self.eof => v.push(line(format!("ends at end of file (0x{:x})", self.eof))),
+            _ => {}
+        }
+        v
+    }
+}
+
 pub fn field_row(f: Field) -> Row {
     let (o, l) = span_cells(&f.span);
     Row {
@@ -69,6 +145,11 @@ pub fn field_row(f: Field) -> Row {
 
 pub fn st_cell(s: Status) -> String {
     format!("{} {}", s.symbol(), s.label())
+}
+
+/// Status cell with its own word (same glyph), e.g. "✂ Incomplete (no LAST)".
+pub fn st_word_cell(s: Status, word: &str) -> String {
+    format!("{} {word}", s.symbol())
 }
 
 /// Fact → field with an explanation (empty explanation leaves the field without one).

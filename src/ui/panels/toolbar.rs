@@ -156,11 +156,17 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
             }
             ui.label(format!("{:.0}%", st.prefs().zoom() * 100.0));
             let can = st.can_zoom_in();
-            let plus = ui.add_enabled(can, egui::Button::new("A+"));
-            tok.bevel(ui.painter(), plus.rect);
-            let plus = plus.on_hover_text(menu::tip("Zoom in", MenuCmd::ZoomIn)).on_disabled_hover_text(format!("At layout limit ({:.0}%)", st.prefs().zoom_ceiling() * 100.0));
-            if plus.clicked() {
-                acts.push(Action::ZoomIn);
+            if can {
+                let plus = ui.button("A+");
+                tok.bevel(ui.painter(), plus.rect);
+                if plus.on_hover_text(menu::tip("Zoom in", MenuCmd::ZoomIn)).clicked() {
+                    acts.push(Action::ZoomIn);
+                }
+            } else {
+                // Disabled A+: muted text, no fill, a thin outline only, no hover effect.
+                let plus = ui.add_enabled(false, egui::Button::new(egui::RichText::new("A+").color(tok.p.text_muted)).frame(false));
+                ui.painter().rect_stroke(plus.rect, tok.w.rounding, egui::Stroke::new(1.0, tok.p.border_control), egui::StrokeKind::Inside);
+                plus.on_disabled_hover_text(zoom_limit_tip(st.prefs().zoom_ceiling()));
             }
             let reset = ui.add_enabled(!view_is_default, egui::Button::new("Reset View"));
             tok.bevel(ui.painter(), reset.rect);
@@ -171,10 +177,20 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
     }
 }
 
+/// Tooltip of the disabled A+ at the layout-aware zoom ceiling.
+pub fn zoom_limit_tip(ceiling: f32) -> String {
+    format!("Largest zoom that fits this window ({:.0} %). Enlarge the window to zoom further.", ceiling * 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ui::theme::{apply_theme, THEMES};
+
+    #[test]
+    fn disabled_zoom_in_tooltip_names_the_limit() {
+        assert_eq!(zoom_limit_tip(1.1), "Largest zoom that fits this window (110 %). Enlarge the window to zoom further.");
+    }
 
     /// Runs `frames` toolbar frames at `w` points (logical, zoom `z`) and returns the rightmost
     /// group edge minus the toolbar's right edge (> 0 = cut off).

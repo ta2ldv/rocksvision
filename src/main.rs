@@ -44,6 +44,26 @@ fn alloc_console_for_cli() {
     }
 }
 
+/// Windows only: when this process allocated its own console, a panic message would vanish with
+/// the window as the process ends. Chain a hook after the default one (which prints the
+/// message) that waits for Enter first. Installed only after AllocConsole succeeded; GUI mode
+/// and attached/redirected consoles keep the default hook. NOT compiler- or runtime-verified on
+/// Windows (developed on macOS).
+#[cfg(windows)]
+fn install_own_console_panic_hook() {
+    if !OWN_CONSOLE.load(Ordering::Relaxed) {
+        return;
+    }
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        use std::io::Write;
+        eprint!("\nPress Enter to close this window.");
+        let _ = std::io::stderr().flush();
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }));
+}
+
 #[cfg(not(windows))]
 fn attach_parent_console() -> bool {
     true
@@ -51,6 +71,9 @@ fn attach_parent_console() -> bool {
 
 #[cfg(not(windows))]
 fn alloc_console_for_cli() {}
+
+#[cfg(not(windows))]
+fn install_own_console_panic_hook() {}
 
 /// Exits with `code`; a console this process allocated would close at once, so it first waits
 /// for Enter there (Windows CLI started without a terminal). Unix: plain exit.
@@ -76,6 +99,7 @@ fn main() {
     let cli = args.first().map(|s| s.as_str()) == Some("--dump") || args.iter().any(|a| a == "-h" || a == "--help");
     if cli && !attached {
         alloc_console_for_cli();
+        install_own_console_panic_hook();
     }
     if args.first().map(|s| s.as_str()) == Some("--dump") {
         let Some(path) = args.get(1) else { usage() };

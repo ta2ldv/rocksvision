@@ -1,0 +1,26 @@
+# Capture 40 (PLACEHOLDER): large fixture responsiveness. Generate first (see tests/evidence-0011/large-fixtures.md), then
+#   --set LARGE=<dir containing large-wal.log and large.sst>   --set F=large-wal.log   (repeat with F=large.sst)
+# Placeholders: PATH_X/Y, ROW_X/Y (a table row visible after the first page), BYTE_X/Y (a hex cell, from a full-screen shot).
+# Measure from action.log timestamps: t(open Enter) -> shot at 1 s, 3 s; click BYTE -> shot (highlight latency; shot is +~0.2 s after sleep 0.05).
+# Not measured by this script: resident memory (read with `ps -o rss= -p <app pid>` before the open and after the 3 s shot, by the coordinator);
+# cancel-on-navigation (open the file, immediately open a small fixture, confirm via ps CPU and the UI that the scan stopped).
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{LARGE}}/{{F}}
+note OPEN-ENTER (t0 = this line's timestamp)
+key return
+sleep 1
+shot large_{{F}}_01_t1s
+sleep 2
+shot large_{{F}}_02_t3s
+note first tree page / summary visible at 1 s? at 3 s? (read from the shots, not assumed)
+click {{ROW_X}} {{ROW_Y}}
+sleep 0.5
+shot large_{{F}}_03_row
+note BYTE-CLICK (t0 = next line)
+click {{BYTE_X}} {{BYTE_Y}}
+sleep 0.05
+shot large_{{F}}_04_byte_highlight
+note PASS: highlight visible in 04 (<= 0.3 s after the click per action.log); no spinner stuck; compare timestamps, report measured numbers only
+release_mods

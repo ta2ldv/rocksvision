@@ -5,6 +5,8 @@
 //! Mutators are visible to `app` only.
 
 use super::hex::HexState;
+use super::jobs::ViewTarget;
+use super::selection::SelSnapshot;
 use crate::discover::{DirEntry, FileKind};
 use crate::limits::LIMITS;
 use crate::model::*;
@@ -12,6 +14,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 pub const FILE_SPACE_TITLE: &str = "File offsets (physical bytes as stored)";
+
+/// One history step: the view, its selection and the byte-view position (space + the offset
+/// shown), restored together by Back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistEntry {
+    pub kind: NodeKind,
+    pub sel: SelSnapshot,
+    pub hex_space: Space,
+    pub hex_at: u64,
+}
 
 #[derive(Clone, Debug)]
 pub struct TreeNode {
@@ -26,6 +38,38 @@ pub struct TreeNode {
     pub diag: Option<Box<Diagnostic>>,
     /// Problem status inside the node that `status` does not show (`Child::contains`).
     pub contains: Option<Status>,
+    /// Structure at its canonical place, labeled view, reference (link) or "not present" line.
+    pub role: ChildRole,
+    /// Group check coverage (`Child::checked`); updated from the members when they load.
+    pub checked: Option<(u64, u64)>,
+}
+
+impl TreeNode {
+    /// No status glyph: a group none of whose members was checked yet.
+    pub fn unchecked(&self) -> bool {
+        matches!(self.checked, Some((0, _)))
+    }
+    /// Label with the group coverage suffix (" · not checked" / " · 3 of 64 checked").
+    pub fn full_label(&self) -> String {
+        format!("{}{}", self.label, check_suffix(self.checked))
+    }
+    /// The one glyph a node shows: the worse of its own status and a problem inside it.
+    pub fn shown_status(&self) -> Status {
+        match self.contains {
+            Some(c) if rank(c) > rank(self.status) => c,
+            _ => self.status,
+        }
+    }
+}
+
+/// Severity order for the single tree glyph (higher is worse).
+fn rank(s: Status) -> u8 {
+    match s {
+        Status::Present | Status::Implicit | Status::NotPresent => 0,
+        Status::Unknown | Status::Unsupported | Status::Limited => 1,
+        Status::Truncated => 2,
+        Status::Invalid => 3,
+    }
 }
 
 pub struct DocumentSession {
@@ -49,8 +93,11 @@ pub struct DocumentSession {
     sel_node: Option<usize>,
     view: Option<View>,
     view_kind: Option<NodeKind>,
-    pending_view: Option<NodeKind>,
-    history: Vec<NodeKind>,
+    /// View request in flight and its job id (replies are matched by id).
+    pending_view: Option<(ViewTarget, u64)>,
+    history: Vec<HistEntry>,
+    /// One-shot request for the tree to scroll this node into view (a reveal).
+    tree_scroll: Option<usize>,
     hex: HexState,
     goto: String,
     status_msg: String,
@@ -79,6 +126,7 @@ impl DocumentSession {
             view_kind: None,
             pending_view: None,
             history: Vec::new(),
+            tree_scroll: None,
             hex: HexState::default(),
             goto: String::new(),
             status_msg: "Open a RocksDB data folder or a single WAL / SST / MANIFEST / CURRENT file.".into(),
@@ -136,8 +184,26 @@ impl DocumentSession {
     pub fn view_kind(&self) -> Option<&NodeKind> {
         self.view_kind.as_ref()
     }
-    pub fn pending_view(&self) -> Option<&NodeKind> {
-        self.pending_view.as_ref()
+    pub fn pending_view(&self) -> Option<&ViewTarget> {
+        self.pending_view.as_ref().map(|p| &p.0)
+    }
+    /// Index of a loaded tree node of this kind (the first one at its canonical place).
+    pub fn node_of(&self, k: &NodeKind) -> Option<usize> {
+        self.nodes.iter().position(|n| &n.kind == k && n.role != ChildRole::Reference)
+    }
+    /// Sibling of tree node `i` in tree order (`forward` = next), skipping "not present" lines.
+    pub fn sibling(&self, i: usize, forward: bool) -> Option<usize> {
+        let list: &[usize] = match self.nodes.iter().position(|n| n.children.as_deref().is_some_and(|c| c.contains(&i))) {
+            Some(p) => self.nodes[p].children.as_deref().unwrap_or(&[]),
+            None => &self.roots,
+        };
+        let pos = list.iter().position(|&x| x == i)?;
+        let ok = |x: &usize| self.nodes[*x].role != ChildRole::Absent;
+        if forward {
+            list[pos + 1..].iter().find(|x| ok(x)).copied()
+        } else {
+            list[..pos].iter().rev().find(|x| ok(x)).copied()
+        }
     }
     pub fn can_go_back(&self) -> bool {
         !self.history.is_empty()
@@ -169,11 +235,6 @@ impl DocumentSession {
             }
         }
         (space.label(), self.hex.size)
-    }
-    /// Smallest row of the current view whose span contains the offset.
-    pub(super) fn row_at(&self, space: Space, off: u64) -> Option<(usize, Option<Span>)> {
-        let v = self.view.as_ref()?;
-        v.rows.iter().enumerate().filter(|(_, r)| r.field.span.map(|s| s.contains(space, off)).unwrap_or(false)).min_by_key(|(_, r)| r.field.span.map(|s| s.len).unwrap_or(u64::MAX)).map(|(i, r)| (i, r.field.span))
     }
     /// A change-on-disk check is due (interval elapsed, file opened, no check in flight).
     pub(super) fn stat_due(&self, stat_pending: bool) -> bool {
@@ -228,6 +289,7 @@ impl DocumentSession {
         self.view_kind = None;
         self.pending_view = None;
         self.history.clear();
+        self.tree_scroll = None;
         self.hex = HexState::default();
     }
 
@@ -289,6 +351,13 @@ impl DocumentSession {
     }
 
     pub(super) fn children_arrived(&mut self, node: usize, children: Vec<Child>, error: Option<String>) {
+        // A reveal may already have filled this node; its children stay (no duplicate nodes).
+        if error.is_none() && self.nodes.get(node).is_some_and(|n| n.children.is_some()) {
+            if let Some(n) = self.nodes.get_mut(node) {
+                n.loading = false;
+            }
+            return;
+        }
         let depth = self.nodes.get(node).map(|n| n.depth + 1).unwrap_or(0);
         let mut ids: Vec<usize> = children.into_iter().map(|c| self.add_node(c, depth)).collect();
         if let Some(e) = error {
@@ -303,12 +372,81 @@ impl DocumentSession {
         if let Some(n) = self.nodes.get_mut(node) {
             n.loading = false;
             n.children = Some(ids);
+            self.aggregate_group(node);
         }
     }
 
     fn add_node(&mut self, c: Child, depth: usize) -> usize {
-        self.nodes.push(TreeNode { label: c.label, kind: c.kind, status: c.status, leaf: c.leaf, depth, children: None, expanded: false, loading: false, diag: c.diag, contains: c.contains });
+        self.nodes.push(TreeNode { label: c.label, kind: c.kind, status: c.status, leaf: c.leaf, depth, children: None, expanded: false, loading: false, diag: c.diag, contains: c.contains, role: c.role, checked: c.checked });
         self.nodes.len() - 1
+    }
+
+    /// A group's status from its loaded members (gaps are not members): the worst checked
+    /// status, Present only when every member was checked and Present; then its parent groups.
+    fn aggregate_group(&mut self, node: usize) {
+        let mut cur = Some(node);
+        while let Some(i) = cur {
+            if self.nodes[i].checked.is_none() {
+                return;
+            }
+            let Some(kids) = self.nodes[i].children.clone() else { return };
+            let members: Vec<usize> = kids.into_iter().filter(|&k| !matches!(self.nodes[k].kind, NodeKind::SstGap { .. })).collect();
+            let checked: Vec<Status> = members.iter().filter(|&&k| !self.nodes[k].unchecked() && !(self.nodes[k].checked.is_some_and(|(x, y)| x < y))).map(|&k| self.nodes[k].shown_status()).collect();
+            let worst = checked.iter().copied().max_by_key(|s| rank(*s)).unwrap_or(Status::Unknown);
+            let n = members.len() as u64;
+            let x = checked.len() as u64;
+            self.nodes[i].checked = Some((x, n));
+            self.nodes[i].status = if x == 0 || (x < n && rank(worst) == 0) { Status::Unknown } else { worst };
+            cur = self.nodes.iter().position(|p| p.children.as_deref().is_some_and(|c| c.contains(&i)));
+        }
+    }
+
+    /// Applies a canonical path: expands each ancestor (adding the children the worker sent
+    /// where the node has none yet), selects the target node and asks the tree to scroll to it.
+    /// Never touches the row/byte selection. Returns the target node, if found.
+    pub(super) fn reveal(&mut self, path: Vec<(NodeKind, Vec<Child>)>, target: &NodeKind) -> Option<usize> {
+        if *target == NodeKind::Root {
+            self.sel_node = None;
+            return None;
+        }
+        let mut level: Vec<usize> = self.roots.clone();
+        for (anc, kids) in path {
+            let i = level.iter().copied().find(|&i| self.nodes[i].kind == anc && self.nodes[i].role != ChildRole::Reference)?;
+            if self.nodes[i].children.is_none() {
+                let depth = self.nodes[i].depth + 1;
+                let ids: Vec<usize> = kids.into_iter().map(|c| self.add_node(c, depth)).collect();
+                self.nodes[i].children = Some(ids);
+                self.aggregate_group(i);
+            }
+            self.nodes[i].loading = false;
+            self.nodes[i].expanded = true;
+            level = self.nodes[i].children.clone().unwrap_or_default();
+        }
+        let t = level.iter().copied().find(|&i| self.nodes[i].kind == *target && self.nodes[i].role != ChildRole::Reference)?;
+        self.sel_node = Some(t);
+        self.tree_scroll = Some(t);
+        Some(t)
+    }
+
+    /// Selects an already loaded node of this kind (Back), without loading anything.
+    pub(super) fn select_loaded(&mut self, k: &NodeKind) {
+        if *k == NodeKind::Root {
+            self.sel_node = None;
+        } else if let Some(i) = self.node_of(k) {
+            self.sel_node = Some(i);
+            self.tree_scroll = Some(i);
+        }
+    }
+
+    /// Selects loaded tree node `i` and asks the tree to scroll to it (structure step).
+    pub(super) fn select_and_reveal(&mut self, i: usize) -> Option<NodeKind> {
+        let k = self.select_node(Some(i))?;
+        self.tree_scroll = Some(i);
+        Some(k)
+    }
+
+    pub(super) fn take_tree_scroll(&mut self) -> Option<usize> {
+        self.tree_scroll.take()
     }
 
     #[cfg(test)]
@@ -321,31 +459,43 @@ impl DocumentSession {
         self.file_stat = Some(stat);
     }
 
-    /// Records the view request (and pushes the current view on the history if asked).
-    pub(super) fn request_view(&mut self, k: NodeKind, push_history: bool) {
-        if push_history {
-            if let Some(cur) = self.view_kind.clone() {
-                self.history.push(cur);
-                if self.history.len() > LIMITS.history {
-                    self.history.remove(0);
-                }
+    /// Records the view request `req`; with `history` (the current selection and byte-view
+    /// position) the current view is pushed on the history so Back restores all of it.
+    pub(super) fn request_view(&mut self, t: ViewTarget, req: u64, history: Option<(SelSnapshot, Space, u64)>) {
+        if let (Some((sel, hex_space, hex_at)), Some(kind)) = (history, self.view_kind.clone()) {
+            let e = HistEntry { kind, sel, hex_space, hex_at };
+            if self.history.last() != Some(&e) {
+                self.history.push(e);
+            }
+            if self.history.len() > LIMITS.history {
+                self.history.remove(0);
             }
         }
-        self.pending_view = Some(k);
+        self.pending_view = Some((t, req));
     }
 
-    pub(super) fn pop_history(&mut self) -> Option<NodeKind> {
+    pub(super) fn pop_history(&mut self) -> Option<HistEntry> {
         self.history.pop()
     }
 
-    /// Applies a view reply if it answers the view requested. Returns true if it was applied.
-    pub(super) fn accept_view(&mut self, kind: NodeKind, view: View) -> bool {
-        if self.pending_view.as_ref() != Some(&kind) {
+    /// Applies a view reply if it answers the view request in flight (by job id). Returns true
+    /// if it was applied.
+    pub(super) fn accept_view(&mut self, req: u64, kind: NodeKind, view: View) -> bool {
+        if self.pending_view.as_ref().map(|p| p.1) != Some(req) {
             return false;
         }
         self.pending_view = None;
         self.view_kind = Some(kind);
         self.view = Some(view);
+        true
+    }
+
+    /// The located byte had no structure: the request is answered without a new view.
+    pub(super) fn drop_pending(&mut self, req: u64) -> bool {
+        if self.pending_view.as_ref().map(|p| p.1) != Some(req) {
+            return false;
+        }
+        self.pending_view = None;
         true
     }
 

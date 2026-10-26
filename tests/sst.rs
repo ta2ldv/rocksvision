@@ -130,7 +130,9 @@ fn sst_physical_and_decompressed_are_separate_spaces() {
             assert_eq!(v.spaces[0].space, Space::Block(h.offset), "{dir}");
             assert_eq!(v.spaces[0].size, b.data.len() as u64);
             assert_ne!(v.spaces[0].size, h.size, "{dir}: sizes must differ");
-            assert!(v.title.contains(&format!("{} B stored", h.size)), "{}", v.title);
+            // stored = on-disk extent incl. the 5-byte trailer; decompressed = decompressed length (task 0006)
+            assert!(v.title.contains(&format!("stored {} B", h.size + 5)), "{}", v.title);
+            assert!(v.title.contains(&format!("decompressed {} B", b.data.len())), "{}", v.title);
             for r in &v.rows {
                 let sp = r.field.span.unwrap();
                 assert_eq!(sp.space, Space::Block(h.offset), "{dir}: entry span must be block-local");

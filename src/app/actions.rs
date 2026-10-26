@@ -3,7 +3,7 @@
 
 use super::state::ZoomFit;
 pub use super::view_prefs::Panel;
-use crate::model::{Space, Span};
+use crate::model::{NodeKind, Space, Span};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,6 +91,16 @@ pub enum Action {
     FollowRow(usize),
     FollowSelected,
     MoveRow(RowMove),
+    /// Go to a canonical structure (every link, reference node and location link): expand its
+    /// ancestors, select and reveal its tree node, show its view, select `span` (or the
+    /// target's row) there, move the byte view; Back returns.
+    Navigate { target: NodeKind, span: Option<Span> },
+    /// `]` / `[`: next / previous field of the current table in span order (one step).
+    StepField(bool),
+    /// `Shift+]` / `Shift+[`: next / previous sibling structure in tree order (one step).
+    StepStructure(bool),
+    /// Show / hide the table columns hidden for lack of width ("+N columns").
+    ToggleAllColumns,
     // ---- byte view ----
     HexPage(u64),
     HexShowSpace(Space),

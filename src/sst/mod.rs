@@ -8,6 +8,7 @@
 pub mod block;
 pub mod compress;
 pub mod footer;
+pub mod layout;
 
 use crate::io::{read_vec, RangeRead, RangeReader};
 use crate::limits::{BLOCK_CACHE_BYTES, BLOCK_CACHE_ITEMS, KNOWN_BLOCK_HANDLES, MAX_DECOMPRESSED};
@@ -28,8 +29,13 @@ pub struct MetaEntry {
 impl MetaEntry {
     /// "filter.<policy>": obsolete block-based filter (pre-full-filter), not decoded.
     pub fn is_legacy_filter(&self) -> bool {
-        self.name.starts_with("filter.")
+        is_legacy_filter_name(&self.name)
     }
+}
+
+/// Metaindex name of an obsolete block-based filter ("filter.<policy>", table/meta_blocks.cc).
+pub fn is_legacy_filter_name(name: &str) -> bool {
+    name.starts_with("filter.")
 }
 
 /// Entries of one block as decoded for a view: the block, its layout and entries, and the
@@ -50,10 +56,17 @@ pub struct SstInspector {
     /// Public as a shim for tests; read it through `meta()`.
     pub meta: Result<Vec<MetaEntry>, String>,
     props: Option<BTreeMap<String, Vec<u8>>>,
+    /// Where each property value is stored (properties block contents space).
+    prop_spans: BTreeMap<String, Span>,
+    /// Physical layout (built on first use; index reads only, bounded).
+    layout: Option<Arc<layout::PhysLayout>>,
     cache: BlockCache,
     dict: Option<Option<Arc<Vec<u8>>>>,
     /// Handles of blocks decoded so far (bounded), so evicted blocks can be re-read for the hex view.
     known: std::collections::HashMap<u64, (Handle, BlockKind)>,
+    /// Integrity status of blocks already checked (bounded): group nodes report coverage
+    /// from it without reading any block.
+    checked: std::collections::HashMap<(u64, u64), Status>,
 }
 
 /// table_properties.cc / meta_blocks.cc: properties written with PutVarint64.
@@ -164,7 +177,7 @@ impl SstInspector {
                 (Err(m.clone()), Some(Diagnostic::new(CheckKind::Truncation, Some(Span::file(len - tail_len, tail_len)), Trust::Untrusted, "the file is not decoded", m)))
             }
         };
-        let mut s = SstInspector { r, path, footer, footer_diag, meta: Err("footer not decoded".into()), props: None, cache: BlockCache::new(BLOCK_CACHE_ITEMS, BLOCK_CACHE_BYTES), dict: None, known: std::collections::HashMap::new() };
+        let mut s = SstInspector { r, path, footer, footer_diag, meta: Err("footer not decoded".into()), props: None, prop_spans: BTreeMap::new(), layout: None, cache: BlockCache::new(BLOCK_CACHE_ITEMS, BLOCK_CACHE_BYTES), dict: None, known: std::collections::HashMap::new(), checked: std::collections::HashMap::new() };
         if let Ok(f) = s.footer.clone() {
             let b = s.block(f.metaindex, BlockKind::Metaindex);
             s.meta = match (&b.error, block::layout(&b.data)) {
@@ -187,6 +200,7 @@ impl SstInspector {
                 if let Ok(lay) = block::layout(&b.data) {
                     let (es, _) = block::entries(&b.data, &lay, None);
                     s.props = Some(es.iter().map(|e| (String::from_utf8_lossy(&e.key).into_owned(), b.data[e.value_off..e.value_off + e.value_len].to_vec())).collect());
+                    s.prop_spans = es.iter().map(|e| (String::from_utf8_lossy(&e.key).into_owned(), b.span(e.value_off, e.value_len))).collect();
                 }
             }
         }
@@ -227,6 +241,27 @@ impl SstInspector {
     /// Raw value of a table property (None if absent or the block was not decoded).
     pub fn prop(&self, name: &str) -> Option<&[u8]> {
         self.props.as_ref()?.get(name).map(|v| v.as_slice())
+    }
+    /// Bytes of a table property's value (file offsets, or the properties block's decompressed
+    /// space when it was compressed).
+    pub fn prop_span(&self, name: &str) -> Option<Span> {
+        self.prop_spans.get(name).copied()
+    }
+    /// Physical layout of the table: every known structure by file offset (bounded index
+    /// walk; cached once complete). See `layout::PhysLayout`.
+    pub fn layout(&mut self, cancel: &dyn Fn() -> bool) -> Arc<layout::PhysLayout> {
+        if let Some(l) = &self.layout {
+            return l.clone();
+        }
+        let l = Arc::new(layout::build(self, cancel));
+        if !l.cancelled {
+            self.layout = Some(l.clone());
+        }
+        l
+    }
+    /// Compression type byte of block `h` (first trailer byte), if readable.
+    pub fn block_ctype(&self, h: Handle) -> Option<u8> {
+        read_vec(&*self.r, h.offset + h.size, 1).ok().and_then(|b| b.first().copied())
     }
     /// The 5 trailer bytes (compression type + checksum) after block `h`, bounded by the file.
     pub fn trailer_bytes(&self, h: Handle) -> Vec<u8> {
@@ -327,8 +362,23 @@ impl SstInspector {
         self.block_check(h).0
     }
 
-    /// `block_status` plus the problem as data (None when the block verified).
+    /// `block_status` plus the problem as data (None when the block verified). The result is
+    /// remembered (bounded) for group coverage (`checked_status`).
     pub fn block_check(&mut self, h: Handle) -> (Status, Option<Diagnostic>) {
+        let r = self.block_check_uncached(h);
+        if self.checked.len() >= KNOWN_BLOCK_HANDLES {
+            self.checked.clear();
+        }
+        self.checked.insert((h.offset, h.size), r.0);
+        r
+    }
+
+    /// Status of block `h` if it was already checked (never reads).
+    pub fn checked_status(&self, h: Handle) -> Option<Status> {
+        self.checked.get(&(h.offset, h.size)).copied()
+    }
+
+    fn block_check_uncached(&mut self, h: Handle) -> (Status, Option<Diagnostic>) {
         if let Some(b) = self.cache.get(h.offset).filter(|b| b.handle == h) {
             let d = b.diags.first().cloned();
             return match &b.error {

@@ -1095,6 +1095,26 @@ fn walk(dir: &Path, base: &Path, acc: &mut Vec<PathBuf>) -> R<()> {
     Ok(())
 }
 
+/// `fixture-gen large <OUT_DIR>`: writes `<OUT_DIR>/large.sst` for responsiveness tests (NOT a committed fixture).
+/// 30000 Puts, compression NONE, block_size 256 B, no filter; values ~120 B => ~2 entries per data block => >= 10k data blocks.
+fn large(out: &Path) -> R<()> {
+    fs::create_dir_all(out)?;
+    let mut bbo = BlockBasedOptions::default();
+    bbo.set_block_size(256);
+    let mut o = Options::default();
+    o.set_compression_type(DBCompressionType::None);
+    o.set_block_based_table_factory(&bbo);
+    let p = out.join("large.sst");
+    let mut w = SstFileWriter::create(&o);
+    w.open(&p)?;
+    for i in 0..30000usize {
+        w.put(format!("lkey-{i:06}"), format!("lval-{i:06}:{}", "0123456789abcdef".repeat(7)))?;
+    }
+    w.finish()?;
+    println!("wrote {} ({} bytes)", p.display(), fs::metadata(&p)?.len());
+    Ok(())
+}
+
 fn main() -> R<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s == "examples").unwrap_or(false) {
@@ -1102,6 +1122,9 @@ fn main() -> R<()> {
     }
     if args.get(1).map(|s| s == "examples-verify").unwrap_or(false) {
         return examples::verify(Path::new(&args[2]), Path::new(&args[3]));
+    }
+    if args.get(1).map(|s| s == "large").unwrap_or(false) {
+        return large(Path::new(&args[2]));
     }
     if args.get(1).map(|s| s == "--verify").unwrap_or(false) {
         return verify(Path::new(&args[2]), Path::new(&args[3]));

@@ -80,7 +80,7 @@ impl Inspector {
         match self {
             Inspector::Log(l) => l.children(k),
             Inspector::Sst(s) => s.children(k, cancel),
-            Inspector::Current { .. } if *k == NodeKind::Root => vec![Child::new("Observed levels (via MANIFEST)", NodeKind::ManifestLevels).leaf()],
+            Inspector::Current { .. } if *k == NodeKind::Root => vec![Child::new("Observed levels (via MANIFEST)", NodeKind::ManifestLevels).role(ChildRole::View).leaf()],
             Inspector::Text { .. } if *k == NodeKind::Root => vec![Child::new("Text preview", NodeKind::TextPreview).leaf()],
             _ => Vec::new(),
         }
@@ -108,6 +108,30 @@ impl Inspector {
                 }))
             }
             Inspector::Text { r, kind, .. } => text_view(&**r, *kind),
+        }
+    }
+
+    /// Canonical tree path of `target`: the ancestors below the root, outermost first (the
+    /// target itself excluded). None when the target has no node in this file's tree (or the
+    /// bounded search did not find it).
+    pub fn path_to(&mut self, target: &NodeKind, cancel: &dyn Fn() -> bool) -> Option<Vec<NodeKind>> {
+        match self {
+            Inspector::Log(l) => l.path_to(target, cancel),
+            Inspector::Sst(s) => s.path_to(target, cancel),
+            _ if matches!(target, NodeKind::Root | NodeKind::ManifestLevels | NodeKind::TextPreview) => Some(Vec::new()),
+            _ => None,
+        }
+    }
+
+    /// The structure that holds byte `off` of `space` and what to select in its view: (node,
+    /// "select the narrowest field at this offset", structure span when no field applies).
+    /// File bytes only; derived spaces are resolved by the view that shows them.
+    pub fn locate(&mut self, space: Space, off: u64, cancel: &dyn Fn() -> bool) -> Option<(NodeKind, Option<(Space, u64)>, Option<Span>)> {
+        match (self, space) {
+            (Inspector::Log(l), Space::File) => l.locate(off),
+            (Inspector::Sst(s), Space::File) => s.locate(off, cancel),
+            (Inspector::Log(_), Space::Record(o)) => Some((NodeKind::LogRecord(o), Some((space, off)), None)),
+            _ => None,
         }
     }
 

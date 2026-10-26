@@ -3,6 +3,7 @@
 //! Widths come from `layout::status_widths`: the hint is truncated (then dropped) first, then
 //! the message, then the file label; every truncated segment shows its full text on hover.
 
+use crate::app::provenance;
 use crate::app::{Action, AppState};
 use crate::model::Status;
 use crate::ui::layout::{status_widths, LAYOUT};
@@ -15,7 +16,18 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
     tok.paint_chrome(ui, ui.clip_rect());
     let doc = st.session();
     let find = st.search();
-    let sel = st.selection().span().map(|s| format!("selection: {s}")).unwrap_or_default();
+    // Mirror of the Explanation "Where": file range(s) first, then the derived offset.
+    let sel = if st.selection().is_structure() && st.selection().anchor().is_none() {
+        // The whole structure: "selection: structure Physical blocks · file [0x0,0x37d00)".
+        let name = doc.sel_node().and_then(|i| doc.nodes().get(i)).filter(|n| Some(&n.kind) == doc.view_kind()).map(|n| n.label.clone()).or_else(|| doc.view().map(|v| v.title.clone())).unwrap_or_default();
+        match st.selection().span() {
+            Some(s) if s.space == crate::model::Space::File => format!("selection: structure {name} · file [0x{:x},0x{:x})", s.offset, s.offset + s.len),
+            Some(s) => format!("selection: structure {name} · {}", provenance::status_text(doc.view(), &s)),
+            None => format!("selection: structure {name}"),
+        }
+    } else {
+        st.selection().span().map(|s| format!("selection: {}", provenance::status_text(doc.view(), &s))).unwrap_or_default()
+    };
     let mut msg: Vec<String> = Vec::new();
     if doc.file().is_some() && doc.changed() {
         msg.push("⚠ file changed on disk since open — reopen to refresh".into());

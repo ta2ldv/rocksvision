@@ -1,0 +1,59 @@
+# Capture 39 (PLACEHOLDER): keyboard navigation. NOTE: bracket keys are 'rbracket' / 'lbracket' (added to gui-drive.py KEYS).
+# Placeholders: PATH_X/Y, ROW1_X/Y (first table row, to focus the table), FILE (default {{FIXTURES}}/wal-basic/000004.log - use a file with >= 40 nodes;
+#   e.g. --set FILE={{FIXTURES}}/wal-fragmented/000004.log).
+# Expected: EACH key press changes the selection by exactly ONE step (next/previous sibling-in-order for ]/[ , Shift+] = the bigger step defined by the
+# build); no flicker, no drift, no skipped step. Verify with action.log timestamps + the shot every 5 presses (screenshots alone prove nothing).
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FILE}}
+key return
+sleep 2.5
+click {{ROW1_X}} {{ROW1_Y}}
+sleep 0.4
+shot navkeys_00_start
+note SERIES 1: ] x10, shot after 5 and 10. EXPECT selection index +1 per press (start+5 at shot 01, start+10 at shot 02)
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.4
+shot navkeys_01_next5
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.25
+key rbracket
+sleep 0.4
+shot navkeys_02_next10
+note SERIES 2: [ x3, shot after 3. EXPECT back to start+7
+key lbracket
+sleep 0.25
+key lbracket
+sleep 0.25
+key lbracket
+sleep 0.4
+shot navkeys_03_prev3
+note SERIES 3: Shift+] x5, shot after 5. EXPECT each press = one step of the Shift+] unit defined in the design (not several unit jumps)
+key rbracket shift
+sleep 0.25
+key rbracket shift
+sleep 0.25
+key rbracket shift
+sleep 0.25
+key rbracket shift
+sleep 0.25
+key rbracket shift
+sleep 0.4
+shot navkeys_04_shift_next5
+note PASS: shots 01/02/03/04 show start+5, start+10, start+7 and start+7+5*S; action.log has exactly 18 bracket key events, no extra events
+release_mods

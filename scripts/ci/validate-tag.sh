@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI gate for tag-triggered release builds (.github/workflows/release-build.yml).
+# CI gate for release:published builds (.github/workflows/release-build.yml, "Release packages").
 # Usage: scripts/ci/validate-tag.sh <tag>
 # Passes only for a strict stable tag vMAJOR.MINOR.PATCH (no leading zeros, no suffix) whose
 # version is >= 0.1.1 and equals the package version in Cargo.toml. v0.1.0 (the existing

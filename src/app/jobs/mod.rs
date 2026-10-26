@@ -12,7 +12,7 @@ mod io_pool;
 mod search;
 
 use crate::discover::DirEntry;
-use crate::model::{Child, NodeKind, Space, View};
+use crate::model::{Child, NodeKind, Space, Span, View};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -24,11 +24,35 @@ pub use io_pool::DelayBackend;
 pub use io_pool::{FsBackend, IoBackend, REFUSED};
 pub use search::{parse_query, search_file, SEARCH_CHUNK};
 
+/// What a view request shows: a node, or the structure holding a byte (resolved by the worker).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ViewTarget {
+    Node(NodeKind),
+    Locate { space: Space, off: u64 },
+}
+
+/// Canonical path of a navigation target: each ancestor (outermost first, below the root)
+/// with its children, so the tree can expand them without further requests.
+#[derive(Clone, Debug, Default)]
+pub struct Reveal {
+    pub path: Vec<(NodeKind, Vec<Child>)>,
+}
+
+/// What the view of a located byte should select once it arrives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SelectHint {
+    /// Select the narrowest field holding this byte.
+    pub at: Option<(Space, u64)>,
+    /// Otherwise select this structure range (or the row with exactly this span).
+    pub span: Option<Span>,
+}
+
 /// Decode-worker requests.
 pub enum Request {
     Open(PathBuf),
     Children { node: u64, kind: NodeKind },
-    View(NodeKind),
+    /// View of a node or located byte; `reveal` also returns the canonical tree path.
+    View { target: ViewTarget, reveal: bool },
     /// A hex page of a derived (decompressed/reassembled) space.
     Bytes { space: Space, off: u64, len: u64 },
     /// Copy-hex of derived bytes for selection `sel`; `requested` is the selection length.
@@ -48,7 +72,9 @@ pub enum Response {
     OpenFailed(String),
     /// `error`: decoding the children failed (the node is marked Invalid).
     Children { node: u64, children: Vec<Child>, error: Option<String> },
-    View { kind: NodeKind, view: View },
+    /// `req` is the job id (matched by the session), `target` echoes the request; `kind` is the
+    /// node shown (None: nothing located, or a superseded request).
+    View { req: u64, target: ViewTarget, kind: Option<NodeKind>, view: View, reveal: Option<Reveal>, select: Option<SelectHint> },
     /// A hex page (`data`, total size of the space).
     Page { req: u64, space: Space, off: u64, outcome: Outcome<(Vec<u8>, u64)> },
     /// Clipboard text + status note for selection id `sel`.
@@ -107,6 +133,9 @@ pub struct Worker {
     /// cancel the still-running scan of its folder.
     scan_cancel_upto: Arc<AtomicU64>,
     next_job: AtomicU64,
+    /// Job id of the newest view request: an older view still queued or running is obsolete
+    /// and is cancelled cooperatively (its reply is discarded by the session anyway).
+    latest_view: Arc<AtomicU64>,
     pub busy: Arc<AtomicU64>,
     /// I/O jobs currently running.
     pub io_inflight: Arc<AtomicUsize>,
@@ -132,8 +161,9 @@ impl Worker {
         let (resp_tx, rx) = channel::<Tagged<Response>>();
         let cancel = Arc::new(AtomicU64::new(0));
         let busy = Arc::new(AtomicU64::new(0));
-        decode::spawn(rx_req, resp_tx.clone(), cancel.clone(), busy.clone(), wake.clone());
-        Worker { tx, rx, resp_tx, cancel_upto: cancel, next_job: AtomicU64::new(0), scan_cancel_upto: Arc::new(AtomicU64::new(0)), busy, io_inflight: Arc::new(AtomicUsize::new(0)), search_id: Arc::new(AtomicU64::new(0)), wake, backend }
+        let latest_view = Arc::new(AtomicU64::new(0));
+        decode::spawn(rx_req, resp_tx.clone(), cancel.clone(), latest_view.clone(), busy.clone(), wake.clone());
+        Worker { tx, rx, resp_tx, cancel_upto: cancel, next_job: AtomicU64::new(0), latest_view, scan_cancel_upto: Arc::new(AtomicU64::new(0)), busy, io_inflight: Arc::new(AtomicUsize::new(0)), search_id: Arc::new(AtomicU64::new(0)), wake, backend }
     }
 
     fn next_id(&self) -> u64 {
@@ -143,6 +173,9 @@ impl Worker {
     /// Queues a decode-worker request; returns its job id immediately.
     pub fn send(&self, generation: u64, msg: Request) -> u64 {
         let job = self.next_id();
+        if matches!(msg, Request::View { .. }) {
+            self.latest_view.fetch_max(job, Ordering::SeqCst);
+        }
         let _ = self.tx.send((generation, job, msg));
         job
     }

@@ -173,10 +173,11 @@ impl LogInspector {
         if let (Some(ln), Some(e)) = (l.log_number, self.expected_log) {
             if u64::from(ln) != e & 0xffff_ffff && l.status == Status::Present {
                 let note = format!("stale record from an older log (header log number {ln}, file {e}); log_reader.cc treats it as kOldRecord");
-                l.fail(Status::Unknown, CheckKind::LogNumber, Trust::Untrusted, "log_reader.cc skips the record (kOldRecord)", note);
+                l.fail(Status::Unknown, CheckKind::LogNumber, Trust::Untrusted, "RocksVision marks the record stale (Unknown) and keeps reading the file", note);
                 if let Some(d) = l.diag.as_mut() {
                     d.expected = Some(DV::U64(e & 0xffff_ffff));
                     d.observed = Some(DV::U32(ln));
+                    d.engine = Some(log::ENGINE_OLD_RECORD);
                 }
             }
         }

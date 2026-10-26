@@ -66,6 +66,16 @@ pub const RESTARTS_LISTED: usize = 10_000;
 /// Log blocks read backwards from the end of a WAL/MANIFEST to find the FIRST fragment of a
 /// record left open at end of file (missing LAST); beyond this the start is reported unknown.
 pub const OPEN_TAIL_BLOCKS: u64 = 64;
+/// Records / VersionEdits summarised in the root view of a WAL / MANIFEST (bounded scan).
+pub const ROOT_RECORDS: usize = 64;
+/// Record pages scanned to find the tree page of a record (canonical path of a navigation).
+pub const PATH_RECORD_PAGES: usize = 64;
+/// SST data/partition handles collected for the physical layout (index reads only).
+pub const LAYOUT_HANDLES: usize = 200_000;
+/// Data blocks per layout group in the tree (and groups per parent group).
+pub const LAYOUT_GROUP: u64 = 64;
+/// Block trailers whose compression type byte is read for the root summary.
+pub const COMPRESSION_SAMPLE: usize = 4096;
 
 // ---- application ----
 pub struct Limits {

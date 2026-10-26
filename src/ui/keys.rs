@@ -27,6 +27,9 @@ pub struct Keys {
     pub shift_f3: bool,
     pub alt_left: bool,
     pub esc: bool,
+    /// `]` / `[`: next / previous field; with Shift: next / previous structure.
+    pub close_bracket: bool,
+    pub open_bracket: bool,
     // ---- accelerators that a native menu owns ----
     pub cmd_o: bool,
     pub shift_cmd_o: bool,
@@ -68,6 +71,9 @@ pub fn read(ctx: &egui::Context, st: &AppState, menu_owns_accelerators: bool, se
             shift_f3: p(K::F3) && s,
             alt_left: a && p(K::ArrowLeft),
             esc: p(K::Escape),
+            // Shift+] arrives as "}" on most layouts; both mean the same key here.
+            close_bracket: !c && !a && (p(K::CloseBracket) || p(K::CloseCurlyBracket)),
+            open_bracket: !c && !a && (p(K::OpenBracket) || p(K::OpenCurlyBracket)),
             cmd_o: c && !s && p(K::O),
             shift_cmd_o: c && s && p(K::O),
             cmd_l: c && p(K::L),
@@ -128,6 +134,11 @@ pub fn map(k: &Keys, st: &AppState, menu_owns_accelerators: bool) -> Vec<Action>
             acts.push(Action::ExpandSelectedNode);
         } else if k.left {
             acts.push(Action::CollapseSelectedNode);
+        }
+        // One step per press; inactive while a text field has focus (`nav`).
+        if k.close_bracket || k.open_bracket {
+            let forward = k.close_bracket;
+            acts.push(if k.shift { Action::StepStructure(forward) } else { Action::StepField(forward) });
         }
     }
     if k.f3 {
@@ -191,6 +202,18 @@ mod tests {
         let mut a = st();
         a.apply(Action::ZoomIn);
         assert!((a.prefs().zoom() - 1.1).abs() < 1e-4, "one press = +10 %: {}", a.prefs().zoom());
+    }
+
+    /// `]`/`[` step fields, Shift steps structures; one action per press; nothing while a text
+    /// field has focus.
+    #[test]
+    fn bracket_keys_step_once_and_not_in_text_fields() {
+        let s = st();
+        assert_eq!(map(&Keys { nav: true, close_bracket: true, ..Default::default() }, &s, true), vec![Action::StepField(true)]);
+        assert_eq!(map(&Keys { nav: true, open_bracket: true, ..Default::default() }, &s, true), vec![Action::StepField(false)]);
+        assert_eq!(map(&Keys { nav: true, close_bracket: true, shift: true, ..Default::default() }, &s, true), vec![Action::StepStructure(true)]);
+        assert_eq!(map(&Keys { nav: true, open_bracket: true, shift: true, ..Default::default() }, &s, false), vec![Action::StepStructure(false)]);
+        assert!(map(&Keys { nav: false, close_bracket: true, ..Default::default() }, &s, true).is_empty(), "text field focused");
     }
 
     #[test]

@@ -91,6 +91,8 @@ pub struct ViewPreferences {
     show_hex: bool,
     /// Id salt of panels/tables; Reset View increments it so the UI forgets remembered sizes.
     layout_epoch: u32,
+    /// Show the table columns that are hidden for lack of width ("+N columns"); session-only.
+    all_columns: bool,
 }
 
 impl ViewPreferences {
@@ -110,7 +112,16 @@ impl ViewPreferences {
             show_right: true,
             show_hex: true,
             layout_epoch: 0,
+            all_columns: false,
         }
+    }
+
+    /// The user asked to show every table column even when they do not fit.
+    pub fn all_columns(&self) -> bool {
+        self.all_columns
+    }
+    pub(super) fn toggle_all_columns(&mut self) {
+        self.all_columns = !self.all_columns;
     }
 
     pub fn theme_id(&self) -> &'static str {
@@ -170,7 +181,7 @@ impl ViewPreferences {
     /// Visibility, split and zoom are at their Reset View defaults (panel widths are UI memory
     /// and checked by the shell).
     pub fn is_default_layout(&self) -> bool {
-        self.show_left && self.show_right && self.show_hex && (self.zoom - 1.0).abs() < 1e-4 && (self.center_split - CENTER_SPLIT_DEFAULT).abs() < 1e-4
+        self.show_left && self.show_right && self.show_hex && !self.all_columns && (self.zoom - 1.0).abs() < 1e-4 && (self.center_split - CENTER_SPLIT_DEFAULT).abs() < 1e-4
     }
     /// True if Zoom In would change the zoom (toolbar/menu enabled state).
     pub fn can_zoom_in(&self) -> bool {
@@ -259,6 +270,7 @@ impl ViewPreferences {
         self.show_hex = true;
         self.center_split = CENTER_SPLIT_DEFAULT;
         self.zoom = 1.0;
+        self.all_columns = false;
         self.notice = RESET_NOTICE.into();
         self.notice_until = Some(now + Duration::from_secs(RESET_NOTICE_SECS));
     }

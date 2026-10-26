@@ -1,0 +1,38 @@
+# Capture 38 (PLACEHOLDER): 900 px window, zoom 110 % (A+ x1 from default; use the app's zoom control so A+ reaches its ceiling).
+# Placeholders: PATH_X/Y, ZOOM_PLUS_X/Y (A+), COLS_TOGGLE_X/Y (the "+N columns" header control), EXPL_X/Y/W/H (Diagnosis/Explanation rect),
+#   ROW_X/Y (any table row), SCROLL_X/Y (center table), FILE (default {{FIXTURES}}/wal-fragmented/000004.log via --set FILE=...).
+# Expected: Offset column shows >= 10 monospace chars, never cut mid-value; hidden-column order Raw hex, Encoding, Len; "+N columns" restores them;
+# center table scrolls; side panels not hidden; DISABLED A+ at ceiling: thin outline, no fill, NO hover effect, tooltip
+# "Largest zoom that fits this window (110 %). Enlarge the window to zoom further."
+front
+winsize 900 700
+winfo
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FILE}}
+key return
+sleep 2.5
+click {{ROW_X}} {{ROW_Y}}
+sleep 0.5
+note A+ hover BEFORE reaching ceiling (enabled)
+hover {{ZOOM_PLUS_X}} {{ZOOM_PLUS_Y}}
+sleep 1.2
+shot narrow_00_aplus_hover_before
+click {{ZOOM_PLUS_X}} {{ZOOM_PLUS_Y}}
+sleep 0.5
+click {{ZOOM_PLUS_X}} {{ZOOM_PLUS_Y}}
+sleep 0.5
+shot narrow_01_110_percent
+note EXPECT Offset readable (>= 10 chars), +N columns visible in header
+click {{COLS_TOGGLE_X}} {{COLS_TOGGLE_Y}}
+sleep 0.5
+shot narrow_02_columns_toggled
+move {{SCROLL_X}} {{SCROLL_Y}}
+sleep 0.3
+hover {{ZOOM_PLUS_X}} {{ZOOM_PLUS_Y}}
+sleep 1.5
+shot narrow_03_aplus_hover_after
+note EXPECT disabled A+ shows no hover effect and the tooltip text from the header; compare 00 vs 03
+crop narrow_04_diag {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+note PASS: see EXPECT lines; coordinates only from full-screen driver shots
+release_mods

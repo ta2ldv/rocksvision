@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# CI gate for release-triggered builds (.github/workflows/release-build.yml): the published
-# release for <tag> MUST exist (it is the trigger) and NONE of the given asset names may already
-# be attached to it (assets are never overwritten). (File name kept from W1: "absent" = assets.)
-# Usage: GH_TOKEN=... scripts/ci/check-release-absent.sh <owner/repo> <tag> <asset-name>...
-# Fail-closed: any answer other than "published release found, assets absent" (404, draft,
-# network error, 401/403, 5xx, rate limit, unparsable JSON) stops the workflow; the log says which.
+# CI gate for release uploads (.github/workflows/release-build.yml, "Release packages" mode):
+# the release is ready to receive assets when it EXISTS, is PUBLISHED (not draft), is NOT
+# IMMUTABLE, and NONE of the given asset names is attached yet (assets are never overwritten).
+# Renamed from check-release-absent.sh (task 0006): it never checked that the release was absent.
+# Usage: GH_TOKEN=... scripts/ci/check-release-ready.sh <owner/repo> <tag> <asset-name>...
+# Exit: 0 ready; 1 release missing/draft/immutable, immutability not verifiable (no boolean
+# `immutable` field) or an asset name exists; 2 usage/setup;
+# 3 API/network/unparsable answer (fail-closed: 401/403, 5xx, rate limit, bad JSON). The log
+# says which.
 set -euo pipefail
 repo=${1:-}
 tag=${2:-}
 [ -n "$repo" ] && [ -n "$tag" ] && [ "$#" -ge 3 ] || {
-  echo "usage: check-release-absent.sh <owner/repo> <tag> <asset-name>..." >&2
+  echo "usage: check-release-ready.sh <owner/repo> <tag> <asset-name>..." >&2
   exit 2
 }
 shift 2
@@ -59,12 +62,20 @@ if [ "$(jq -r '.draft' "$tmp/body")" != false ]; then
   echo "error: release for $tag is a draft, not published; stopping" >&2
   exit 1
 fi
-# Immutable releases (GitHub setting): assets cannot be added after publication. The `immutable`
-# field name is taken from the GitHub REST release schema (to verify); absent -> "unknown".
-if [ "$(jq -r '.immutable // "unknown"' "$tmp/body")" = true ]; then
-  echo "error: release $tag is immutable; assets cannot be uploaded after publication (turn immutable releases off for this flow)" >&2
-  exit 1
-fi
+# Immutable releases (GitHub setting): assets cannot be added after publication. Fail closed:
+# only an explicit `"immutable": false` passes; true -> refuse, missing/other -> cannot verify.
+# REST field name `immutable` is to be confirmed on the first real release run.
+case "$(jq -r 'if has("immutable") then .immutable | tostring else "missing" end' "$tmp/body")" in
+  false) ;;
+  true)
+    echo "error: release $tag is immutable; assets cannot be uploaded after publication (turn immutable releases off for this flow)" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: cannot verify whether release $tag is immutable (no boolean 'immutable' field in the API answer); stopping. Check the release's/repository's immutable releases setting (must be OFF) and the REST field name" >&2
+    exit 1
+    ;;
+esac
 id=$(jq -r '.id' "$tmp/body")
 echo "published release for $tag: found (id $id)"
 

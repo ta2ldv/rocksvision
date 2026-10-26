@@ -1,19 +1,35 @@
 //! Center panel: view title/notes, observed LSM boxes, and the records/fields table.
 //! Column widths come from the column's semantic role (`layout::column_width`).
 
-use super::{btn, btn_sized, chip, status_text, strong, table_style};
+use super::{btn, btn_sized, chip, chip_word, status_meaning, status_text, strong, table_style};
 use crate::app::diagnosis;
 use crate::app::{Action, AppState, CopyKind};
-use crate::model::{NodeKind, Status};
-use crate::ui::layout::{column_width, LAYOUT};
+use crate::model::{ColumnRole, NodeKind, Status};
+use crate::ui::layout::{column_width, plan_columns, table_need_h, LAYOUT, STATUS_ICON_WIDTH};
 use crate::ui::menu;
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
 use egui_extras::{Column as TCol, TableBuilder};
 
+/// Table body rows that stay visible at the minimum window (900×700): the byte pane shrinks
+/// first (see `ui::center`).
+pub const TABLE_MIN_ROWS: f32 = 4.0;
+
+/// egui temp-data key: height the records panel needs above its table with its notes at full
+/// height (title, location, notes, separator, column toggle), from the last frame.
+pub fn overhead_id() -> egui::Id {
+    egui::Id::new("records_overhead")
+}
+
+/// egui temp-data key: height between the notes and the table (last frame).
+fn post_id() -> egui::Id {
+    egui::Id::new("records_post_notes")
+}
+
 /// `scroll` is the one-shot "scroll this row into view" request taken from the app state.
 pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize>) -> Vec<Action> {
     let mut acts = Vec::new();
+    let top_y = ui.cursor().top();
     table_style(ui);
     let doc = st.session();
     let find = st.search();
@@ -52,7 +68,10 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
             go_back = true;
         }
         if let Some(s) = view.status {
-            chip(ui, tok, s);
+            match view.status_word {
+                Some(w) => chip_word(ui, tok, s, w, status_meaning(s)),
+                None => chip(ui, tok, s),
+            }
         }
         ui.heading(&view.title);
         // A view without a status of its own still names the failures inside it, e.g. the
@@ -68,12 +87,48 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
             ui.spinner();
         }
     });
+    // Location header: file range, stored size, contents/trailer, next structure or gap (links).
+    for w in &view.location {
+        match &w.link {
+            Some(t) => {
+                let r = ui.add(egui::Label::new(RichText::new(&w.text).small().color(tok.p.accent_text).underline()).sense(egui::Sense::click()).wrap());
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Go to this structure (Back returns)").clicked() {
+                    acts.push(Action::Navigate { target: t.node.clone(), span: t.span });
+                }
+            }
+            None => {
+                ui.add(egui::Label::new(RichText::new(&w.text).small().monospace().color(tok.p.text)).wrap());
+            }
+        }
+    }
     // Notes scroll in their own area when space is short, so the table keeps its header and at
-    // least one row (zoom-ceiling acceptance, spec §8.2 d).
+    // least `TABLE_MIN_ROWS` rows (900×700 acceptance). At narrow heights the subtitle notes
+    // collapse to one line; the tooltip has the full text.
     let small_h = ui.text_style_height(&egui::TextStyle::Small);
-    let notes_max = (ui.available_height() - tok.header_height(ui) - 2.0 * tok.row_height(ui) - 8.0).max(small_h + 4.0);
+    let sp_y = ui.spacing().item_spacing.y;
+    let table_need = table_need_h(tok.header_height(ui), tok.row_height(ui), sp_y, ui.spacing().scroll.allocated_width(), TABLE_MIN_ROWS);
+    // Natural height of the notes (and the search line) at this width; the part between the
+    // notes and the table (separator, LSM boxes, column toggle) as measured last frame.
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let wrap_w = ui.available_width();
+    let search_line = !find.row_matches().is_empty() || (!find.query().is_empty() && find.hit().is_none() && find.progress().is_none());
+    let notes_h: f32 = view.notes.iter().map(|n| ui.fonts_mut(|f| f.layout(n.text.clone(), small.clone(), tok.p.text, wrap_w).size().y) + sp_y).sum::<f32>() + if search_line { small_h + sp_y } else { 0.0 };
+    let post = ui.ctx().data(|d| d.get_temp::<f32>(post_id())).unwrap_or(tok.row_height(ui) + 8.0);
+    let fixed = ui.cursor().top() - top_y;
+    ui.ctx().data_mut(|d| d.insert_temp(overhead_id(), fixed + notes_h + post));
+    // Narrow height: the full notes would leave the table fewer than TABLE_MIN_ROWS rows.
+    let narrow = ui.available_height() - notes_h - post < table_need;
+    let notes_max = (ui.available_height() - post - table_need).max(small_h + 4.0);
+    if narrow && !view.notes.is_empty() {
+        let worst = view.notes.iter().find_map(|n| n.status);
+        let col = worst.map(|s| tok.status(s)).unwrap_or(tok.p.text_muted);
+        let first = view.notes.iter().find(|n| n.status.is_some()).unwrap_or(&view.notes[0]);
+        let more = if view.notes.len() > 1 { format!("  (+{} more)", view.notes.len() - 1) } else { String::new() };
+        let all = view.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>().join("\n");
+        ui.add(egui::Label::new(RichText::new(format!("{}{more}", first.text)).small().color(col)).truncate()).on_hover_text(all);
+    }
     egui::ScrollArea::vertical().id_salt(("notes", epoch)).max_height(notes_max).auto_shrink([false, true]).show(ui, |ui| {
-        for n in &view.notes {
+        for n in view.notes.iter().filter(|_| !narrow) {
             // Problem notes carry their status and use that status color.
             let col = n.status.map(|s| tok.status(s)).unwrap_or(tok.p.text_muted);
             ui.add(egui::Label::new(RichText::new(&n.text).small().color(col)).wrap());
@@ -84,6 +139,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
             ui.small(if find.hex_mode() { "Hex query: Enter searches the physical file bytes (not decompressed)." } else { "No row of the current table matches — Enter searches the physical file bytes (not decompressed)." });
         }
     });
+    let after_notes = ui.cursor().top();
     ui.separator();
     // Observed LSM boxes (CF → level → SST files) above the table.
     let mut box_click = None;
@@ -127,9 +183,25 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
         });
         ui.separator();
     }
+    // Columns that fit: Raw hex, then Encoding, then Len hide first; Status may become
+    // icon-only; Offset keeps 10 monospace characters. "+N columns" brings them back.
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
+    let mono_w = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
+    let width_of = |r: ColumnRole| if r == ColumnRole::Offset { column_width(r).max(10.0 * mono_w + 8.0) } else { column_width(r) };
+    let roles: Vec<ColumnRole> = view.columns.iter().map(|c| c.role).collect();
+    let avail_cols = ui.available_width() - ui.spacing().scroll.allocated_width();
+    let plan = plan_columns(&roles, avail_cols, st.prefs().all_columns(), &width_of, ui.spacing().item_spacing.x);
+    let would_hide = plan_columns(&roles, avail_cols, false, &width_of, ui.spacing().item_spacing.x).hidden;
+    if would_hide > 0 {
+        let label = if st.prefs().all_columns() { "Fewer columns".to_string() } else { format!("+{} columns", plan.hidden) };
+        let tip = if st.prefs().all_columns() { "Hide Raw hex / Encoding / Len again so the table fits (Reset View also restores this)" } else { "Show the columns hidden for lack of width (the table then scrolls horizontally)" };
+        if ui.small_button(label).on_hover_text(tip).clicked() {
+            acts.push(Action::ToggleAllColumns);
+        }
+    }
     // Display order: first column, then Status (never clipped), then the rest.
     let ncols = view.columns.len();
-    let status_idx = view.columns.iter().position(|c| c.role == crate::model::ColumnRole::Status);
+    let status_idx = view.columns.iter().position(|c| c.role == ColumnRole::Status);
     let mut order: Vec<usize> = Vec::with_capacity(ncols);
     if ncols > 0 {
         order.push(0);
@@ -138,6 +210,9 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
         order.push(si);
     }
     order.extend((1..ncols).filter(|i| Some(*i) != status_idx));
+    order.retain(|&i| plan.shown[i]);
+    let ncols = order.len();
+    let col_w = |ci: usize| if Some(ci) == status_idx && plan.status_icon { STATUS_ICON_WIDTH } else { width_of(view.columns[ci].role) };
     let nrows = view.rows.len();
     let mut clicked = None;
     let mut dbl = None;
@@ -154,7 +229,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
     }
     let rem_pos = ncols.saturating_sub(1);
     let spacing = ui.spacing().item_spacing.x;
-    let fixed: f32 = order.iter().take(rem_pos).map(|&ci| column_width(view.columns[ci].role)).sum();
+    let fixed: f32 = order.iter().take(rem_pos).map(|&ci| col_w(ci)).sum();
     // Width the table needs: fixed columns + Decoded minimum + cell spacing + its vertical
     // scrollbar. The horizontal bar appears only when this exceeds the panel (or the user
     // widened columns), because the content is exactly the panel width otherwise.
@@ -163,6 +238,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
     let row_h = tok.row_height(ui);
     let header_h = tok.header_height(ui);
     let header_font = tok.header_font();
+    let post_now = ui.cursor().top() - after_notes;
+    ui.ctx().data_mut(|d| d.insert_temp(post_id(), post_now));
     egui::ScrollArea::horizontal().id_salt(("tblh", &salt, epoch)).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
         ui.set_width(table_w);
         let bg = ui.available_rect_before_wrap();
@@ -172,10 +249,12 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
         let mut tb = TableBuilder::new(ui).id_salt(("tbl", &salt, epoch)).striped(true).sense(egui::Sense::click()).resizable(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         for (pos, &ci) in order.iter().enumerate() {
             let c = &view.columns[ci];
-            let col = if pos == rem_pos { TCol::remainder().at_least(LAYOUT.remainder_min).clip(true) } else { TCol::initial(column_width(c.role)).at_least(LAYOUT.column_min).resizable(true).clip(true) };
+            let _ = c;
+            let min = if Some(ci) == status_idx && plan.status_icon { STATUS_ICON_WIDTH.min(LAYOUT.column_min) } else { LAYOUT.column_min };
+            let col = if pos == rem_pos { TCol::remainder().at_least(LAYOUT.remainder_min).clip(true) } else { TCol::initial(col_w(ci)).at_least(min).resizable(true).clip(true) };
             tb = tb.column(col);
         }
-        if let Some(r) = scroll {
+        if let Some(r) = scroll.filter(|r| *r < nrows) {
             tb = tb.scroll_to_row(r, Some(egui::Align::Center));
         }
         tb.header(header_h, |mut h| {
@@ -183,7 +262,19 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                 h.col(|ui| {
                     let r = ui.max_rect().expand2(egui::vec2(spacing / 2.0, 2.0));
                     tok.paint_header(ui.painter(), r);
-                    ui.label(RichText::new(view.columns[ci].title).font(header_font.clone()).strong().color(tok.p.header_fg));
+                    // A header narrower than its title — by column width or cut by the table's
+                    // horizontal scroll viewport — ends in "…" or shows nothing; never a
+                    // clipped glyph.
+                    let title = view.columns[ci].title;
+                    let text = RichText::new(title).font(header_font.clone()).strong().color(tok.p.header_fg);
+                    let visible = ui.max_rect().intersect(ui.clip_rect());
+                    let ell = ui.fonts_mut(|f| f.layout_no_wrap("…".into(), header_font.clone(), tok.p.header_fg).size().x);
+                    if visible.width() >= ui.max_rect().width() - 0.5 {
+                        ui.add(egui::Label::new(text).truncate()).on_hover_text(title);
+                    } else if visible.width() >= ell + 2.0 {
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(visible).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                        child.add(egui::Label::new(text).truncate()).on_hover_text(title);
+                    }
                 });
             }
         })
@@ -201,6 +292,16 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                     if Some(ci) == status_idx && r.field.untrusted {
                         untrusted_cell = format!("{} {}", r.field.status.symbol(), diagnosis::UNTRUSTED_WORD);
                         cell = &untrusted_cell;
+                    }
+                    // A field without bytes has no offset/length: "—" (never a clipped "(").
+                    let role = view.columns[ci].role;
+                    let no_bytes = r.field.span.is_none() && matches!(role, ColumnRole::Offset | ColumnRole::Len) && (cell.starts_with('(') || cell == "-" || cell == "—");
+                    if no_bytes {
+                        cell = "—";
+                    }
+                    let full_cell = cell.to_string();
+                    if Some(ci) == status_idx && plan.status_icon {
+                        cell = r.field.status.symbol();
                     }
                     row.col(|ui| {
                         if pos == 0 {
@@ -223,7 +324,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                             // Selection overrides row/status colors so they stay readable.
                             t = t.color(tok.p.sel_fg);
                         }
-                        let tip = if Some(ci) == status_idx && r.field.untrusted { diagnosis::UNTRUSTED_MEANING } else { cell };
+                        let tip = if Some(ci) == status_idx && r.field.untrusted {
+                            diagnosis::UNTRUSTED_MEANING.to_string()
+                        } else if no_bytes {
+                            "No bytes in the file (derived, inferred, default or metadata value)".to_string()
+                        } else {
+                            full_cell.clone()
+                        };
                         ui.add(egui::Label::new(t).truncate().selectable(false)).on_hover_text(tip);
                     });
                 }

@@ -19,7 +19,7 @@ use crate::app::{Action, AppState, Effect, Panel, ZoomFit};
 use crate::branding;
 use crate::limits::LIMITS;
 use eframe::egui;
-use layout::{side_max, split_heights, Measured, LAYOUT};
+use layout::{side_max, Measured, LAYOUT};
 use menu::{MenuCmd, MenuNode};
 use panels::PanelMemory;
 use platform::Platform;
@@ -184,7 +184,10 @@ impl eframe::App for App {
         let screen = ctx.content_rect();
         let width = screen.width();
         let rh = self.tok.row_height(ui);
-        let hexm = panels::hex::metrics(ui, self.st.session().hex().size());
+        let mut hexm = panels::hex::metrics(ui, self.st.session().hex().size());
+        if self.st.session().hex().space() != crate::model::Space::File {
+            hexm.digits += 1; // derived offsets print "+0…" (hex panel uses the same width)
+        }
         let center_min = layout::center_min(&hexm);
         let strip = self.tok.header_height(ui);
         let (show_left, show_right, show_hex) = (self.st.prefs().show_left(), self.st.prefs().show_right(), self.st.prefs().show_hex());
@@ -222,6 +225,8 @@ impl eframe::App for App {
         let (left_max, _) = side_max(width, center_min, strip, left, self.mem.left_w, right);
         let sep = self.tok.w.separator;
         let mut widths_default = true;
+        // One-shot scroll requests (row, byte, tree reveal) are taken once per frame.
+        let scroll = self.st.take_scroll_request();
         if show_left {
             let r = egui::Panel::left(egui::Id::new(("nav", e)))
                 .frame(frame(p.panel))
@@ -229,7 +234,7 @@ impl eframe::App for App {
                 .show_separator_line(false)
                 .default_size(LAYOUT.left_default.min(left_max))
                 .size_range(LAYOUT.left_min..=left_max)
-                .show(ui, |ui| acts = panels::nav::show(ui, &self.st, &self.tok));
+                .show(ui, |ui| acts = panels::nav::show(ui, &self.st, &self.tok, scroll.tree));
             let rect = r.response.rect;
             self.mem.left_w = rect.width();
             widths_default &= (rect.width() - LAYOUT.left_default.min(left_max)).abs() < 1.5;
@@ -276,7 +281,6 @@ impl eframe::App for App {
         }
         self.mem.widths_default = widths_default;
         self.dispatch(&ctx, std::mem::take(&mut acts));
-        let scroll = self.st.take_scroll_request();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.canvas)).show(ui, |ui| acts = self.center(ui, rh, &measured, show_hex, scroll));
         self.dispatch(&ctx, std::mem::take(&mut acts));
         if self.st.prefs().show_about() {
@@ -342,7 +346,13 @@ impl App {
         }
         let handle = LAYOUT.split_handle;
         let hex_min = measured.bytes_h(full.width());
-        let (rec_h, hex_h) = split_heights(full.height() - handle, self.st.prefs().center_split(), measured.records_min_h, hex_min);
+        // Records first at short heights: the panel's measured overhead (title, location,
+        // notes) + header + TABLE_MIN_ROWS body rows + horizontal bar; bytes shrink to 6 rows.
+        let over = ui.ctx().data(|d| d.get_temp::<f32>(panels::records::overhead_id())).unwrap_or(0.0) + 2.0 * LAYOUT.center_margin[1];
+        let table_need = layout::table_need_h(self.tok.header_height(ui), rh, ui.spacing().item_spacing.y, ui.spacing().scroll.allocated_width(), panels::records::TABLE_MIN_ROWS);
+        let hex_floor = hex_min + (LAYOUT.hex_floor_rows - LAYOUT.bytes_min_rows).max(0.0) * measured.hex_row_h;
+        // The records panel collapses its notes itself when this split leaves too little.
+        let (rec_h, hex_h, _) = layout::records_plan(full.height() - handle, self.st.prefs().center_split(), measured.records_min_h, hex_min, hex_floor, over, table_need);
         let rec_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), rec_h));
         let handle_rect = egui::Rect::from_min_size(egui::pos2(full.left(), rec_rect.bottom()), egui::vec2(full.width(), handle));
         let hex_rect = egui::Rect::from_min_size(egui::pos2(full.left(), handle_rect.bottom()), egui::vec2(full.width(), hex_h));

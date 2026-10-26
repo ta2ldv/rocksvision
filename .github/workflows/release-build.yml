@@ -1,22 +1,29 @@
-# RocksVision native release builds (macOS arm64, macOS Intel x64, Ubuntu x64, Windows x64).
+# RocksVision native packages (macOS arm64, macOS Intel x64, Ubuntu x64, Windows x64).
+# ONE workflow, ONE shared build job, two modes chosen by the trigger:
+#   workflow_dispatch  -> "Build test packages (artifacts only, no release)"
+#   release: published -> "Release packages (upload to published release vX.Y.Z)"
+# The mode is shown in the run name, every job name and the run summary.
 #
 # Owner steps (ta2ldv):
 #   1. Commit this workflow and push it to the default branch (the push itself runs nothing).
-#   2. Optional dry run: Actions > "release-build" > Run workflow (workflow_dispatch) on a branch:
-#      builds, tests and packages all four platforms and uploads 7-day artifacts only. Never
-#      touches any release, even when run against a tag.
-#   3. Set Cargo.toml version to X.Y.Z (>= 0.1.1), commit, push, create tag vX.Y.Z on that commit.
+#   2. Build test packages: Actions > "Build and release packages" > Run workflow, on any branch
+#      (no tag needed). Builds, tests and packages all four platforms and keeps 7-day artifacts
+#      only. The Run workflow button is NOT tag-aware: choosing a tag there is still an
+#      artifact-only build of that ref; it never touches any release.
+#   3. Release packages: set Cargo.toml version to X.Y.Z (>= 0.1.1), commit, push, create tag
+#      vX.Y.Z on that commit (a bare tag push runs nothing).
 #   4. Make sure "immutable releases" is OFF for the repository (see below), then publish a
 #      release for vX.Y.Z on GitHub (published, not draft). The workflow builds the commit the tag
 #      points to and, when all four builds and checks pass, uploads the four archives + .sha256
 #      files to THAT release. It never creates another release and never overwrites an asset.
+#   Partial upload / retry: see docs/BUILD.md "Recovery after a partial upload".
 #
 # Gating matrix:
 #   ordinary branch push / pull request / schedule  -> no trigger, nothing runs
 #   tag push alone                                  -> no trigger, nothing runs
 #   draft release created or edited                 -> no trigger (only `release: published`)
 #   release published (or run/re-run) by non-owner  -> every job skipped (actor + triggering_actor)
-#   workflow_dispatch by ta2ldv                     -> build/test/package + artifacts only
+#   workflow_dispatch by ta2ldv (any branch or tag) -> build/test/package + artifacts only
 #   published v0.1.0 (also if re-published), or any tag not strictly vMAJOR.MINOR.PATCH >= 0.1.1
 #                                                   -> validate fails, nothing built or uploaded
 #   tag != Cargo.toml version at the tagged commit  -> validate fails
@@ -38,7 +45,12 @@
 # macos-15-intel is the x86_64 macOS image, macos-15 the arm64 one (macos-14 is deprecated).
 # Action revisions are pinned by commit SHA (tag in the comment, looked up via git ls-remote).
 
-name: release-build
+name: Build and release packages
+
+run-name: >-
+  ${{ github.event_name == 'release'
+  && format('Release packages (upload to published release {0}) @ {1}', github.event.release.tag_name, github.sha)
+  || format('Build test packages (artifacts only, no release) on {0} @ {1}', github.ref_name, github.sha) }}
 
 on:
   release:
@@ -59,6 +71,7 @@ defaults:
 jobs:
   validate:
     if: github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
+    name: ${{ github.event_name == 'release' && 'Release packages / validate tag, version and release' || 'Build test packages / resolve source (no release)' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -89,7 +102,7 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/ci/validate-tag.sh "$TAG"
-      - name: Release exists and no asset is present yet (release only, fail-closed)
+      - name: Release ready (exists, published, not immutable, no asset yet; release only, fail-closed)
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,16 +115,28 @@ jobs:
             "rocksvision-$v-ubuntu-x64.tar.gz" "rocksvision-$v-windows-x64.zip"; do
             names+=("$f" "$f.sha256")
           done
-          bash scripts/ci/check-release-absent.sh "$REPO" "$TAG" "${names[@]}"
-      - name: Manual run note
-        if: github.event_name == 'workflow_dispatch'
+          bash scripts/ci/check-release-ready.sh "$REPO" "$TAG" "${names[@]}"
+      - name: Run summary (mode)
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref_name }}
+          TAG: ${{ github.event.release.tag_name }}
+          SHA: ${{ steps.src.outputs.sha }}
         run: |
-          echo "workflow_dispatch: build/test/package + artifacts only; no release is touched."
+          if [ "$EVENT" = release ]; then
+            mode="Release packages (upload to published release $TAG)"
+            note="Builds commit $SHA of tag $TAG on all four platforms; uploads the eight assets to that release only after all four pass. Never overwrites an asset."
+          else
+            mode="Build test packages (artifacts only, no release)"
+            note="Builds ref $REF at $SHA on all four platforms; 7-day artifacts only. No release is created, read or changed."
+          fi
+          echo "$mode"
+          printf '## %s\n\n%s\n' "$mode" "$note" >>"$GITHUB_STEP_SUMMARY"
 
   build:
     needs: validate
     if: github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
-    name: ${{ matrix.platform }} (${{ matrix.runner }}; build, cargo test, CLI smoke)
+    name: ${{ github.event_name == 'release' && 'Release packages' || 'Build test packages' }} / ${{ matrix.platform }} (${{ matrix.runner }}; build, cargo test, CLI smoke)
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -185,13 +210,22 @@ jobs:
           TEST_ARGS: ${{ matrix.test_args }}
         # shellcheck disable=SC2086
         run: rustup run "$RUST" cargo test --release --locked $TEST_ARGS
+      # Same bash lines on all four runners (defaults.run.shell = bash; Git Bash on Windows).
+      # Output goes to a file first: a pipe into `head` under pipefail killed the producer with
+      # SIGPIPE on macos-15-intel ("printf: write error: Broken pipe"). Reading a file never does.
       - name: CLI smoke (--dump of a bundled WAL; not GUI evidence)
         env:
           BIN: ${{ matrix.bin }}
+          FIXTURE: examples/files/wal-plain/000004.log
         run: |
-          out=$("$BIN" --dump examples/files/wal-plain/000004.log)
-          [ -n "$out" ] || { echo "error: --dump printed nothing" >&2; exit 1; }
-          printf '%s\n' "$out" | head -n 5
+          dump=$(mktemp)
+          rc=0
+          "$BIN" --dump "$FIXTURE" >"$dump" || rc=$?
+          [ "$rc" -eq 0 ] || { echo "error: --dump exited with $rc" >&2; exit 1; }
+          [ -s "$dump" ] || { echo "error: --dump printed nothing" >&2; exit 1; }
+          grep -q 'WAL file' "$dump" || { echo "error: --dump output lacks the 'WAL file' marker" >&2; exit 1; }
+          echo "--dump ok: $(wc -l <"$dump" | tr -d ' ') lines; first 5:"
+          head -n 5 "$dump"
       - name: Upload artifacts (7 days)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -206,6 +240,7 @@ jobs:
       github.event_name == 'release' &&
       github.repository == 'ta2ldv/rocksvision' &&
       github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
+    name: Release packages / upload to published release ${{ github.event.release.tag_name }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -234,7 +269,12 @@ jobs:
             n=$((n + 2))
           done
           [ "$(find . -type f | wc -l)" -eq "$n" ] || { echo "error: unexpected extra files:" >&2; ls -la >&2; exit 1; }
-      - name: Re-check release exists and assets are absent (write token)
+      # The readiness check runs again in the SAME step, immediately before the upload (smallest
+      # window). No --clobber: gh refuses an asset name that already exists (to verify on the first
+      # real run; the check already fails in that case). Never creates a release. A failure part
+      # way through leaves the already uploaded assets; a retry then stops at the check (recovery:
+      # docs/BUILD.md "Recovery after a partial upload").
+      - name: Re-check release ready, then upload the eight assets (no overwrite)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -242,12 +282,9 @@ jobs:
         run: |
           names=()
           for f in release-assets/*; do names+=("${f##*/}"); done
-          bash scripts/ci/check-release-absent.sh "$REPO" "$TAG" "${names[@]}"
-      # No --clobber: gh refuses an asset name that already exists (to verify on first real run;
-      # the check above already fails in that case). Never creates a release.
-      - name: Upload assets to the published release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" --repo "$REPO" release-assets/*
+          bash scripts/ci/check-release-ready.sh "$REPO" "$TAG" "${names[@]}"
+          gh release upload "$TAG" --repo "$REPO" release-assets/*
+          {
+            printf '## Release packages: uploaded to %s\n\n' "$TAG"
+            printf -- '- %s\n' "${names[@]}"
+          } >>"$GITHUB_STEP_SUMMARY"

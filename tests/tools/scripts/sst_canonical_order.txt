@@ -1,0 +1,26 @@
+# Capture 31 (PLACEHOLDER script; coordinates are from a prior full-screen driver shot): SST canonical physical order + reference jump.
+# Placeholders: PATH_X/Y (path field), INDEX_NODE_X/Y (Index node in tree), ENTRY_LINK_X/Y (an index-entry handle link "-> block" in the table),
+#   BACK_X/Y (Back control). Run once for examples/files/sst-zstd/sst-zstd.sst; repeat with --set SST=... for partitioned.sst (SST_DIR/FILE below).
+# Defaults: --set SST={{EXAMPLES}}/files/sst-zstd/sst-zstd.sst ; partitioned: --set SST={{FIXTURES}}/sst-variants/partitioned.sst --set TAG=part
+# Expected: tree lists blocks in PHYSICAL order with the Footer last; clicking the entry link selects the canonical data block (tree node + hex span
+# agree); Back returns to the Index entry (same tree selection as before the jump).
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{SST}}
+key return
+sleep 2.5
+shot sstord_{{TAG}}_00_open
+note EXPECT physical order with Footer LAST (compare node order with byte offsets)
+click {{INDEX_NODE_X}} {{INDEX_NODE_Y}}
+sleep 0.6
+shot sstord_{{TAG}}_01_index
+click {{ENTRY_LINK_X}} {{ENTRY_LINK_Y}}
+sleep 0.8
+shot sstord_{{TAG}}_02_jumped
+note EXPECT canonical data block selected, hex span = that block, no second selection change
+click {{BACK_X}} {{BACK_Y}}
+sleep 0.8
+shot sstord_{{TAG}}_03_back
+note PASS: 03 equals 01 (Index entry selected again); action.log shows exactly one click per jump/back
+release_mods

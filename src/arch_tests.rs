@@ -25,9 +25,41 @@ fn code(rel: &str) -> Vec<(String, String)> {
                     None => l,
                 })
                 .collect();
-            (f.strip_prefix(src()).unwrap().display().to_string(), expand_groups(&code.join("\n")))
+            (rel_string(f.strip_prefix(src()).unwrap()), expand_groups(&code.join("\n")))
         })
         .collect()
+}
+
+/// A path below src/ in one portable form: its components joined with '/', whatever the host
+/// separator is (Windows `display()` gives `ui\platform\macos.rs`; the first CI run on
+/// windows-2022 failed on exactly that).
+fn rel_string(rel: &Path) -> String {
+    rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
+}
+
+/// True if `rel` is `prefix` or lies below it, compared component-wise after normalizing both
+/// separators to '/' (so `ui\platform\macos.rs` matches `ui/platform`; `ui/platformx.rs` does not).
+fn rel_matches(rel: &str, prefix: &str) -> bool {
+    let (rel, prefix) = (rel.replace('\\', "/"), prefix.replace('\\', "/"));
+    let prefix = prefix.trim_end_matches('/');
+    rel == prefix || rel.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// objc2 may appear only in the platform adapter (and in this file's own needles).
+fn objc2_allowed(rel: &str) -> bool {
+    rel_matches(rel, "ui/platform") || rel_matches(rel, "arch_tests.rs")
+}
+
+/// Regression for the Windows failure: string inputs, so it runs (and is not skipped) on every OS.
+#[test]
+fn rel_paths_match_with_either_separator() {
+    for ok in ["ui/platform/macos.rs", "ui\\platform\\macos.rs", "ui/platform/mod.rs", "ui\\platform\\mod.rs", "ui/platform", "arch_tests.rs"] {
+        assert!(objc2_allowed(ok), "valid path rejected: {ok}");
+    }
+    for bad in ["ui/panels/hex.rs", "ui\\panels\\hex.rs", "ui/platformx.rs", "ui\\platform_extra\\a.rs", "x/ui/platform/macos.rs", "platform/ui/macos.rs", "app\\jobs\\mod.rs", "main.rs"] {
+        assert!(!objc2_allowed(bad), "forbidden path accepted: {bad}");
+    }
+    assert_eq!(rel_string(&Path::new("ui").join("platform").join("macos.rs")), "ui/platform/macos.rs");
 }
 
 /// Appends one `crate::item` line per member of every grouped import `crate::{a, b::{..}}`, so
@@ -110,7 +142,7 @@ fn objc2_only_in_platform_adapter() {
     require("ui/platform", "objc2");
     let mut bad = Vec::new();
     for (f, c) in code("") {
-        if c.contains("objc2") && !f.starts_with("ui/platform") && f != "arch_tests.rs" {
+        if c.contains("objc2") && !objc2_allowed(&f) {
             bad.push(f);
         }
     }
@@ -211,7 +243,7 @@ fn app_components_have_private_fields_and_read_only_pub_api() {
 fn legacy_snapshot_shim_is_removed() {
     assert!(!src().join("app/compat.rs").exists(), "app/compat.rs is back");
     require("ui", "st.prefs()");
-    let bad: Vec<String> = code("").into_iter().filter(|(f, c)| f != "arch_tests.rs" && (c.contains("LegacyFields") || c.contains("impl std::ops::Deref for AppState"))).map(|(f, _)| f).collect();
+    let bad: Vec<String> = code("").into_iter().filter(|(f, c)| !rel_matches(f, "arch_tests.rs") && (c.contains("LegacyFields") || c.contains("impl std::ops::Deref for AppState"))).map(|(f, _)| f).collect();
     assert!(bad.is_empty(), "legacy shim still referenced: {bad:?}");
 }
 

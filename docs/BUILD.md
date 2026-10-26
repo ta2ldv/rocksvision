@@ -117,7 +117,8 @@ Windows Server: the script accepts any x64 NT 10.0 system (Windows Server 2016/2
 included) and needs the same prerequisites (VS Build Tools with the C++ workload, rustup). The
 GitHub `windows-2022` runner is Windows Server 2022 with Visual Studio 2022 preinstalled; the
 script is meant to detect that toolset and skip the installer. We have not run the script or the
-GUI on Windows Server (the workflow below has not been run yet either). Running the GUI on Server
+GUI on Windows Server (the first workflow run on `windows-2022` built and packaged with this
+script; its tests stopped at one arch test, fixed since, so the CLI smoke there is unverified). Running the GUI on Server
 additionally needs a desktop session (Desktop Experience) and a working DX12/Vulkan/GL driver;
 untested.
 
@@ -136,24 +137,54 @@ version/target, LICENSE and checksums (`scripts/ci/check-dist.sh`), runs
 `--dump` CLI smoke check, and uploads the archive + `.sha256` as a 7-day artifact. CI success
 shows compilation, packaging, tests and CLI output only, not GUI behaviour.
 
-Triggers: only `release: published` and `workflow_dispatch` (no run on branch pushes, bare tag
-pushes or draft releases). Owner steps:
-1. Push the workflow to the default branch.
-2. Optional: Actions > release-build > Run workflow: build/test/package + artifacts only; never
-   touches a release.
-3. Set `version` in Cargo.toml to X.Y.Z (>= 0.1.1), commit, push, tag that commit `vX.Y.Z`,
-   then publish a GitHub release for the tag. The workflow builds the tagged commit (not the
-   branch tip) and, after all four builds pass, uploads the four archives + `.sha256` files to
-   that same release (`gh release upload`, no `--clobber`).
+One workflow ("Build and release packages") with one shared build job; the trigger picks the
+mode, which the run name, every job name and the run summary state:
+
+| Trigger | Mode | Effect |
+|---|---|---|
+| Run workflow (`workflow_dispatch`), any branch | Build test packages (artifacts only, no release) | build/test/package all four, 7-day artifacts |
+| `release: published` for `vX.Y.Z` | Release packages (upload to published release vX.Y.Z) | same build of the tag's commit, then upload of the eight assets |
+
+Nothing else triggers it (no branch pushes, bare tag pushes or draft releases). Owner steps:
+1. Push the workflow and sources to the default branch.
+2. Build test packages: Actions > "Build and release packages" > Run workflow. Any branch works
+   and no tag is needed; the result is downloadable artifacts only. The Run workflow button is not
+   tag-aware: picking a tag there still makes an artifact-only build and never touches a release.
+   Inspect all four jobs, artifacts and checksums; do the native Windows GUI smoke separately.
+3. Release packages: set `version` in Cargo.toml to X.Y.Z (>= 0.1.1), commit, push, tag that
+   commit `vX.Y.Z`, keep immutable releases OFF, then publish a GitHub release for the tag. The
+   workflow builds the tagged commit (not the branch tip) and, after all four builds pass,
+   uploads the four archives + `.sha256` files to that same release (`gh release upload`, no
+   `--clobber`).
 
 Gating: only `ta2ldv` as actor and triggering actor; release writes only in
 `ta2ldv/rocksvision`; tag must be strict `vMAJOR.MINOR.PATCH`, >= 0.1.1 and equal to Cargo.toml
 at the tagged commit (`scripts/ci/validate-tag.sh`, so publishing v0.1.0 again is refused); the
-published release must exist and none of the eight asset names may exist yet, checked again
-right before upload (`scripts/ci/check-release-absent.sh`, fail-closed); a failed platform means
-no upload. The release is public without assets until the upload finishes. With GitHub's
-immutable releases enabled, assets cannot be added after publication (GitHub docs, to verify), so
-keep that setting OFF for this flow; the check refuses a release reported as immutable.
+release must be ready: it exists, is published (not draft), is not immutable and none of the
+eight asset names exists yet (`scripts/ci/check-release-ready.sh`, fail-closed on any API or
+network error; formerly `check-release-absent.sh`). The check runs before the builds and again in
+the upload step right before `gh release upload`; a failed platform means no upload. Runs for the
+same tag are serialized. The release is public without assets until the upload finishes. With
+GitHub's immutable releases enabled, assets cannot be added after publication (GitHub docs, to
+verify), so keep that setting OFF for this flow. The check fails closed: it passes only when the
+REST answer says `"immutable": false`; `true` is refused and a missing field stops the run with a
+request to check the setting (field name to be confirmed on the first real release run).
+
+### Recovery after a partial upload
+
+If the upload step fails part way (network, API error), some of the eight assets may already be
+attached. Re-running the workflow does not overwrite them: the readiness check finds the
+existing names and stops before building or uploading anything. The owner decides what to do:
+1. Compare each attached asset with the failed run's artifacts (download the
+   `rocksvision-<platform>` artifacts; the SHA-256 of each attached archive must equal its
+   `.sha256` file and the artifact's checksum).
+2. Delete (or rename) the attached assets by hand on GitHub, or keep them if they match and
+   attach the missing ones by hand from the same run's artifacts.
+3. Re-run the failed run (or re-publish) only once none of the eight names is attached, so all
+   eight come from one run.
+
+The workflow never deletes or replaces assets and `--clobber` is never used; do not add it to
+make retries convenient.
 
 ## What was verified where (2026-10-24)
 
@@ -163,7 +194,7 @@ keep that setting OFF for this flow; the check refuses a release reported as imm
 | macOS x64 | yes, `sh -n`/`dash -n` | no (no Intel Mac/rustup cross target here; CI job not run yet) | no |
 | Ubuntu x64 | yes, `bash -n` | no (no Linux host here; CI job not run yet) | no |
 | Windows x64 | yes, read-through only (no PowerShell here) | yes, by the user locally for v0.1.0 after manual PATH troubleshooting; the reworked rustup resolution awaits the user's re-test | user launched the v0.1.0 GUI; no independent verification |
-| GitHub Actions | YAML parsed (Ruby Psych), scripts `bash -n`, tag validation exercised locally | not run (needs the owner's push / dispatch) | no |
+| GitHub Actions | YAML parsed (Ruby Psych), scripts `bash -n`, tag validation and release check (fake curl) exercised locally | first owner `workflow_dispatch` on main (ba98f56, 2026-10-24): all four build/package + dist checks passed; arm64 and Ubuntu jobs green; Intel failed in the CLI smoke (SIGPIPE), Windows in one path-separator arch test (93/94). Both fixed since; the repaired workflow awaits the owner's next run | release upload path never run |
 
 Version 0.1.1 (Cargo.toml; About, BUILD-INFO and archive names derive from it; v0.1.0 stays as
 published). Windows 0.1.1 uses the GUI subsystem (no console window from Explorer) and attaches to

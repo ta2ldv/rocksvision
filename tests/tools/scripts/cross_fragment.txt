@@ -1,0 +1,18 @@
+# Capture 34 (PLACEHOLDER): field spanning WAL fragments in tests/fixtures/wal-fragmented/000004.log (record big-100k @0x5eec, 4 fragments).
+# Placeholders: PATH_X/Y, VALUE_ROW_X/Y (the 100 KiB value field row), FRAG_LINK_X/Y (a Source fragments link), WHERE_X/Y/W/H (Where panel rect).
+# Expected: Where shows TWO or more file ranges for the value (FIRST/MIDDLE/MIDDLE/LAST, 7 B headers skipped between them) plus Source fragments links.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/wal-fragmented/000004.log
+key return
+sleep 2.5
+click {{VALUE_ROW_X}} {{VALUE_ROW_Y}}
+sleep 0.8
+shot crossfrag_01_value
+crop crossfrag_02_where {{WHERE_X}} {{WHERE_Y}} {{WHERE_W}} {{WHERE_H}}
+click {{FRAG_LINK_X}} {{FRAG_LINK_Y}}
+sleep 0.6
+shot crossfrag_03_fragment_link
+note PASS: Where crop lists >= 2 file ranges and the Source fragments links; fragment link selects that fragment's bytes
+release_mods

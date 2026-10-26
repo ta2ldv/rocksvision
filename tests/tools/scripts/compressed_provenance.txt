@@ -1,0 +1,24 @@
+# Capture 35 (PLACEHOLDER): compressed SST provenance on examples/files/sst-zstd/sst-zstd.sst.
+# Placeholders: PATH_X/Y, ENTRY_ROW_X/Y (a data entry row), WHERE_X/Y/W/H (Where rect), COMP_BYTE_X/Y (a byte inside the compressed block in the
+#   FILE view, from a full-screen shot), OPEN_DECOMP_X/Y (the "Open decompressed view" control that appears).
+# Expected: entry Where shows decompressed offset AND the compressed block file range (distinguished); clicking compressed bytes in the file view
+# offers "Open decompressed view"; activating it switches to the decompressed block space.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/sst-zstd/sst-zstd.sst
+key return
+sleep 2.5
+click {{ENTRY_ROW_X}} {{ENTRY_ROW_Y}}
+sleep 0.8
+shot compprov_01_entry
+crop compprov_02_where {{WHERE_X}} {{WHERE_Y}} {{WHERE_W}} {{WHERE_H}}
+click {{COMP_BYTE_X}} {{COMP_BYTE_Y}}
+sleep 0.6
+shot compprov_03_compressed_byte
+note EXPECT "Open decompressed view" offered for compressed bytes
+click {{OPEN_DECOMP_X}} {{OPEN_DECOMP_Y}}
+sleep 0.8
+shot compprov_04_decompressed
+note PASS: 02 shows decompressed offset + compressed range; 03 offers the action; 04 is the decompressed space
+release_mods

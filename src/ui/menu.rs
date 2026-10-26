@@ -105,6 +105,10 @@ pub enum MenuCmd {
     Theme(usize),
     TogglePanel(Panel),
     ResetView,
+    /// Next (true) / previous field in span order — window key `]` / `[`.
+    StepField(bool),
+    /// Next (true) / previous sibling structure — window key `Shift+]` / `Shift+[`.
+    StepStructure(bool),
     Help,
     Shortcuts,
 }
@@ -165,6 +169,12 @@ pub fn tree() -> Vec<MenuNode> {
                 item(C::TogglePanel(Panel::Explanation), "Explanation Panel", alt_cmd("2")),
                 item(C::TogglePanel(Panel::Bytes), "Byte View", alt_cmd("3")),
                 MenuNode::Separator,
+                // Window keys (no menu accelerator: they must not fire inside text fields).
+                MenuNode::Item { cmd: C::StepField(true), title: "Next Field  ]", shortcut: None, hidden: false, tip: Some("Next field of the table in span order (key ])") },
+                MenuNode::Item { cmd: C::StepField(false), title: "Previous Field  [", shortcut: None, hidden: false, tip: Some("Previous field of the table in span order (key [)") },
+                MenuNode::Item { cmd: C::StepStructure(true), title: "Next Structure  Shift+]", shortcut: None, hidden: false, tip: Some("Next sibling structure in file order (Shift+])") },
+                MenuNode::Item { cmd: C::StepStructure(false), title: "Previous Structure  Shift+[", shortcut: None, hidden: false, tip: Some("Previous sibling structure in file order (Shift+[)") },
+                MenuNode::Separator,
                 MenuNode::Item { cmd: C::ResetView, title: "Reset View", shortcut: shift_cmd("r"), hidden: false, tip: Some(RESET_VIEW_TIP) },
             ],
         },
@@ -193,6 +203,8 @@ impl MenuCmd {
             C::Theme(i) => Action::SetTheme(THEMES.get(i)?.id),
             C::TogglePanel(p) => Action::TogglePanel(p),
             C::ResetView => Action::ResetView,
+            C::StepField(f) => Action::StepField(f),
+            C::StepStructure(f) => Action::StepStructure(f),
             C::Help => Action::ShowHelp,
             C::Shortcuts => Action::ShowShortcuts,
         })
@@ -259,7 +271,10 @@ fn window_keys(l: KeyLabels) -> Vec<(String, &'static str)> {
         ("Up Down PgUp PgDn Home End".to_string(), "Move through table rows"),
         ("Left / Right".to_string(), "Fold / unfold the selected tree node"),
         ("Enter".to_string(), "Follow the selected row's link"),
-        ("Shift+click".to_string(), "Extend the byte selection in the byte view"),
+        ("] / [".to_string(), "Next / previous field (span order)"),
+        ("Shift+] / Shift+[".to_string(), "Next / previous structure (file order)"),
+        ("Click a byte".to_string(), "Select the field that holds it (the byte stays outlined)"),
+        ("Shift+click".to_string(), "Raw byte range from the clicked byte (not a single field)"),
     ]
     .into()
 }

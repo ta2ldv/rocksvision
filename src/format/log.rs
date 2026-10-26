@@ -118,7 +118,8 @@ impl Phys {
             PhysKind::Record => match self.crc_ok() {
                 Some(false) => Some(
                     Diagnostic::new(CheckKind::Crc32c, span, Trust::Untrusted, RECOVER_CRC, format!("CRC mismatch in fragment at 0x{:x}", self.offset))
-                        .values(self.computed_crc.map(DecodedValue::U32), Some(DecodedValue::U32(crc_unmask(self.stored_crc)))),
+                        .values(self.computed_crc.map(DecodedValue::U32), Some(DecodedValue::U32(crc_unmask(self.stored_crc))))
+                        .engine(ENGINE_CRC),
                 ),
                 Some(true) => None,
                 None => {
@@ -149,16 +150,68 @@ impl Phys {
 }
 
 /// Recovery descriptions of log-format diagnostics (what the reader does next).
-pub const RECOVER_CRC: &str = "log_reader.cc drops the rest of this block; RocksVision locates the following items by trusting this record's length field (a guess)";
+pub const RECOVER_CRC: &str = "RocksVision locates the following items by trusting this record's length field (a guess)";
+/// Verified in RocksDB 10.4.2 db/log_reader.cc: ReadPhysicalRecord lines 620–632, ReadRecord
+/// case kBadRecordChecksum lines 324–333.
+pub const ENGINE_CRC: &str = "RocksDB 10.4.2 db/log_reader.cc ReadPhysicalRecord (lines 620–632): a CRC mismatch drops the rest of the block buffer, because the length field itself may be corrupt; ReadRecord then reports \"checksum mismatch\" (line 333).";
+/// Verified in RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord lines 104–111 / 129–134.
+pub const ENGINE_RESTART: &str = "RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord (lines 104–111, 129–134): a FULL or FIRST fragment inside a fragmented record reports \"partial record without end\" and starts over with that fragment.";
+/// Verified in RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord case kOldRecord, lines 273–277.
+pub const ENGINE_OLD_RECORD: &str = "RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord (case kOldRecord, lines 273–277): a record from a previous use of a recycled log is treated as the end of the log, unless wal_recovery_mode is kSkipAnyCorruptedRecords.";
 pub const RECOVER_EOF: &str = "reading stops at the end of the file";
 pub const RECOVER_RESYNC: &str = "the scanner resynchronizes at the next offset holding a known type with a matching CRC, else skips the rest of the block";
-pub const RECOVER_RESTART: &str = "log_reader.cc reports the partial record as corruption and restarts at the interrupting fragment";
+pub const RECOVER_RESTART: &str = "RocksVision ends the partial record here and reads the interrupting fragment as the next record";
 pub const RECOVER_SKIP: &str = "the record is skipped";
 pub const RECOVER_CAP: &str = "the first bytes up to the cap are kept; the rest is not decoded";
-/// RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord, `case kEof` with `in_fragmented_record`:
-/// the partial record is cleared; with kAbsoluteConsistency or kPointInTimeRecovery (the
-/// default `wal_recovery_mode`, include/rocksdb/options.h) it also calls ReportCorruption.
-pub const RECOVER_OPEN_AT_EOF: &str = "RocksDB's log reader (10.4.2 log_reader.cc) discards a record left incomplete at end of file; with wal_recovery_mode kPointInTimeRecovery (default) or kAbsoluteConsistency it also reports \"error reading trailing data due to encountering EOF\". RocksVision shows the collected fragments";
+/// What RocksVision does with a fragmented record left open at end of file (its own behaviour).
+pub const RECOVER_OPEN_AT_EOF: &str = "RocksVision shows the collected fragments; content decoded from them is marked Untrusted";
+/// Engine reference, verified in the RocksDB 10.4.2 sources (librocksdb-sys 0.17.3+10.4.2):
+/// db/log_reader.cc Reader::ReadRecord, `case kEof` (lines 253–271) with `in_fragmented_record`
+/// calls ReportCorruption(…, "error reading trailing data due to encountering EOF") when
+/// wal_recovery_mode is kAbsoluteConsistency or kPointInTimeRecovery, then clears the partial
+/// record (`scratch->clear()`); include/rocksdb/options.h:1312 makes kPointInTimeRecovery the
+/// default.
+pub const ENGINE_OPEN_AT_EOF: &str = "RocksDB 10.4.2 db/log_reader.cc Reader::ReadRecord (case kEof, lines 253–271): a record still open at end of file is discarded (scratch->clear()); with wal_recovery_mode kPointInTimeRecovery (the default, include/rocksdb/options.h:1312) or kAbsoluteConsistency it first reports \"error reading trailing data due to encountering EOF\".";
+
+/// How a logical record was reassembled from its fragments (one typed result for the record
+/// table, the tree, the root summary and the Diagnosis).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reassembly {
+    /// All fragments FIRST..LAST (or one FULL / metadata record) present.
+    Complete,
+    /// Complete FIRST (+ MIDDLE) fragments, then end of file: no LAST fragment.
+    IncompleteNoLast,
+    /// The end of file cuts one of the record's fragments (its own bytes are missing).
+    IncompleteFragmentCut,
+    /// A MIDDLE/LAST fragment without a preceding FIRST.
+    Orphan(FragRole),
+    /// Another record started before LAST.
+    Interrupted,
+    /// A read error stopped the collection (not end of file).
+    ReadError,
+    /// Bad length/type/CRC framing or an unknown record type.
+    Unframed,
+}
+
+impl Reassembly {
+    /// Value of the "Reassembly" column (never "ok").
+    pub fn text(&self) -> &'static str {
+        match self {
+            Reassembly::Complete => "complete",
+            Reassembly::IncompleteNoLast => "incomplete (no LAST)",
+            Reassembly::IncompleteFragmentCut => "incomplete (fragment cut)",
+            Reassembly::Orphan(FragRole::Last) => "orphan LAST",
+            Reassembly::Orphan(_) => "orphan MIDDLE",
+            Reassembly::Interrupted => "interrupted before LAST",
+            Reassembly::ReadError => "read error",
+            Reassembly::Unframed => "not reassembled",
+        }
+    }
+    /// True for a record the end of file left incomplete.
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self, Reassembly::IncompleteNoLast | Reassembly::IncompleteFragmentCut)
+    }
+}
 /// A read of the file failed while a fragmented record was being collected (not end of file).
 /// model::CheckKind has no I/O kind: the diagnostic uses `Structure`, status Unknown, and this
 /// recovery text identifies it (`is_read_error`).
@@ -167,6 +220,12 @@ pub const RECOVER_READ_ERROR: &str = "reading stops at the read error; the fragm
 /// True for the diagnostic of a read error (not a format problem of the bytes).
 pub fn is_read_error(d: &Diagnostic) -> bool {
     d.recovery == RECOVER_READ_ERROR
+}
+
+/// True for the diagnostic of a fragmented record the end of file left open (incomplete
+/// record: no LAST, or a cut continuation).
+pub fn is_open_at_eof(d: &Diagnostic) -> bool {
+    d.recovery == RECOVER_OPEN_AT_EOF
 }
 
 /// A continuation fragment physically cut off by the end of file (the file ends inside its
@@ -242,7 +301,7 @@ impl OpenTail {
                 (note, e, o)
             }
         };
-        Diagnostic::new(CheckKind::Truncation, span, Trust::Untrusted, RECOVER_OPEN_AT_EOF, note).values(e, o)
+        Diagnostic::new(CheckKind::Truncation, span, Trust::Untrusted, RECOVER_OPEN_AT_EOF, note).values(e, o).engine(ENGINE_OPEN_AT_EOF)
     }
 }
 
@@ -289,6 +348,38 @@ pub fn open_tail(r: &dyn RangeRead, max_blocks: u64) -> io::Result<Option<OpenTa
         }
     }
     Ok(seen.then_some(t))
+}
+
+/// Header offset of the logical record the fragment at `frag` belongs to: the fragment itself
+/// for FULL/FIRST/metadata; for MIDDLE/LAST the nearest preceding FIRST, found by a bounded
+/// backward scan (at most `max_blocks` blocks before the fragment's block) with only MIDDLE
+/// fragments in between. None when no such FIRST is found within the bound.
+pub fn record_start_for(r: &dyn RangeRead, frag: u64, max_blocks: u64) -> io::Result<Option<u64>> {
+    let b0 = frag / BLOCK_SIZE;
+    for b in (b0.saturating_sub(max_blocks)..=b0).rev() {
+        let (items, _) = scan_block(r, b)?;
+        for p in items.iter().rev() {
+            if p.offset > frag || matches!(p.kind, PhysKind::BlockTrailer | PhysKind::ZeroFill) {
+                continue;
+            }
+            if p.offset == frag {
+                match role(p.rtype) {
+                    FragRole::Full | FragRole::First | FragRole::Meta => return Ok(Some(frag)),
+                    FragRole::Unknown => return Ok(None),
+                    _ => continue,
+                }
+            }
+            if p.kind != PhysKind::Record {
+                return Ok(None);
+            }
+            match role(p.rtype) {
+                FragRole::Middle => continue,
+                FragRole::First => return Ok(Some(p.offset)),
+                _ => return Ok(None),
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn block_count(file_len: u64) -> u64 {
@@ -537,6 +628,32 @@ impl Logical {
         self.data.len() as u64 == self.total_len
     }
 
+    /// Typed reassembly result (see `Reassembly`).
+    pub fn reassembly(&self) -> Reassembly {
+        let cut = self.frags.last().is_some_and(|f| f.crc_ok.is_none());
+        match self.role {
+            FragRole::Middle | FragRole::Last => Reassembly::Orphan(self.role),
+            FragRole::Unknown => Reassembly::Unframed,
+            _ if self.no_last && cut => Reassembly::IncompleteFragmentCut,
+            _ if self.no_last => Reassembly::IncompleteNoLast,
+            _ if self.diag.as_ref().is_some_and(is_read_error) => Reassembly::ReadError,
+            _ if self.diag.as_ref().is_some_and(|d| d.recovery == RECOVER_RESTART) => Reassembly::Interrupted,
+            _ if self.diag.as_ref().is_some_and(|d| d.recovery == RECOVER_RESYNC) => Reassembly::Unframed,
+            _ if self.status == Status::Truncated || cut => Reassembly::IncompleteFragmentCut,
+            _ => Reassembly::Complete,
+        }
+    }
+
+    /// Status word of the record: fragmented records the end of file left open say
+    /// "Incomplete (…)" (the Truncated glyph stays); everything else uses the status label.
+    pub fn status_word(&self) -> &'static str {
+        match self.reassembly() {
+            Reassembly::IncompleteNoLast => "Incomplete (no LAST)",
+            Reassembly::IncompleteFragmentCut if self.frag_count > 1 => "Incomplete (fragment cut at EOF)",
+            _ => self.status.label(),
+        }
+    }
+
     /// Sets status + note and records the matching diagnostic over the record's file bytes.
     pub fn fail(&mut self, status: Status, check: CheckKind, trusted: Trust, recovery: &'static str, note: String) {
         self.status = status;
@@ -628,6 +745,9 @@ pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logica
                     // log_reader.cc reports the partial record as corruption and restarts here.
                     let note = format!("interrupted by {} at 0x{:x} before LAST", type_name(p.rtype), p.offset);
                     l.fail(Status::Invalid, CheckKind::Structure, Trust::Untrusted, RECOVER_RESTART, note);
+                    if let Some(d) = l.diag.as_mut() {
+                        d.engine = Some(ENGINE_RESTART);
+                    }
                     return cur;
                 }
             }
@@ -766,6 +886,48 @@ mod tests {
         assert!(!d.note.contains("LAST"), "{}", d.note);
         // The open-tail scan reports nothing on a read error (no false EOF claim).
         assert!(open_tail(&r, 64).is_err());
+    }
+
+    /// Correction 1 wording matrix: the record's reassembly result and status word for valid
+    /// fragments, a missing LAST, a cut MIDDLE, an I/O failure and a cut FULL — one typed
+    /// result, never "ok" for an incomplete record; intact fragments stay Present.
+    #[test]
+    fn incomplete_record_wording_matrix() {
+        let first = block_fragment(2);
+        let mid = block_fragment(3);
+        let last = block_fragment(4);
+        // Valid FIRST + MIDDLE + LAST.
+        let valid: Vec<u8> = [first.clone(), mid.clone(), last.clone()].concat();
+        let l = read_logical(&MemReader::new(valid.clone()), 0, 16).unwrap();
+        assert_eq!((l.reassembly(), l.status_word(), l.status), (Reassembly::Complete, "Present", Status::Present));
+        assert_eq!(Reassembly::Complete.text(), "complete");
+        // Missing LAST: FIRST + MIDDLE, then EOF; both fragments physically intact.
+        let r = MemReader::new([first.clone(), mid.clone()].concat());
+        let l = read_logical(&r, 0, 16).unwrap();
+        assert_eq!((l.reassembly(), l.status_word(), l.status), (Reassembly::IncompleteNoLast, "Incomplete (no LAST)", Status::Truncated));
+        assert!(l.frags.iter().all(|f| f.crc_ok == Some(true)), "fragments are intact");
+        let (items, _) = scan_block(&r, 1).unwrap();
+        assert_eq!(items[0].status(), Status::Present, "a complete MIDDLE is not Truncated");
+        assert_eq!(Reassembly::IncompleteNoLast.text(), "incomplete (no LAST)");
+        // Cut MIDDLE: the end of file cuts the fragment's own bytes.
+        let r = MemReader::new([first.clone(), mid[..HEADER_SIZE + 100].to_vec()].concat());
+        let l = read_logical(&r, 0, 16).unwrap();
+        assert_eq!((l.reassembly(), l.status_word()), (Reassembly::IncompleteFragmentCut, "Incomplete (fragment cut at EOF)"));
+        let (items, _) = scan_block(&r, 1).unwrap();
+        assert_eq!(items[0].status(), Status::Truncated, "the cut MIDDLE itself is Truncated");
+        assert_eq!(Reassembly::IncompleteFragmentCut.text(), "incomplete (fragment cut)");
+        // I/O failure while collecting: a read error, not an incomplete record.
+        let r = FailingReader { inner: MemReader::new(valid), fail_at: BLOCK_SIZE };
+        let l = read_logical(&r, 0, 16).unwrap();
+        assert_eq!((l.reassembly(), l.status_word(), l.status), (Reassembly::ReadError, "Unknown", Status::Unknown));
+        assert!(!l.reassembly().is_incomplete());
+        // A single FULL cut by EOF is a physically truncated record (word stays "Truncated").
+        let r = MemReader::new(block_fragment(1)[..HEADER_SIZE + 10].to_vec());
+        let l = read_logical(&r, 0, 16).unwrap();
+        assert_eq!((l.status, l.status_word()), (Status::Truncated, "Truncated"));
+        for re in [Reassembly::Complete, Reassembly::IncompleteNoLast, Reassembly::IncompleteFragmentCut, Reassembly::Orphan(FragRole::Middle), Reassembly::Orphan(FragRole::Last), Reassembly::Interrupted, Reassembly::ReadError, Reassembly::Unframed] {
+            assert_ne!(re.text(), "ok");
+        }
     }
 
     /// A trailing MIDDLE cut by EOF continues the open record: `open_tail` and `read_logical`

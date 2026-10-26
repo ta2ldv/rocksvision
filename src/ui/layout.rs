@@ -25,6 +25,8 @@ pub struct LayoutDefaults {
     pub records_min_rows: f32,
     /// Byte rows that must stay visible at the minimum height / zoom ceiling.
     pub bytes_min_rows: f32,
+    /// Byte rows the byte pane keeps when it shrinks to give the records table its rows.
+    pub hex_floor_rows: f32,
     /// Hit strip of the center split handle.
     pub split_handle: f32,
     /// Slack added to the width/height the minimum layout needs (frames, rounding).
@@ -74,6 +76,7 @@ pub const LAYOUT: &LayoutDefaults = &LayoutDefaults {
     separator: 4.0,
     records_min_rows: 3.0,
     bytes_min_rows: 3.0,
+    hex_floor_rows: 6.0,
     split_handle: 6.0,
     layout_margin_w: 16.0,
     layout_margin_h: 16.0,
@@ -135,6 +138,54 @@ pub fn column_width(role: ColumnRole) -> f32 {
     }
 }
 
+/// Columns hidden first when a table does not fit its panel, in this order (all columns of
+/// the role at once): Raw hex, then Encoding, then Len.
+pub const HIDE_PRIORITY: [ColumnRole; 3] = [ColumnRole::RawHex, ColumnRole::Encoding, ColumnRole::Len];
+/// Width of an icon-only Status column (glyph; the word is in the tooltip).
+pub const STATUS_ICON_WIDTH: f32 = 30.0;
+
+/// Which columns of a table are shown at `avail` points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnPlan {
+    pub shown: Vec<bool>,
+    /// Columns hidden for lack of width ("+N columns").
+    pub hidden: usize,
+    /// Status shows its glyph only.
+    pub status_icon: bool,
+}
+
+/// Plans the visible columns: while the fixed columns plus the fill minimum and spacing do not
+/// fit `avail`, hide by `HIDE_PRIORITY`; then make Status icon-only. Never hides Offset, Field,
+/// Status or the fill column; `show_all` keeps every column (the table scrolls). Pure.
+pub fn plan_columns(roles: &[ColumnRole], avail: f32, show_all: bool, width: &dyn Fn(ColumnRole) -> f32, spacing: f32) -> ColumnPlan {
+    let mut shown = vec![true; roles.len()];
+    let fill = roles.iter().position(|r| r.fills());
+    let need = |shown: &[bool], icon: bool| -> f32 {
+        roles
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| shown[*i])
+            .map(|(i, r)| if Some(i) == fill { LAYOUT.remainder_min } else if *r == ColumnRole::Status && icon { STATUS_ICON_WIDTH } else { width(*r) } + spacing)
+            .sum()
+    };
+    if show_all {
+        return ColumnPlan { shown, hidden: 0, status_icon: false };
+    }
+    for role in HIDE_PRIORITY {
+        if need(&shown, false) <= avail {
+            break;
+        }
+        for (i, r) in roles.iter().enumerate() {
+            if *r == role {
+                shown[i] = false;
+            }
+        }
+    }
+    let status_icon = need(&shown, false) > avail;
+    let hidden = shown.iter().filter(|s| !**s).count();
+    ColumnPlan { shown, hidden, status_icon }
+}
+
 /// Splits the center height `h` (handle excluded) into (records, bytes) heights by `ratio`
 /// (records share), respecting both minimums. If the center is shorter than both minimums,
 /// the bytes keep their minimum and the records get the rest (the table scrolls).
@@ -146,6 +197,34 @@ pub fn split_heights(h: f32, ratio: f32, rec_min: f32, hex_min: f32) -> (f32, f3
     }
     let rec = (h * ratio.clamp(0.0, 1.0)).clamp(rec_min, h - hex_min);
     (rec, h - rec)
+}
+
+/// Height the records table needs for its header and `rows` body rows (egui_extras adds the
+/// item spacing to the header and every row) plus a horizontal scroll bar.
+pub fn table_need_h(header_h: f32, row_h: f32, spacing_y: f32, hbar: f32, rows: f32) -> f32 {
+    header_h + spacing_y + rows * (row_h + spacing_y) + hbar
+}
+
+/// Records / bytes split for the center: the records get their full overhead (title, location,
+/// notes, column toggle) + the table minimum, the bytes shrinking first to `hex_floor`. If even
+/// that is not enough, the notes collapse to one line (`over_collapsed`). Returns (records,
+/// bytes, notes collapsed). Overheads include the records margins.
+pub fn records_plan(h: f32, ratio: f32, rec_min: f32, hex_min: f32, hex_floor: f32, over_full: f32, table_need: f32) -> (f32, f32, bool) {
+    let want = over_full + table_need;
+    let (rec, hex) = split_heights_records_first(h, ratio, rec_min, hex_min, want, hex_floor);
+    (rec, hex, rec + 0.5 < want)
+}
+
+/// `split_heights`, then the records get up to `rec_want` (title, location, notes, header and
+/// `TABLE_MIN_ROWS` body rows) by shrinking the bytes first, down to `hex_floor` (six byte rows,
+/// never below `hex_min`). The user's ratio wins whenever it already gives the records enough.
+pub fn split_heights_records_first(h: f32, ratio: f32, rec_min: f32, hex_min: f32, rec_want: f32, hex_floor: f32) -> (f32, f32) {
+    let (rec, hex) = split_heights(h, ratio, rec_min, hex_min);
+    if rec >= rec_want {
+        return (rec, hex);
+    }
+    let give = (rec_want - rec).min((hex - hex_floor.max(hex_min)).max(0.0));
+    (rec + give, hex - give)
 }
 
 // ------------------------------------------------------------------ hex rows (spec §2)
@@ -380,6 +459,28 @@ mod tests {
     use crate::app::ZoomPolicy;
     use crate::app::ZoomFit;
 
+    /// 900 px / 110 %: the fields table hides Raw hex, then Encoding, then Len (in that order),
+    /// never Offset/Field/Status/Decoded; Status turns icon-only last; "show all" keeps all.
+    #[test]
+    fn column_hide_priority() {
+        use ColumnRole as R;
+        let roles = [R::Field, R::Offset, R::Len, R::Decoded, R::Encoding, R::RawHex, R::Status];
+        let w = |r: ColumnRole| column_width(r);
+        let full: f32 = roles.iter().map(|r| if r.fills() { LAYOUT.remainder_min } else { w(*r) } + 4.0).sum();
+        let p = plan_columns(&roles, full + 1.0, false, &w, 4.0);
+        assert_eq!((p.hidden, p.status_icon), (0, false));
+        let p = plan_columns(&roles, full - 1.0, false, &w, 4.0);
+        assert_eq!(p.shown, vec![true, true, true, true, true, false, true], "Raw hex goes first");
+        let p = plan_columns(&roles, full - w(R::RawHex) - 5.0, false, &w, 4.0);
+        assert_eq!(p.shown, vec![true, true, true, true, false, false, true], "then Encoding");
+        let p = plan_columns(&roles, full - w(R::RawHex) - w(R::Encoding) - 9.0, false, &w, 4.0);
+        assert_eq!((p.shown.clone(), p.hidden), (vec![true, true, false, true, false, false, true], 3), "then Len");
+        let p = plan_columns(&roles, 300.0, false, &w, 4.0);
+        assert!(p.status_icon && p.shown[0] && p.shown[1] && p.shown[3] && p.shown[6], "{p:?}");
+        let p = plan_columns(&roles, 300.0, true, &w, 4.0);
+        assert_eq!((p.hidden, p.status_icon), (0, false), "+N columns shows everything");
+    }
+
     /// Fix C2: a ~300 pt Explanation (1400 px, 100 %) stacks; a wide panel keeps two columns
     /// only while the widest value fits beside the labels.
     #[test]
@@ -398,6 +499,48 @@ mod tests {
         // Too short for both: bytes keep their minimum, records get the rest.
         assert_eq!(split_heights(200.0, 0.42, 75.0, 150.0), (50.0, 150.0));
         assert_eq!(split_heights(100.0, 0.42, 75.0, 150.0), (0.0, 100.0));
+    }
+
+    /// G6 (0011 fix): at a short center the bytes shrink first (to six rows) so the records
+    /// table keeps its header + 4 rows; a ratio that already suffices is kept.
+    #[test]
+    fn records_first_split_shrinks_bytes_to_their_floor() {
+        // 575 pt center, ratio 0.42 → 241 records; want 300; bytes 334 → floor 230: give 59.
+        assert_eq!(split_heights_records_first(575.0, 0.42, 75.0, 150.0, 300.0, 230.0), (300.0, 275.0));
+        // Not enough even at the floor: bytes stop at six rows.
+        assert_eq!(split_heights_records_first(500.0, 0.42, 75.0, 150.0, 400.0, 230.0), (270.0, 230.0));
+        // The user's larger records share is untouched.
+        assert_eq!(split_heights_records_first(1000.0, 0.42, 75.0, 150.0, 300.0, 230.0), (420.0, 580.0));
+
+        // FREEZE D: the real 900×700 window at 100 % and at the 120 % ceiling (logical window
+        // 900/z × 700/z; real bundled-font metrics of the default theme). The WAL root view's
+        // overhead: Back/title row, 2 location lines, a 3-line subtitle, separator, "+3 columns".
+        use eframe::egui::{self, FontId};
+        let m = measured();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let h_of = |f: FontId| ctx.fonts_mut(|x| x.row_height(&f));
+        let sp = egui::Spacing::default();
+        let sp_y = sp.item_spacing.y;
+        let row_h = h_of(FontId::proportional(14.5)).max(h_of(FontId::monospace(13.5))) + LAYOUT.row_pad;
+        let header_h = h_of(FontId::proportional(15.5)) + LAYOUT.header_pad;
+        let small = h_of(FontId::proportional(12.0)) + sp_y;
+        let margins = 2.0 * LAYOUT.center_margin[1];
+        let post = 6.0 + sp_y + m.toolbar_row_h;
+        let over_full = margins + m.toolbar_row_h + 2.0 * small + 3.0 * small + post;
+        let over_collapsed = margins + m.toolbar_row_h + 2.0 * small + small + post;
+        let need = table_need_h(header_h, row_h, sp_y, sp.scroll.allocated_width(), 4.0);
+        for z in [1.0f32, 1.2] {
+            let (w, h) = (900.0 / z, 700.0 / z);
+            let center_h = h - m.toolbar_h(w) - m.status_h - LAYOUT.split_handle;
+            let hex_min = m.bytes_h(center_min(&m.hex));
+            let hex_floor = hex_min + (LAYOUT.hex_floor_rows - LAYOUT.bytes_min_rows) * m.hex_row_h;
+            let (rec, hex, collapsed) = records_plan(center_h, 0.42, m.records_min_h, hex_min, hex_floor, over_full, need);
+            let over = if collapsed { over_collapsed } else { over_full };
+            let body_rows = ((rec - over - header_h - sp_y - sp.scroll.allocated_width()) / (row_h + sp_y)).floor();
+            assert!(body_rows >= 4.0, "zoom {z}: {body_rows} rows (records {rec}, bytes {hex}, collapsed {collapsed})");
+            assert!(hex >= hex_min - 0.01, "zoom {z}: bytes keep their minimum");
+        }
     }
 
     #[test]

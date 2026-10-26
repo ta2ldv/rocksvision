@@ -345,7 +345,7 @@ fn failed_children_mark_node_invalid() {
     let gate = Gate::new();
     gate.release();
     let mut app = app_with(&gate);
-    app.doc.push_test_node(TreeNode { label: "n".into(), kind: NodeKind::Root, status: Status::Present, leaf: false, depth: 0, children: None, expanded: true, loading: true, diag: None, contains: None });
+    app.doc.push_test_node(TreeNode { label: "n".into(), kind: NodeKind::Root, status: Status::Present, leaf: false, depth: 0, children: None, expanded: true, loading: true, diag: None, contains: None, role: ChildRole::Structure, checked: None });
     let msg = Response::Children { node: 0, children: Vec::new(), error: Some("boom".into()) };
     app.apply_response(Tagged { generation: app.session().generation(), msg });
     let nodes = app.session().nodes();
@@ -552,7 +552,7 @@ fn stale_replies_are_ignored_by_request_identity() {
     assert!(!app.session().changed());
     // A view of an older generation is dropped.
     app.close_file();
-    app.apply_response(Tagged { generation: g, msg: Response::View { kind: NodeKind::Root, view: View::default() } });
+    app.apply_response(Tagged { generation: g, msg: Response::View { req: 1, target: crate::jobs::ViewTarget::Node(NodeKind::Root), kind: Some(NodeKind::Root), view: View::default(), reveal: None, select: None } });
     assert!(app.session().view().is_none());
     gate.release();
     settle(&mut app);
@@ -607,4 +607,172 @@ fn select_span_selects_in_its_space() {
     assert_eq!(app.selection().row(), None);
     assert!(app.selection().epoch() > e0);
     assert_eq!(app.session().hex().space(), Space::File);
+}
+
+// ---------------- task 0006 / handoff 0011: navigation and synchronized selection ----------
+
+fn fixture(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
+}
+
+fn open_ready(rel: &str) -> App {
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    app.apply(Action::OpenFile(fixture(rel)));
+    pump(&mut app, "opened", |a| a.session().view().is_some() && a.session().pending_view().is_none() && !a.session().roots().is_empty() && a.session().hex().page().is_some());
+    app
+}
+
+fn view_is(app: &mut App, k: &NodeKind) {
+    let k2 = k.clone();
+    pump(app, "view", move |a| a.session().pending_view().is_none() && a.session().view_kind() == Some(&k2));
+}
+
+/// Navigate expands the canonical ancestors, selects and reveals the canonical node (never a
+/// reference), shows its view; a reference node click navigates; Back returns.
+#[test]
+fn navigate_reveals_canonical_node_and_back_returns() {
+    let mut app = open_ready("tests/fixtures/sst-variants/partitioned.sst");
+    let part = NodeKind::SstBlock { off: 0x18073, size: 282, kind: BlockKind::IndexPartition };
+    app.apply(Action::Navigate { target: part.clone(), span: None });
+    view_is(&mut app, &part);
+    let i = app.session().sel_node().expect("tree node selected");
+    assert_eq!((&app.session().nodes()[i].kind, app.session().nodes()[i].role), (&part, ChildRole::Structure));
+    assert_eq!(app.take_scroll_request().tree, Some(i), "single-use reveal request");
+    assert_eq!(app.take_scroll_request().tree, None);
+    assert!(app.session().hex().page_base() <= 0x18073);
+    // A reference node (index entry → data block) navigates to the canonical block.
+    let top = app.session().nodes().iter().position(|n| matches!(n.kind, NodeKind::SstBlock { kind: BlockKind::TopIndex, .. })).unwrap();
+    app.apply(Action::ToggleNode(top));
+    pump(&mut app, "top index children", move |a| a.session().nodes()[top].children.is_some());
+    let r = app.session().nodes().iter().position(|n| n.role == ChildRole::Reference).expect("reference child");
+    let target = app.session().nodes()[r].kind.clone();
+    app.apply(Action::SelectNode(r));
+    view_is(&mut app, &target);
+    let j = app.session().sel_node().unwrap();
+    assert_eq!((&app.session().nodes()[j].kind, app.session().nodes()[j].role), (&target, ChildRole::Structure), "canonical node, not the reference");
+    // Back returns to the partition (and selects its node again).
+    app.apply(Action::Back);
+    view_is(&mut app, &part);
+    assert_eq!(app.session().sel_node(), Some(i));
+}
+
+/// Row "count" of the first WriteBatch fills its file bytes [0xf,0x13) (exact provenance);
+/// clicking byte 0x11 selects the same row with the byte outlined, in one step; a reveal or
+/// repeated poll never changes the selection.
+#[test]
+fn hex_click_and_row_select_agree_without_loops() {
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    let count = app.session().view().unwrap().rows.iter().position(|r| r.field.kind == FieldKind::Count).unwrap();
+    app.apply(Action::SelectRow(count));
+    assert!(app.selection().spans().any(|s| s == Span::file(0xf, 4)), "{:?}", app.selection().spans().collect::<Vec<_>>());
+    assert_eq!(app.session().hex().space(), Space::File, "file offset is the primary location");
+    let e = app.selection().epoch();
+    app.apply(Action::HexClick(0x11));
+    assert_eq!((app.selection().row(), app.selection().anchor(), app.selection().epoch()), (Some(count), Some(Span::file(0x11, 1)), e + 1));
+    assert!(app.session().pending_view().is_none(), "the current table answered: no locate request");
+    for _ in 0..5 {
+        app.poll();
+        let _ = app.take_scroll_request();
+    }
+    assert_eq!(app.selection().epoch(), e + 1, "no feedback loop");
+    // From the root view the byte is located inside its record (worker request), then selected.
+    app.apply(Action::SelectRoot);
+    view_is(&mut app, &NodeKind::Root);
+    app.apply(Action::HexClick(0x11));
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    let row = app.selection().row().expect("field selected after locate");
+    assert_eq!(app.session().view().unwrap().rows[row].field.kind, FieldKind::Count);
+    assert_eq!(app.selection().anchor(), Some(Span::file(0x11, 1)));
+    // Shift+click: raw range from the anchor, row cleared, honest note.
+    app.apply(Action::HexShiftClick(0x14));
+    assert_eq!((app.selection().row(), app.selection().span()), (None, Some(Span::file(0x11, 4))));
+    assert_eq!(app.selection().raw_note(), Some("Raw range [0x11,0x15): not a single field"));
+}
+
+/// A pending (async) selection is applied only if nothing was selected since the request.
+#[test]
+fn pending_selection_never_overrides_a_newer_choice() {
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::HexClick(0x11)); // root view: locate request
+    app.apply(Action::SelectSpan(Span::file(2, 1))); // newer user choice before the reply
+    let e = app.selection().epoch();
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    assert_eq!(app.selection().row(), None, "the located field did not replace the newer selection");
+    assert!(app.selection().epoch() > e, "the view change cleared it (new table)");
+}
+
+/// `]` / `[`: one field per press in span order; Shift: one sibling structure per press.
+#[test]
+fn keyboard_steps_are_single() {
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    let v = app.session().view().unwrap().clone();
+    let mut order: Vec<(usize, Span)> = v.rows.iter().enumerate().filter_map(|(i, r)| r.field.span.map(|s| (i, s))).collect();
+    order.sort_by_key(|(i, s)| (matches!(s.space, Space::File) as u8 ^ 1, s.offset, *i));
+    let e = app.selection().epoch();
+    app.apply(Action::StepField(true));
+    assert_eq!((app.selection().row(), app.selection().epoch()), (Some(order[0].0), e + 1));
+    app.apply(Action::StepField(true));
+    assert_eq!(app.selection().row(), Some(order[1].0));
+    app.apply(Action::StepField(false));
+    assert_eq!((app.selection().row(), app.selection().epoch()), (Some(order[0].0), e + 3));
+    // Structure steps: from the Physical blocks node to the next sibling (Logical records).
+    app.apply(Action::SelectNode(app.session().roots()[0]));
+    view_is(&mut app, &NodeKind::LogBlocks { first: 0, count: 1 });
+    app.apply(Action::StepStructure(true));
+    view_is(&mut app, &NodeKind::LogRecords { start: 0, page: 0 });
+    assert_eq!(app.session().sel_node(), Some(app.session().roots()[1]));
+}
+
+/// 0011 fix G1/G2/G4: a reference link selects the whole target structure (never "Nothing
+/// selected") with its file range and the origin for "Referenced from"; Back restores the exact
+/// previous selection (row, span, anchor) and byte view; a tree click and Shift+] / Shift+[
+/// take the same path (Structure selection, one sibling per press, tree reveal).
+#[test]
+fn navigate_selects_structure_and_back_restores_selection() {
+    use crate::app::selection::SelTarget;
+    let mut app = open_ready("examples/files/sst-zstd/sst-zstd.sst");
+    let index = app.session().nodes().iter().find(|n| matches!(n.kind, NodeKind::SstBlock { kind: BlockKind::Index, .. })).map(|n| n.kind.clone()).unwrap();
+    app.apply(Action::Navigate { target: index.clone(), span: None });
+    view_is(&mut app, &index);
+    // Tree-click / navigation path: the whole structure, its extent as the span.
+    assert_eq!(app.selection().target(), &SelTarget::Structure);
+    assert_eq!(app.selection().span(), app.session().view().unwrap().extent);
+    // Select index entry 2 (a link row) with its byte, then follow the link.
+    let row = app.session().view().unwrap().rows.iter().position(|r| r.field.name == "entry 2" && r.field.link.is_some()).expect("entry 2");
+    app.apply(Action::SelectRow(row));
+    let before = app.selection().snapshot();
+    let hex_before = (app.session().hex().space(), app.session().hex().page_base());
+    let target = app.session().view().unwrap().rows[row].field.link.clone().unwrap();
+    app.apply(Action::FollowRow(row));
+    view_is(&mut app, &target);
+    assert_eq!(app.selection().target(), &SelTarget::Structure, "never Nothing selected after a navigate");
+    let ext = app.session().view().unwrap().extent.expect("data block extent");
+    assert_eq!(app.selection().span(), Some(ext));
+    assert!(app.selection().via().is_some_and(|v| v.starts_with("entry 2 of Index block")), "{:?}", app.selection().via());
+    assert!(app.session().hex().page_base() <= ext.offset, "byte view moved to the target");
+    // Back: same selection as before the link, same byte view.
+    app.apply(Action::Back);
+    view_is(&mut app, &index);
+    assert_eq!(app.selection().snapshot(), before);
+    assert_eq!((app.session().hex().space(), app.session().hex().page_base()), hex_before);
+    // Structure steps = tree click path: Structure selection, one sibling per press.
+    let i = app.session().sel_node().unwrap();
+    let next = app.session().sibling(i, true).unwrap();
+    let k = app.session().nodes()[next].kind.clone();
+    app.apply(Action::StepStructure(true));
+    view_is(&mut app, &k);
+    assert_eq!((app.session().sel_node(), app.selection().target()), (Some(next), &SelTarget::Structure));
+    assert_eq!(app.take_scroll_request().tree, Some(next), "the tree reveals the stepped node");
+    let tree_click = app.selection().snapshot();
+    app.apply(Action::SelectNode(i));
+    view_is(&mut app, &index);
+    app.apply(Action::SelectNode(next));
+    view_is(&mut app, &k);
+    assert_eq!(app.selection().snapshot(), tree_click, "tree click and structure step select the same");
 }

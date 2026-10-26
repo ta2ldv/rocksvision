@@ -1,16 +1,18 @@
 //! SST presentation: lazy tree children and views (tables, explanations, derived-space titles)
 //! built from the typed state of `sst::SstInspector`.
 
-use super::common::{error_view, explained, of_fields, st_cell, with_error_diag};
+use super::common::{bytes_dec_hex, error_view, explained, field_row, of_fields, range, size_row, st_cell, with_error_diag, Location};
 use crate::format::codec::compression_name;
 use crate::format::ikey::{split_ikey, value_type_name as tag_name, MAX_SEQUENCE};
-use crate::limits::{RESTARTS_LISTED, SST_DATA_PAGE as DATA_PAGE, SST_TREE_CHILDREN as TREE_CHILD_CAP};
+use crate::limits::{COMPRESSION_SAMPLE, RESTARTS_LISTED, SST_DATA_PAGE as DATA_PAGE, SST_TREE_CHILDREN as TREE_CHILD_CAP};
 use crate::model::*;
 use crate::model::{DecodedValue as DV, FieldKind as K, HandleTarget as HT};
-use crate::sst::block::{Block, Entry};
+use crate::sst::block::{Block, Entry as BlockEntry};
 use crate::sst::footer::{self, Footer, Handle, BLOCK_TRAILER};
-use crate::sst::{index_type_name, meta_kind, prop_value, MetaEntry, PropValue, SstInspector};
-use crate::util::{bytes_preview, fixed32, hex_preview, human_size};
+use crate::sst::layout::{Entry, Item, ItemKind, PhysLayout};
+use crate::sst::{index_type_name, is_legacy_filter_name, meta_kind, prop_value, PropValue, SstInspector};
+use crate::util::{bytes_preview, fixed32, hex_preview};
+use std::collections::BTreeMap;
 
 /// Display value and encoding of a table property.
 fn prop_decode(name: &str, v: &[u8]) -> (String, &'static str) {
@@ -43,10 +45,35 @@ fn space_info(b: &Block) -> Vec<SpaceInfo> {
         vec![SpaceInfo {
             space: Space::Block(b.handle.offset),
             size: b.data.len() as u64,
-            title: format!("Block-local offsets (decompressed {} block @0x{:x}: {} B stored -> {} B)", compression_name(b.ctype), b.handle.offset, b.handle.size, b.data.len()),
+            // "stored" = on-disk extent incl. trailer; "contents" = stored payload; "decompressed"
+            // = decompressed length (one definition per word everywhere).
+            title: format!("Block-local offsets ({} block @0x{:x}: {} B compressed contents -> {} B decompressed)", compression_name(b.ctype), b.handle.offset, b.handle.size, b.data.len()),
+            map: SpaceMap::Compressed { file: Span::file(b.handle.offset, b.handle.size), codec: compression_name(b.ctype).to_string() },
         }]
     } else {
         Vec::new()
+    }
+}
+
+/// "Physical layout: 7 structures in file order (Footer last) · 0 unaccounted gaps · data
+/// blocks listed 1 of 1 (from index)" — coverage stated, never a bare count of a partial map.
+fn layout_coverage(l: &PhysLayout) -> String {
+    let gaps = l.with_all_gaps().iter().filter(|e| matches!(e, Entry::Gap { .. })).count();
+    let bad = match l.invalid.len() {
+        0 => String::new(),
+        1 => " · 1 invalid handle".to_string(),
+        n => format!(" · {n} invalid handles"),
+    };
+    format!("Physical layout: {} structures in file order (Footer last) · {gaps} unaccounted gap(s){bad} · data blocks {} (from index){}", l.items.len(), l.listed_text(), l.note.as_ref().map(|n| format!(" · {n}")).unwrap_or_default())
+}
+
+/// Severity order of statuses (higher is worse), for a group's worst checked member.
+fn rank(s: Status) -> u8 {
+    match s {
+        Status::Present | Status::Implicit | Status::NotPresent => 0,
+        Status::Unknown | Status::Unsupported | Status::Limited => 1,
+        Status::Truncated => 2,
+        Status::Invalid => 3,
     }
 }
 
@@ -88,7 +115,7 @@ pub fn footer_fields(ft: &Footer) -> Vec<Field> {
         .collect()
 }
 
-fn entry_explain(e: &Entry, b: &Block) -> String {
+fn entry_explain(e: &BlockEntry, b: &Block) -> String {
     format!(
         "Entry at {} 0x{:x}: header {} B (shared={}, non_shared={}{}), {} key bytes stored, key = {} shared + {} stored bytes; value {} B.{}",
         if b.compressed { "block-local" } else { "file" },
@@ -106,30 +133,196 @@ fn entry_explain(e: &Entry, b: &Block) -> String {
 }
 
 impl SstInspector {
+    // ---------------- physical layout (tree order) ----------------
+
+    /// Tree label of a layout item: what it is, its offset (decimal, then hex) and stored size.
+    fn item_label(&self, it: &Item) -> String {
+        let pos = format!("@{} (0x{:x}, {} B)", it.start, it.start, it.size + it.trailer);
+        match &it.kind {
+            ItemKind::Footer => format!("Footer {pos}"),
+            ItemKind::Block { kind, name, ordinal } => match kind {
+                BlockKind::Data => format!("Data block {pos}{}", ordinal.map(|n| format!(" #{n}")).unwrap_or_default()),
+                BlockKind::Index | BlockKind::TopIndex => format!("{} ({}) {pos}", kind.label(), index_type_name(self.index_type())),
+                BlockKind::Filter | BlockKind::FilterIndex | BlockKind::Properties => format!("{} ({name}) {pos}", kind.label()),
+                BlockKind::RangeDel => format!("Range deletions {pos}"),
+                BlockKind::CompressionDict => format!("Compression dictionary {pos}"),
+                BlockKind::Meta if is_legacy_filter_name(name) => format!("Legacy block-based filter {name} (unsupported) {pos}"),
+                BlockKind::Meta => format!("Meta block {name} {pos}"),
+                k => format!("{} {pos}", k.label()),
+            },
+        }
+    }
+
+    /// Node of a layout item at its canonical place.
+    fn item_node(it: &Item) -> NodeKind {
+        match &it.kind {
+            ItemKind::Footer => NodeKind::SstFooter,
+            ItemKind::Block { kind, .. } => NodeKind::SstBlock { off: it.start, size: it.size, kind: *kind },
+        }
+    }
+
+    fn item_child(&mut self, it: &Item) -> Child {
+        let node = Self::item_node(it);
+        let label = self.item_label(it);
+        match &it.kind {
+            ItemKind::Footer => Child::new(label, node).leaf().status(if self.footer().is_ok() { Status::Present } else { Status::Invalid }).diag(self.footer_diagnostic().cloned()),
+            ItemKind::Block { kind: BlockKind::Metaindex, .. } => Child::new(label, node).status(if self.meta().is_ok() { Status::Present } else { Status::Invalid }),
+            ItemKind::Block { kind: BlockKind::Meta, name, .. } => Child::new(label, node).status(if is_legacy_filter_name(name) { Status::Unsupported } else { Status::Unknown }),
+            ItemKind::Block { .. } => {
+                let (st, d) = self.block_check(it.handle());
+                Child::new(label, node).status(st).diag(d)
+            }
+        }
+    }
+
+    fn entry_child(&mut self, l: &PhysLayout, e: Entry) -> Child {
+        match e {
+            Entry::Item(i) => self.item_child(&l.items[i]),
+            Entry::Group { first, count } => {
+                let (a, z) = (&l.items[first], &l.items[first + count - 1]);
+                let what = match a.block_kind() {
+                    Some(BlockKind::Data) => "Data blocks",
+                    Some(BlockKind::IndexPartition) => "Index partitions",
+                    _ => "Filter partitions",
+                };
+                let ord = |it: &Item| match &it.kind {
+                    ItemKind::Block { ordinal: Some(n), .. } => format!("#{n}"),
+                    _ => format!("@0x{:x}", it.start),
+                };
+                let (st, c) = self.group_check(l, first, count);
+                Child::new(format!("{what} {}–{} {} · {count} blocks", ord(a), ord(z), range(a.start, z.end())), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }).status(st).checked(c)
+            }
+            Entry::Gap { start, end } => Child::new(format!("Unaccounted bytes {} · {} B", range(start, end), end - start), NodeKind::SstGap { start, end }).leaf().status(Status::Unknown),
+            Entry::Invalid(i) => {
+                let it = &l.invalid[i];
+                Child::new(format!("{} · handle beyond footer/file", self.item_label(it)), Self::item_node(it)).leaf().status(Status::Invalid).diag(Some(self.beyond_diag(l, it)))
+            }
+        }
+    }
+
+    /// Coverage of a group of layout items from blocks already checked (no read): the worst
+    /// checked status (Present only when every member was checked) and (checked, members).
+    fn group_check(&self, l: &PhysLayout, first: usize, count: usize) -> (Status, (u64, u64)) {
+        let mut checked = 0u64;
+        let mut worst = Status::Present;
+        for it in l.items.iter().skip(first).take(count) {
+            if let Some(s) = self.checked_status(it.handle()) {
+                checked += 1;
+                if rank(s) > rank(worst) {
+                    worst = s;
+                }
+            }
+        }
+        let st = if checked == 0 || (checked < count as u64 && worst == Status::Present) { Status::Unknown } else { worst };
+        (st, (checked, count as u64))
+    }
+
+    /// Diagnostic of a handle that does not address bytes before the footer.
+    fn beyond_diag(&self, l: &PhysLayout, it: &Item) -> Diagnostic {
+        let span = (it.start < l.file_len).then(|| Span::file(it.start, it.end().min(l.file_len) - it.start));
+        Diagnostic::new(
+            CheckKind::Handle,
+            span,
+            Trust::Untrusted,
+            "the block is not read; it is listed before the Footer, not in file order",
+            format!("block handle offset {} size {} (+{} B trailer) ends at {}, beyond the footer at {} (file length {})", it.start, it.size, it.trailer, it.end(), l.footer_off, l.file_len),
+        )
+        .values(Some(DV::U64(l.footer_off)), Some(DV::U64(it.end())))
+    }
+
+    /// Location lines of the structure starting at `off` (`end` exclusive) with its contents
+    /// and trailer, and the next structure / gap after it from the layout.
+    fn location(&mut self, off: u64, end: u64, contents: Option<(u64, u64)>, trailer: Option<(u64, u64)>, decompressed: Option<u64>, cancel: &dyn Fn() -> bool) -> Location {
+        let l = self.layout(cancel);
+        let next = l.items.iter().find(|it| it.start >= end).map(|it| (it.start, Self::item_node(it)));
+        let gap = next.as_ref().filter(|(at, _)| *at > end).map(|(at, _)| NodeKind::SstGap { start: end, end: *at });
+        Location { start: off, end, contents, trailer, header: None, decompressed, next, gap, eof: self.len() }
+    }
+
+    /// Ancestors of `target` below the root (canonical path of a navigation): the layout groups
+    /// holding a structure, plus the block for its parts. None if the target is not a node of
+    /// the physical tree or the views.
+    pub fn path_to(&mut self, target: &NodeKind, cancel: &dyn Fn() -> bool) -> Option<Vec<NodeKind>> {
+        let l = self.layout(cancel);
+        let groups = |off: u64| l.group_path(off).into_iter().map(|(f, c)| NodeKind::SstLayoutGroup { first: f as u64, count: c as u64 }).collect::<Vec<_>>();
+        match target {
+            NodeKind::Root | NodeKind::SstFooter | NodeKind::SstLayout | NodeKind::SstProperties | NodeKind::SstDataBlocks { skip: 0 } => Some(Vec::new()),
+            NodeKind::SstBlock { off, size, .. } if l.item_at_start(*off).is_none() => l.invalid_at(*off, *size).map(|_| Vec::new()),
+            NodeKind::SstBlock { off, .. } => Some(groups(*off)),
+            NodeKind::SstGap { start, .. } => Some(groups(*start)),
+            NodeKind::SstLayoutGroup { first, .. } => {
+                let off = l.items.get(*first as usize)?.start;
+                let mut g = groups(off);
+                let i = g.iter().position(|k| k == target)?;
+                g.truncate(i);
+                Some(g)
+            }
+            NodeKind::SstTrailer { off, size, kind } | NodeKind::SstRestarts { off, size, kind } | NodeKind::SstEntry { off, size, kind, .. } => {
+                l.item_at_start(*off)?;
+                let mut g = groups(*off);
+                g.push(NodeKind::SstBlock { off: *off, size: *size, kind: *kind });
+                Some(g)
+            }
+            _ => None,
+        }
+    }
+
+    /// The structure holding file byte `off` and what to select in its view: the field under
+    /// the byte for uncompressed bytes; the whole block for compressed contents (no byte maps
+    /// to a decompressed field); the gap for unaccounted bytes.
+    pub fn locate(&mut self, off: u64, cancel: &dyn Fn() -> bool) -> Option<(NodeKind, Option<(Space, u64)>, Option<Span>)> {
+        let l = self.layout(cancel);
+        let at = Some((Space::File, off));
+        let Some(i) = l.item_containing(off) else {
+            let (a, b) = l.gap_containing(off)?;
+            return Some((NodeKind::SstGap { start: a, end: b }, None, Some(Span::file(a, b - a))));
+        };
+        let it = l.items[i].clone();
+        let Some(kind) = it.block_kind() else { return Some((NodeKind::SstFooter, at, None)) };
+        let (o, s) = (it.start, it.size);
+        if off >= o + s {
+            return Some((NodeKind::SstTrailer { off: o, size: s, kind }, at, None));
+        }
+        if self.block_ctype(it.handle()).unwrap_or(0) != 0 {
+            return Some((NodeKind::SstBlock { off: o, size: s, kind }, None, Some(Span::file(o, s))));
+        }
+        if !matches!(kind, BlockKind::Filter | BlockKind::FilterPartition | BlockKind::CompressionDict | BlockKind::Meta) {
+            let b = self.block(it.handle(), kind);
+            if let Ok(lay) = SstInspector::layout_of(&b) {
+                if off >= o + lay.restarts_off as u64 {
+                    return Some((NodeKind::SstRestarts { off: o, size: s, kind }, at, None));
+                }
+            }
+        }
+        Some((NodeKind::SstBlock { off: o, size: s, kind }, at, None))
+    }
+
     // ---------------- tree ----------------
 
     pub fn children(&mut self, k: &NodeKind, cancel: &dyn Fn() -> bool) -> Vec<Child> {
         match k {
-            NodeKind::Root => self.root_children(),
+            NodeKind::Root => self.root_children(cancel),
+            NodeKind::SstLayoutGroup { first, count } => {
+                let l = self.layout(cancel);
+                l.group(*first as usize, *count as usize).into_iter().map(|e| self.entry_child(&l, e)).collect()
+            }
             NodeKind::SstBlock { off, size, kind } => {
                 let h = Handle { offset: *off, size: *size };
                 let mut out = Vec::new();
                 let structured = !matches!(kind, BlockKind::Filter | BlockKind::FilterPartition | BlockKind::CompressionDict | BlockKind::Meta);
-                out.push(Child::new("Trailer (compression + checksum)", NodeKind::SstTrailer { off: *off, size: *size, kind: *kind }).leaf());
-                if structured {
-                    out.push(Child::new("Restart array / block footer", NodeKind::SstRestarts { off: *off, size: *size, kind: *kind }).leaf());
-                }
                 let target = match kind {
                     BlockKind::Index | BlockKind::IndexPartition => Some(BlockKind::Data),
                     BlockKind::TopIndex => Some(BlockKind::IndexPartition),
                     BlockKind::FilterIndex => Some(BlockKind::FilterPartition),
                     _ => None,
                 };
+                // Entries first (physical order: entries → restart array → trailer). Entries that
+                // name another block are references to its canonical node, never copies.
                 if *kind == BlockKind::Metaindex {
-                    if let Ok(m) = self.meta() {
-                        for e in m {
-                            out.push(Child::new(format!("{} @{}", e.name, e.handle.offset), NodeKind::SstBlock { off: e.handle.offset, size: e.handle.size, kind: self.meta_kind_for(&e.name) }));
-                        }
+                    let meta = self.meta().map(|m| m.to_vec()).unwrap_or_default();
+                    for e in meta {
+                        let it = Item { start: e.handle.offset, size: e.handle.size, trailer: BLOCK_TRAILER, kind: ItemKind::Block { kind: self.meta_kind_for(&e.name), name: e.name.clone(), ordinal: None } };
+                        out.push(Child::new(format!("{} › {}", e.name, self.item_label(&it)), Self::item_node(&it)).role(ChildRole::Reference));
                     }
                 }
                 if let Some(t) = target {
@@ -139,14 +332,19 @@ impl SstInspector {
                         for e in es.iter().take(TREE_CHILD_CAP) {
                             if let Some((th, _, _)) = &e.handle {
                                 let (st, d) = self.block_check(*th);
-                                out.push(Child::new(format!("{} @{} ({} B) ≤ {}", t.label(), th.offset, th.size, self.key_label(&e.key, true)), NodeKind::SstBlock { off: th.offset, size: th.size, kind: t }).status(st).diag(d));
+                                let it = Item { start: th.offset, size: th.size, trailer: BLOCK_TRAILER, kind: ItemKind::Block { kind: t, name: String::new(), ordinal: None } };
+                                out.push(Child::new(format!("{} ≤ {} ›", self.item_label(&it), self.key_label(&e.key, true)), NodeKind::SstBlock { off: th.offset, size: th.size, kind: t }).status(st).diag(d).role(ChildRole::Reference));
                             }
                         }
                         if n > TREE_CHILD_CAP {
-                            out.push(Child::new(format!("{} more — use \"Data blocks\" paging", n - TREE_CHILD_CAP), NodeKind::SstDataBlocks { skip: TREE_CHILD_CAP as u64 }).status(Status::Limited));
+                            out.push(Child::new(format!("{} more — use \"Data blocks via index\" paging", n - TREE_CHILD_CAP), NodeKind::SstDataBlocks { skip: TREE_CHILD_CAP as u64 }).status(Status::Limited).role(ChildRole::Reference));
                         }
                     }
                 }
+                if structured {
+                    out.push(Child::new("Restart array / block footer", NodeKind::SstRestarts { off: *off, size: *size, kind: *kind }).leaf());
+                }
+                out.push(Child::new(format!("Trailer (compression + checksum) {}", range(off + size, off + size + BLOCK_TRAILER)), NodeKind::SstTrailer { off: *off, size: *size, kind: *kind }).leaf());
                 out
             }
             NodeKind::SstDataBlocks { skip } => {
@@ -154,10 +352,11 @@ impl SstInspector {
                 let mut out: Vec<Child> = Vec::with_capacity(hs.len() + 1);
                 for (i, (h, k)) in hs.iter().enumerate() {
                     let (st, d) = self.block_check(*h);
-                    out.push(Child::new(format!("#{} @{} ({} B) ≤ {}", *skip as usize + i, h.offset, h.size, self.key_label(k, true)), NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Data }).status(st).diag(d));
+                    let it = Item { start: h.offset, size: h.size, trailer: BLOCK_TRAILER, kind: ItemKind::Block { kind: BlockKind::Data, name: String::new(), ordinal: Some(*skip + i as u64) } };
+                    out.push(Child::new(format!("{} ≤ {} ›", self.item_label(&it), self.key_label(k, true)), NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Data }).status(st).diag(d).role(ChildRole::Reference));
                 }
                 if more {
-                    out.push(Child::new(format!("Next {} data blocks ›", DATA_PAGE), NodeKind::SstDataBlocks { skip: skip + hs.len() as u64 }));
+                    out.push(Child::new(format!("Next {} data blocks ›", DATA_PAGE), NodeKind::SstDataBlocks { skip: skip + hs.len() as u64 }).role(ChildRole::View));
                 }
                 out
             }
@@ -165,47 +364,39 @@ impl SstInspector {
         }
     }
 
-    fn root_children(&self) -> Vec<Child> {
-        let mut v = vec![Child::new("Footer", NodeKind::SstFooter).leaf().status(if self.footer().is_ok() { Status::Present } else { Status::Invalid }).diag(self.footer_diagnostic().cloned())];
-        let Ok(f) = self.footer() else { return v };
-        v.push(Child::new(format!("Metaindex @{}", f.metaindex.offset), NodeKind::SstBlock { off: f.metaindex.offset, size: f.metaindex.size, kind: BlockKind::Metaindex }).status(if self.meta().is_ok() { Status::Present } else { Status::Invalid }));
-        let unknown_meta = self.meta().is_err();
-        let absent = |label: &str| Child::new(format!("{label}: {}", if unknown_meta { "unknown (metaindex unreadable)" } else { "not present" }), NodeKind::SstProperties).leaf().status(if unknown_meta { Status::Unknown } else { Status::NotPresent });
-        match self.props_handle() {
-            Some(h) => v.push(Child::new("Properties", NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Properties })),
-            None => v.push(absent("Properties")),
+    fn root_children(&mut self, cancel: &dyn Fn() -> bool) -> Vec<Child> {
+        let Ok(_) = self.footer() else {
+            return vec![Child::new("Footer", NodeKind::SstFooter).leaf().status(Status::Invalid).diag(self.footer_diagnostic().cloned())];
+        };
+        // Physical layout, file order (Footer last); then the views.
+        let l = self.layout(cancel);
+        let mut v: Vec<Child> = l.top().into_iter().map(|e| self.entry_child(&l, e)).collect();
+        if !l.data_complete {
+            v.push(Child::new(format!("Data blocks: {} ({})", l.listed_text(), l.note.clone().unwrap_or_default()), NodeKind::SstDataBlocks { skip: 0 }).role(ChildRole::Absent).status(Status::Limited));
         }
-        match self.index_handle() {
-            Some(h) => {
-                let k = self.index_kind();
-                v.push(Child::new(format!("{} ({})", k.label(), index_type_name(self.index_type())), NodeKind::SstBlock { off: h.offset, size: h.size, kind: k }));
-                v.push(Child::new("Data blocks (via index)", NodeKind::SstDataBlocks { skip: 0 }));
-            }
-            None => v.push(absent("Index")),
+        v.push(Child::new("Physical layout table (file order)", NodeKind::SstLayout).role(ChildRole::View).leaf());
+        if self.index_handle().is_some() {
+            // The listed count when the index walk is complete; otherwise a lower bound only.
+            let n = if l.data_complete { l.data_listed.to_string() } else { format!("≥{}", l.data_declared.unwrap_or(0).max(l.data_listed)) };
+            v.push(Child::new(format!("Data blocks via index ({n})"), NodeKind::SstDataBlocks { skip: 0 }).role(ChildRole::View));
+        }
+        let unknown_meta = self.meta().is_err();
+        let absent = |label: &str| Child::new(format!("{label}: {}", if unknown_meta { "unknown (metaindex unreadable)" } else { "not present" }), NodeKind::SstProperties).role(ChildRole::Absent).status(if unknown_meta { Status::Unknown } else { Status::NotPresent });
+        if self.props_handle().is_none() {
+            v.push(absent("Properties"));
+        }
+        if self.index_handle().is_none() {
+            v.push(absent("Index"));
         }
         let meta = self.meta().map(|m| m.to_vec()).unwrap_or_default();
-        let filters: Vec<&MetaEntry> = meta.iter().filter(|m| matches!(meta_kind(&m.name), BlockKind::Filter | BlockKind::FilterIndex)).collect();
-        let legacy_filter = meta.iter().any(|m| m.is_legacy_filter());
-        if filters.is_empty() && !legacy_filter {
+        let filters = meta.iter().any(|m| matches!(meta_kind(&m.name), BlockKind::Filter | BlockKind::FilterIndex) || m.is_legacy_filter());
+        if !filters {
             v.push(absent("Filter"));
         }
-        for m in filters {
-            let k = meta_kind(&m.name);
-            v.push(Child::new(format!("{} ({})", k.label(), m.name), NodeKind::SstBlock { off: m.handle.offset, size: m.handle.size, kind: k }));
-        }
         for (name, label) in [("rocksdb.range_del", "Range deletions"), ("rocksdb.compression_dict", "Compression dictionary")] {
-            match self.meta_handle(name) {
-                Some(h) => v.push(Child::new(label, NodeKind::SstBlock { off: h.offset, size: h.size, kind: meta_kind(name) })),
-                None => v.push(absent(label)),
+            if self.meta_handle(name).is_none() {
+                v.push(absent(label));
             }
-        }
-        for m in meta.iter().filter(|m| meta_kind(&m.name) == BlockKind::Meta) {
-            let (label, st) = if m.is_legacy_filter() {
-                (format!("Legacy block-based filter {} (unsupported)", m.name), Status::Unsupported)
-            } else {
-                (format!("Meta block {}", m.name), Status::Unknown)
-            };
-            v.push(Child::new(label, NodeKind::SstBlock { off: m.handle.offset, size: m.handle.size, kind: BlockKind::Meta }).status(st));
         }
         v
     }
@@ -225,12 +416,13 @@ impl SstInspector {
 
     pub fn view(&mut self, k: &NodeKind, cancel: &dyn Fn() -> bool) -> View {
         match k {
-            NodeKind::Root => self.root_view(),
-            NodeKind::SstFooter => match self.footer() {
+            NodeKind::Root => self.root_view(cancel),
+            NodeKind::SstFooter => match self.footer().cloned() {
                 Ok(f) => {
-                    let mut v = of_fields(format!("Footer @0x{:x} ({} B, format_version {})", f.offset, f.len, f.format_version), footer_fields(f));
+                    let mut v = of_fields(format!("Footer @0x{:x} ({} B, format_version {})", f.offset, f.len, f.format_version), footer_fields(&f));
                     v.notes.push("Footer layout: table/format.cc (legacy 48 B, format_version>=1 53 B).".into());
                     v.diagnostics.extend(f.fields.iter().filter_map(|x| x.diag.as_deref().cloned()));
+                    self.location(f.offset, f.offset + f.len, None, None, None, cancel).apply(&mut v);
                     v
                 }
                 Err(e) => {
@@ -238,25 +430,121 @@ impl SstInspector {
                 }
             },
             NodeKind::SstProperties => of_fields("Not present", vec![Field::new("structure", None, "This optional structure is not listed in the metaindex.").status(if self.meta().is_ok() { Status::NotPresent } else { Status::Unknown })]),
-            NodeKind::SstBlock { off, size, kind } => self.block_view(Handle { offset: *off, size: *size }, *kind),
-            NodeKind::SstTrailer { off, size, kind } => self.trailer_view(Handle { offset: *off, size: *size }, *kind),
+            NodeKind::SstBlock { off, size, kind } => {
+                let mut v = self.block_view(Handle { offset: *off, size: *size }, *kind);
+                let dec = v.spaces.first().map(|s| s.size);
+                let (o, s) = (*off, *size);
+                self.location(o, o + s + BLOCK_TRAILER, Some((o, o + s)), Some((o + s, o + s + BLOCK_TRAILER)), dec, cancel).apply(&mut v);
+                v
+            }
+            NodeKind::SstTrailer { off, size, kind } => {
+                let mut v = self.trailer_view(Handle { offset: *off, size: *size }, *kind);
+                let t = off + size;
+                self.location(t, t + BLOCK_TRAILER, None, None, None, cancel).apply(&mut v);
+                v
+            }
             NodeKind::SstRestarts { off, size, kind } => self.restarts_view(Handle { offset: *off, size: *size }, *kind),
             NodeKind::SstEntry { off, size, kind, idx } => self.entry_view(Handle { offset: *off, size: *size }, *kind, *idx),
             NodeKind::SstDataBlocks { skip } => self.data_blocks_view(*skip, cancel),
+            NodeKind::SstLayout => {
+                let l = self.layout(cancel);
+                let entries: Vec<Entry> = l.with_all_gaps();
+                let mut v = self.layout_table("Physical layout (file order)", &l, &entries);
+                v.notes.insert(0, layout_coverage(&l).into());
+                v
+            }
+            NodeKind::SstLayoutGroup { first, count } => {
+                let l = self.layout(cancel);
+                let entries = l.group(*first as usize, *count as usize);
+                let mut v = self.layout_table(&format!("Layout group: items {}..{} (file order)", first, first + count - 1), &l, &entries);
+                if let (Some(a), Some(z)) = (l.items.get(*first as usize), l.items.get((first + count - 1) as usize)) {
+                    v.location = vec![WhereLine { text: format!("file {} · {count} structures", range(a.start, z.end())), link: None }];
+                    v.extent = Some(Span::file(a.start, z.end() - a.start));
+                }
+                v
+            }
+            NodeKind::SstGap { start, end } => {
+                let (a, b) = (*start, *end);
+                let f = Field::new("unaccounted bytes", Some(Span::file(a, b - a)), format!("{} B", b - a))
+                    .status(Status::Unknown)
+                    .enc("bytes")
+                    .explain("No handle in the footer, metaindex or index names these bytes. RocksVision does not guess what they are.");
+                let mut v = of_fields(format!("Unaccounted bytes {}", range(a, b)), vec![f]);
+                self.location(a, b, None, None, None, cancel).apply(&mut v);
+                v
+            }
             _ => error_view("Unsupported node", Status::Unsupported, "node not handled by the SST inspector"),
         }
     }
 
-    fn root_view(&self) -> View {
+    /// A table of layout entries: Start | End (excl.) | Stored | Contents | Trailer | Gap before |
+    /// Codec | Structure; each row links to the canonical node.
+    fn layout_table(&mut self, title: &str, l: &PhysLayout, entries: &[Entry]) -> View {
+        use ColumnRole as R;
+        let mut rows = Vec::new();
+        let mut prev_end: Option<u64> = None;
+        let mut codecs_read = 0usize;
+        for (n, e) in entries.iter().enumerate() {
+            let (start, end, contents, trailer, structure, node, status) = match *e {
+                Entry::Item(i) => {
+                    let it = &l.items[i];
+                    let st = if it.block_kind().is_some() { Status::Present } else if self.footer().is_ok() { Status::Present } else { Status::Invalid };
+                    (it.start, it.end(), it.size, it.trailer, self.item_label(it), Self::item_node(it), st)
+                }
+                Entry::Group { first, count } => {
+                    let (a, z) = (&l.items[first], &l.items[first + count - 1]);
+                    let (st, c) = self.group_check(l, first, count);
+                    (a.start, z.end(), z.end() - a.start, 0, format!("{count} structures #{first}–#{} (group){}", first + count - 1, check_suffix(Some(c))), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }, st)
+                }
+                Entry::Gap { start, end } => (start, end, end - start, 0, format!("Unaccounted bytes {}", range(start, end)), NodeKind::SstGap { start, end }, Status::Unknown),
+                Entry::Invalid(i) => {
+                    let it = &l.invalid[i];
+                    (it.start, it.end(), it.size, it.trailer, format!("{} · handle beyond footer/file", self.item_label(it)), Self::item_node(it), Status::Invalid)
+                }
+            };
+            let invalid = matches!(e, Entry::Invalid(_));
+            let gap = if invalid { "-".into() } else { prev_end.map(|p| if start > p { (start - p).to_string() } else { "0".into() }).unwrap_or_else(|| start.to_string()) };
+            if !invalid {
+                prev_end = Some(prev_end.map_or(end, |p| p.max(end)));
+            }
+            let codec = match *e {
+                Entry::Item(i) if l.items[i].trailer > 0 && codecs_read < COMPRESSION_SAMPLE => {
+                    codecs_read += 1;
+                    self.block_ctype(l.items[i].handle()).map(|c| compression_name(c).to_string()).unwrap_or_else(|| "unreadable".into())
+                }
+                Entry::Item(i) if l.items[i].trailer > 0 => "not read".into(),
+                _ => "-".into(),
+            };
+            let trailer_cell = if trailer > 0 { range(start + contents, end) } else { "-".into() };
+            let fld = Field::new(structure.clone(), (!invalid).then(|| Span::file(start, end - start)), format!("{} · contents {} · trailer {trailer_cell}", range(start, end), bytes_dec_hex(contents)))
+                .kind(K::StructureRef)
+                .status(status)
+                .link(node)
+                .explain("Physical structure in file order; double-click (or Enter) to go to it.");
+            rows.push(Row { cells: vec![n.to_string(), format!("0x{start:x}"), format!("0x{end:x}"), (end - start).to_string(), contents.to_string(), trailer_cell, gap, codec, structure, st_cell(status)], field: fld });
+        }
+        View {
+            title: title.to_string(),
+            columns: vec![col(R::Index, "#"), col(R::Offset, "Start"), col(R::Offset, "End (excl.)"), col(R::Len, "Stored"), col(R::Len, "Contents"), col(R::Size, "Trailer"), col(R::Len, "Gap before"), col(R::Kind, "Codec"), col(R::Summary, "Structure"), col(R::Status, "Status")],
+            rows,
+            ..Default::default()
+        }
+    }
+
+    fn root_view(&mut self, cancel: &dyn Fn() -> bool) -> View {
         let len = self.len();
-        let mut f = vec![Field::new("file", None, self.path().display().to_string()), Field::new("size", Some(Span::file(0, len)), human_size(len)).dv(DV::U64(len))];
-        match self.footer() {
+        let mut rows = vec![field_row(Field::new("file", None, self.path().display().to_string())), size_row(len)];
+        let mut f = Vec::new();
+        let footer_ok = self.footer().is_ok();
+        match self.footer().cloned() {
             Ok(ft) => {
                 f.push(Field::new("table format", None, "BlockBasedTable"));
                 let fv_span = if ft.legacy { None } else { Some(Span::file(ft.offset + ft.len - 12, 4)) };
                 let fv_field = Field::new("format_version", fv_span, ft.format_version.to_string()).kind(K::FormatVersion).dv(DV::U32(ft.format_version)).link(NodeKind::SstFooter);
                 f.push(if ft.legacy { fv_field.status(Status::Implicit).explain("Inferred from the legacy magic number; not stored.") } else { fv_field });
-                f.push(Field::new("checksum type", None, footer::checksum_name(ft.checksum_type)).kind(K::ChecksumType).dv(DV::Enum { name: footer::checksum_name(ft.checksum_type), code: u64::from(ft.checksum_type) }).link(NodeKind::SstFooter));
+                let ct_span = if ft.legacy { None } else { Some(Span::file(ft.offset, 1)) };
+                let ct = Field::new("checksum type", ct_span, footer::checksum_name(ft.checksum_type)).kind(K::ChecksumType).dv(DV::Enum { name: footer::checksum_name(ft.checksum_type), code: u64::from(ft.checksum_type) }).link(NodeKind::SstFooter);
+                f.push(if ft.legacy { ct.explain("Implied by the legacy magic number (kCRC32c); not stored.") } else { ct.enc("u8 (first footer byte)") });
             }
             Err(e) => f.push(Field::new("footer", None, e).status(Status::Invalid).diag(self.footer_diagnostic().cloned())),
         }
@@ -265,17 +553,28 @@ impl SstInspector {
             for (k, label) in [
                 ("rocksdb.creating.db.identity", "producer DB id"),
                 ("rocksdb.column.family.name", "column family"),
-                ("rocksdb.compression", "compression"),
-                ("rocksdb.num.entries", "entries"),
-                ("rocksdb.num.data.blocks", "data blocks"),
+                ("rocksdb.num.entries", "entries (declared)"),
+                ("rocksdb.num.data.blocks", "data blocks (declared)"),
                 ("rocksdb.filter.policy", "filter policy"),
                 ("rocksdb.comparator", "comparator"),
                 ("rocksdb.block.based.table.index.type", "index type"),
                 ("rocksdb.index.value.is.delta.encoded", "index values delta-encoded"),
                 ("rocksdb.index.key.is.user.key", "index keys are user keys"),
+                ("rocksdb.key.largest.seqno", "largest seqno (declared)"),
+                ("rocksdb.compression", "Declared compression policy (properties: rocksdb.compression)"),
             ] {
                 match self.prop(k) {
-                    Some(v) => f.push(prop_field(label, k, v).explain(format!("From property {k}."))),
+                    Some(v) => {
+                        let mut fld = prop_field(label, k, v).explain(format!("From property {k}."));
+                        if let Some(sp) = self.prop_span(k) {
+                            fld.span = Some(sp);
+                            fld.status = Status::Present;
+                            fld.raw = hex_preview(v, 24);
+                            fld.encoding = prop_decode(k, v).1.to_string();
+                        }
+                        f.push(fld);
+                    }
+                    None if k == "rocksdb.key.largest.seqno" => {}
                     None => f.push(Field::new(label, None, "property not stored").status(Status::NotPresent)),
                 }
             }
@@ -284,12 +583,88 @@ impl SstInspector {
         } else {
             f.push(Field::new("properties", None, "not listed in the metaindex").status(if self.meta().is_ok() { Status::NotPresent } else { Status::Unknown }));
         }
+        let l = footer_ok.then(|| self.layout(cancel));
+        if let Some(l) = &l {
+            f.push(self.actual_compression(l));
+            if let Some(kr) = self.key_range(l) {
+                f.push(kr);
+            }
+        }
         if self.changed_since_open() {
             f.push(Field::new("file changed", None, "size or mtime differs from open time; reopen").status(Status::Unknown));
         }
-        let mut v = of_fields("SST file (block-based table)", f);
+        rows.extend(f.into_iter().map(field_row));
+        let mut v = View { title: "SST file (block-based table)".into(), columns: super::common::fields_columns(), rows, ..Default::default() };
         v.notes.push("Compatibility target: RocksDB 10.4.2. Files from other versions decode only where layouts match.".into());
+        if let Some(l) = l {
+            // First-use clarity: the physical layout in file order, each row linking to its node.
+            v.notes.push(layout_coverage(&l).into());
+            for e in l.top() {
+                let (name, span, value, node, st) = match e {
+                    Entry::Item(i) => {
+                        let it = &l.items[i];
+                        let codec = if it.trailer > 0 { self.block_ctype(it.handle()).map(|c| format!(" · {}", compression_name(c))).unwrap_or_default() } else { String::new() };
+                        let tr = if it.trailer > 0 { format!(" · trailer {}", range(it.start + it.size, it.end())) } else { String::new() };
+                        (self.item_label(it), Some(Span::file(it.start, it.end() - it.start)), format!("{} · contents {}{tr}{codec}", range(it.start, it.end()), bytes_dec_hex(it.size)), Self::item_node(it), Status::Present)
+                    }
+                    Entry::Group { first, count } => {
+                        let c = self.entry_child(&l, e);
+                        let (a, z) = (l.items[first].start, l.items[first + count - 1].end());
+                        (format!("{}{}", c.label, check_suffix(c.checked)), Some(Span::file(a, z - a)), format!("{} · {count} structures", range(a, z)), c.kind, c.status)
+                    }
+                    Entry::Gap { start, end } => (format!("Unaccounted bytes {}", range(start, end)), Some(Span::file(start, end - start)), format!("{} B no handle names", end - start), NodeKind::SstGap { start, end }, Status::Unknown),
+                    Entry::Invalid(i) => {
+                        let it = &l.invalid[i];
+                        (format!("{} · handle beyond footer/file", self.item_label(it)), None, format!("{} · beyond the footer at 0x{:x}", range(it.start, it.end()), l.footer_off), Self::item_node(it), Status::Invalid)
+                    }
+                };
+                let fld = Field::new(name, span, value).kind(K::StructureRef).status(st).enc("physical structure").link(node).explain("Physical layout in file order; double-click (or Enter) to go to the structure.");
+                v.rows.push(field_row(fld));
+            }
+        }
         v
+    }
+
+    /// "Actual block compression": the trailer type byte of the data blocks (bounded sample),
+    /// distinct from the declared policy property.
+    fn actual_compression(&self, l: &PhysLayout) -> Field {
+        let data: Vec<&Item> = l.items.iter().filter(|it| it.block_kind() == Some(BlockKind::Data)).collect();
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut checked = 0u64;
+        for it in data.iter().take(COMPRESSION_SAMPLE) {
+            if let Some(c) = self.block_ctype(it.handle()) {
+                *counts.entry(if c == 0 { "none".to_string() } else { compression_name(c) }).or_default() += 1;
+                checked += 1;
+            }
+        }
+        let total = if l.data_complete { data.len().to_string() } else { format!("≥{}", data.len()) };
+        let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+        let value = format!("{} ({checked} of {total} data blocks checked)", if parts.is_empty() { "no data block read".to_string() } else { parts.join(", ") });
+        Field::new("Actual block compression", None, value)
+            .kind(K::CompressionType)
+            .explain("Compression type byte of each data block's trailer (what the blocks actually use; meta blocks are usually stored uncompressed). The declared policy is the rocksdb.compression property.")
+    }
+
+    /// Smallest and largest internal key (first entry of the first data block, last entry of
+    /// the last data block in index order): two block decodes.
+    fn key_range(&mut self, l: &PhysLayout) -> Option<Field> {
+        let mut data = l.items.iter().filter(|it| it.block_kind() == Some(BlockKind::Data));
+        let first = data.clone().min_by_key(|it| match &it.kind {
+            ItemKind::Block { ordinal, .. } => ordinal.unwrap_or(u64::MAX),
+            _ => u64::MAX,
+        })?;
+        let last = data.by_ref().max_by_key(|it| match &it.kind {
+            ItemKind::Block { ordinal, .. } => ordinal.unwrap_or(0),
+            _ => 0,
+        })?;
+        let (fh, lh) = (first.handle(), last.handle());
+        let (_, a) = self.block_entries(fh, BlockKind::Data);
+        let lo = a.ok().and_then(|(_, es, _)| es.first().map(|e| e.key.clone()))?;
+        let (_, b) = self.block_entries(lh, BlockKind::Data);
+        let hi = b.ok().and_then(|(_, es, _)| es.last().map(|e| e.key.clone()))?;
+        let value = format!("{} … {}", self.key_label(&lo, false), self.key_label(&hi, false));
+        let complete = if l.data_complete { "" } else { " (index not fully listed: the last listed block)" };
+        Some(Field::new("key range", None, value).kind(K::InternalKey).explain(format!("Derived: first key of data block #0 and last key of the last data block{complete}. Internal keys: user key @ sequence, type.")))
     }
 
     fn block_view(&mut self, h: Handle, kind: BlockKind) -> View {
@@ -315,7 +690,10 @@ impl SstInspector {
         }
         let dec = self.decode_entries(h, kind);
         let (b, res) = (dec.block, dec.result);
-        let mut v = View { title: format!("{} @0x{:x} ({} B stored, {} B contents)", kind.label(), h.offset, h.size, b.data.len()), spaces: space_info(&b), diagnostics: b.diags.clone(), ..Default::default() };
+        // "stored" = on-disk extent incl. the 5-byte trailer (same N as the tree label and
+        // `where:`); "decompressed" only for compressed blocks.
+        let decompressed = if b.compressed { format!(", decompressed {} B", b.data.len()) } else { String::new() };
+        let mut v = View { title: format!("{} @0x{:x} (stored {} B{decompressed})", kind.label(), h.offset, h.size + BLOCK_TRAILER), spaces: space_info(&b), diagnostics: b.diags.clone(), ..Default::default() };
         if b.checksum_status == Status::Invalid {
             // Entries are still listed for inspection, but the block as a whole is corrupt.
             v.status = Some(Status::Invalid);
@@ -581,13 +959,13 @@ impl SstInspector {
         let b = self.block(h, kind);
         let ct = self.footer().map(|f| f.checksum_type).unwrap_or(1);
         let base = self.footer().map(|f| f.base_context).unwrap_or(0);
-        let mut f = vec![Field::new("block contents (stored)", Some(Span::file(h.offset, h.size)), format!("{} bytes{}", h.size, if b.compressed { " compressed" } else { "" })).enc("bytes").explain("Physical bytes as stored in the file, before the 5-byte trailer.")];
+        let mut f = vec![Field::new("block contents", Some(Span::file(h.offset, h.size)), format!("{} bytes{}", h.size, if b.compressed { " compressed" } else { "" })).enc("bytes").explain("Physical bytes as stored in the file, before the 5-byte trailer.")];
         if let Some((v, n)) = b.size_prefix {
             f.push(Field::new("uncompressed size prefix", Some(Span::file(h.offset, n as u64)), v.to_string()).kind(K::Length).dv(DV::VarInt(v)).enc("varint32/64").explain("compress_format_version 2: varint uncompressed size precedes the codec payload (all codecs except Snappy/XPRESS)."));
         }
         if h.offset + h.size + 5 <= self.len() {
             let raw = self.trailer_bytes(h);
-            f.push(Field::new("compression type", Some(Span::file(h.offset + h.size, 1)), format!("{} {}", b.ctype, compression_name(b.ctype))).kind(K::CompressionType).dv(DV::U8(b.ctype)).raw(&raw[..1.min(raw.len())]).enc("u8").explain("include/rocksdb/compression_type.h code. Part of the checksummed bytes."));
+            f.push(Field::new("compression type", Some(Span::file(h.offset + h.size, 1)), format!("{} {}", b.ctype, compression_name(b.ctype))).kind(K::CompressionType).dv(DV::U8(b.ctype)).raw(&raw[..1.min(raw.len())]).enc("u8").explain("Actual block compression of this block (include/rocksdb/compression_type.h code), independent of the declared policy property rocksdb.compression. Part of the checksummed bytes."));
             let comp = b.computed_checksum.map(|c| format!("0x{c:08x}")).unwrap_or("n/a".into());
             f.push(
                 Field::new("checksum", Some(Span::file(h.offset + h.size + 1, 4)), format!("0x{:08x}", b.stored_checksum))
@@ -611,7 +989,7 @@ impl SstInspector {
             f.push(Field::new("trailer", None, "past end of file").status(Status::Truncated).diag(b.error_diagnostic().cloned()));
         }
         if b.compressed {
-            f.push(Field::new("decompressed contents", None, format!("{} bytes", b.data.len())).status(if b.ok() { Status::Implicit } else { Status::Invalid }).diag(b.error_diagnostic().cloned()).explain("Derived bytes with their own block-local offset space (blk+). No file bytes of their own."));
+            f.push(Field::new("decompressed", None, format!("{} bytes", b.data.len())).status(if b.ok() { Status::Implicit } else { Status::Invalid }).diag(b.error_diagnostic().cloned()).explain("Derived bytes with their own block-local offset space (blk+). No file bytes of their own."));
         }
         if let Some((s, e)) = &b.error {
             f.push(Field::new("error", None, e.clone()).status(*s).diag(b.error_diagnostic().cloned()));
@@ -726,8 +1104,9 @@ impl SstInspector {
             .iter()
             .enumerate()
             .map(|(i, (h, k))| {
+                // A link row (the block is shown at its canonical place in file order).
                 let fld = Field::new(format!("data block {}", skip as usize + i), Some(Span::file(h.offset, h.size + BLOCK_TRAILER)), format!("offset {} size {}", h.offset, h.size))
-                    .kind(K::BlockHandle(HT::Block))
+                    .kind(K::StructureRef)
                     .dv(DV::Handle { offset: h.offset, size: h.size })
                     .link(NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Data })
                     .explain("Handle from the index; the separator key is ≥ every key in the block and < every key in the next.");

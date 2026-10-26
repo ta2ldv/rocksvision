@@ -30,4 +30,6 @@ mod arch_tests;
 #[cfg(test)]
 mod diag_tests;
 #[cfg(test)]
+mod nav_tests;
+#[cfg(test)]
 mod stall_tests;

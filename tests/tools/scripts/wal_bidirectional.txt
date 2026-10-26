@@ -1,0 +1,19 @@
+# Capture 33 (PLACEHOLDER): WAL counter field both directions on examples/files/wal-plain/000004.log.
+# Placeholders: PATH_X/Y, COUNT_ROW_X/Y (table row "count"), BYTE11_X/Y (hex cell of byte 0x11, from a full-screen shot of the hex pane).
+# Expected: row "count" -> hex fills [0x0f,0x13) and Where shows both spaces; then click byte 0x11 -> the SAME row "count" selected, byte 0x11 outlined.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/wal-plain/000004.log
+key return
+sleep 2.5
+click {{COUNT_ROW_X}} {{COUNT_ROW_Y}}
+sleep 0.6
+shot walbidi_01_count_row
+note EXPECT hex selection [0x0f,0x13), Where lists logical + file space
+click {{BYTE11_X}} {{BYTE11_Y}}
+sleep 0.6
+shot walbidi_02_byte_0x11
+note EXPECT same row "count" selected, byte 0x11 outlined inside the field span; no flicker (compare action.log, one click)
+note PASS: both shots show row "count"
+release_mods

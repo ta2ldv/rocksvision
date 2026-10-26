@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 KEYS = {"return": 36, "enter": 76, "esc": 53, "tab": 48, "space": 49, "delete": 51, "fwddelete": 117,
         "left": 123, "right": 124, "down": 125, "up": 126, "home": 115, "end": 119, "pgup": 116, "pgdn": 121,
         "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96,
-        "equal": 24, "minus": 27, "comma": 43, "period": 47, "slash": 44}
+        "equal": 24, "minus": 27, "comma": 43, "period": 47, "slash": 44, "lbracket": 33, "rbracket": 30}
 for _c, _k in zip("asdfhgzxcvbqweryt", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17]): KEYS[_c] = _k
 for _c, _k in zip("uiopljkn", [32, 34, 31, 35, 37, 38, 40, 45]): KEYS[_c] = _k
 for _c, _k in zip("1234567890", [18, 19, 20, 21, 23, 22, 26, 28, 25, 29]): KEYS[_c] = _k

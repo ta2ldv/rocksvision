@@ -11,6 +11,7 @@ pub mod hex;
 pub mod job_state;
 pub mod jobs;
 pub mod prefs;
+pub mod provenance;
 pub mod search;
 pub mod selection;
 pub mod session;

@@ -26,6 +26,79 @@ impl Space {
             Space::Record(o) => format!("record@0x{o:x} (reassembled)"),
         }
     }
+    /// Short name of the offset column of a byte view in this space: FILE / BLK+ / REC+.
+    pub fn offset_header(&self) -> &'static str {
+        match self {
+            Space::File => "FILE",
+            Space::Block(_) => "BLK+",
+            Space::Record(_) => "REC+",
+        }
+    }
+    /// One "Where" line of a span in this space, e.g. "Reassembled record offset: rec@0x0
+    /// +0x8..+0xc" / "Decompressed block offset: blk@0x5c9 +0x6d, 103 B". File spans read
+    /// "File offset: [0xf,0x13) 4 B".
+    pub fn where_line(&self, offset: u64, len: u64) -> String {
+        match self {
+            Space::File => format!("File offset: [0x{offset:x},0x{:x}) {len} B", offset.saturating_add(len)),
+            Space::Block(o) => format!("Decompressed block offset: blk@0x{o:x} +0x{offset:x}, {len} B"),
+            Space::Record(o) => format!("Reassembled record offset: rec@0x{o:x} +0x{offset:x}..+0x{:x}", offset.saturating_add(len)),
+        }
+    }
+}
+
+/// How the bytes of a derived offset space relate to file bytes (provenance). Reassembly maps
+/// every record byte to exactly one file byte (fragment payloads, headers skipped);
+/// decompression has no byte-to-byte mapping: a derived range is only *contained* in the
+/// compressed stored range.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum SpaceMap {
+    /// File space, or a derived space whose origin is not described.
+    #[default]
+    None,
+    /// Reassembled record: (record offset, file offset, length) per fragment payload in record
+    /// order, and the fragment header ranges between them (never part of the record).
+    Fragments { segs: Vec<(u64, u64, u64)>, headers: Vec<Span> },
+    /// Decompressed contents of the stored (compressed) file range `file`, codec name.
+    Compressed { file: Span, codec: String },
+}
+
+/// Physical (file) location of a span of any offset space.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FileRanges {
+    /// Exact file ranges in order (two or more when a field crosses a fragment boundary) and the
+    /// fragment headers skipped between them.
+    Exact { ranges: Vec<Span>, skipped: Vec<Span> },
+    /// No byte mapping exists: the span lies inside this compressed stored range.
+    Contained { file: Span, codec: String },
+    /// The origin of the space is not known to the view.
+    Unknown,
+}
+
+impl SpaceMap {
+    /// File location of `[off, off+len)` of the derived space this map describes. Pure; the
+    /// one range service used by the Explanation, the status bar and the byte view.
+    pub fn file_ranges(&self, off: u64, len: u64) -> FileRanges {
+        match self {
+            SpaceMap::None => FileRanges::Unknown,
+            SpaceMap::Compressed { file, codec } => FileRanges::Contained { file: *file, codec: codec.clone() },
+            SpaceMap::Fragments { segs, headers } => {
+                let end = off.saturating_add(len.max(1));
+                let mut ranges = Vec::new();
+                for &(lo, fo, n) in segs {
+                    let (a, b) = (off.max(lo), end.min(lo + n));
+                    if a < b {
+                        ranges.push(Span::file(fo + (a - lo), if len == 0 { 0 } else { b - a }));
+                    }
+                }
+                if ranges.is_empty() {
+                    return FileRanges::Unknown;
+                }
+                let (first, last) = (ranges[0].offset, ranges[ranges.len() - 1].offset);
+                let skipped = headers.iter().filter(|h| h.offset > first && h.offset < last).copied().collect();
+                FileRanges::Exact { ranges, skipped }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -163,6 +236,13 @@ pub enum NodeKind {
     /// Page of data blocks enumerated through the index (`skip` handles skipped).
     SstDataBlocks { skip: u64 },
     SstProperties,
+    /// Bytes between two known structures that no structure accounts for, [start, end).
+    SstGap { start: u64, end: u64 },
+    /// Run of `count` physical layout items starting at item `first` (data blocks in file
+    /// order, grouped because there are many).
+    SstLayoutGroup { first: u64, count: u64 },
+    /// Table of every physical structure in file order (Start | End | Stored | Contents …).
+    SstLayout,
     /// Diagnostic text file (LOG, OPTIONS): raw bounded preview only.
     TextPreview,
 }
@@ -240,6 +320,10 @@ pub enum FieldKind {
     IgnorableField,
     /// Bytes that cannot be framed after an unknown element.
     Remainder,
+    /// A list row standing for a whole structure shown elsewhere (layout, record, block and
+    /// physical-item lists). A byte click never stops at such a row: it locates the field
+    /// inside the structure.
+    StructureRef,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -331,14 +415,21 @@ pub struct Diagnostic {
     pub expected: Option<DecodedValue>,
     pub observed: Option<DecodedValue>,
     pub trusted: Trust,
-    /// What the reader did next.
+    /// What RocksVision did next (its own recovery, never a claim about RocksDB).
     pub recovery: &'static str,
     pub note: String,
+    /// What the RocksDB engine does in this situation, with its source citation (version, file,
+    /// function, lines). Only set where the behaviour was verified in the cited source.
+    pub engine: Option<&'static str>,
 }
 
 impl Diagnostic {
     pub fn new(check: CheckKind, span: Option<Span>, trusted: Trust, recovery: &'static str, note: impl Into<String>) -> Self {
-        Diagnostic { check, space: span.map(|s| s.space).unwrap_or(Space::File), span, expected: None, observed: None, trusted, recovery, note: note.into() }
+        Diagnostic { check, space: span.map(|s| s.space).unwrap_or(Space::File), span, expected: None, observed: None, trusted, recovery, note: note.into(), engine: None }
+    }
+    pub fn engine(mut self, e: &'static str) -> Self {
+        self.engine = Some(e);
+        self
     }
     pub fn in_space(mut self, space: Space) -> Self {
         self.space = space;
@@ -630,6 +721,23 @@ pub struct SpaceInfo {
     pub space: Space,
     pub size: u64,
     pub title: String,
+    /// Where the bytes of this space come from in the file.
+    pub map: SpaceMap,
+}
+
+/// A navigation target: a canonical tree node and optionally the bytes to select in its view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub node: NodeKind,
+    pub span: Option<Span>,
+}
+
+/// One line of a view's location header ("file [0x0,0x59) · stored 89 B (0x59)"), with an
+/// optional navigation target ("next structure at 0x59 ›").
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhereLine {
+    pub text: String,
+    pub link: Option<Target>,
 }
 
 /// A view note with an optional status (problem notes are drawn in their status colour).
@@ -671,7 +779,15 @@ pub struct View {
     pub notes: Vec<Note>,
     /// Status of the node as a whole.
     pub status: Option<Status>,
+    /// Word shown with the status glyph instead of the status label (e.g. "Incomplete (no
+    /// LAST)" for a Truncated record whose fragments are intact); the dump prints the label.
+    pub status_word: Option<&'static str>,
     pub spaces: Vec<SpaceInfo>,
+    /// Location header lines of the structure shown (file range, stored size, contents,
+    /// trailer, next structure / gap), printed by the dump as "where:".
+    pub location: Vec<WhereLine>,
+    /// File range of the structure shown, when it is one physical structure.
+    pub extent: Option<Span>,
     /// Observed-levels files for the LSM box diagram (row index into `rows` + typed cells).
     pub lsm: Vec<LsmFile>,
     /// Problems found while decoding the structure shown (not printed by the text dump).
@@ -693,6 +809,22 @@ pub struct LsmFile {
     pub status: Status,
 }
 
+/// What a tree child stands for. Physical structures appear once, in file order; views and
+/// references only point at them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ChildRole {
+    /// A physical structure at its one canonical place (expandable when it has parts).
+    #[default]
+    Structure,
+    /// A labeled derived/reassembled view (Logical records, Observed levels, Data blocks via
+    /// index); listed under "Views".
+    View,
+    /// A link to a canonical structure elsewhere in the tree (never expanded in place).
+    Reference,
+    /// A non-expandable "not present" statement.
+    Absent,
+}
+
 /// Lazily expandable tree child.
 #[derive(Clone, Debug)]
 pub struct Child {
@@ -705,11 +837,37 @@ pub struct Child {
     /// truncated last record of a WAL under "Physical blocks"). UI marker only; the text dump
     /// prints `status`.
     pub contains: Option<Status>,
+    pub role: ChildRole,
+    /// A group whose status comes from its members: (members checked, members). `(0, n)` =
+    /// nothing checked yet (no glyph, "· not checked"); `status` is then the worst checked
+    /// member, Present only when all n were checked and Present.
+    pub checked: Option<(u64, u64)>,
+}
+
+/// Label suffix of a group's check coverage: " · not checked" / " · 3 of 64 checked".
+pub fn check_suffix(c: Option<(u64, u64)>) -> String {
+    match c {
+        None => String::new(),
+        Some((0, _)) => " · not checked".into(),
+        Some((x, y)) => format!(" · {x} of {y} checked"),
+    }
 }
 
 impl Child {
     pub fn new(label: impl Into<String>, kind: NodeKind) -> Self {
-        Child { label: label.into(), kind, status: Status::Present, leaf: false, diag: None, contains: None }
+        Child { label: label.into(), kind, status: Status::Present, leaf: false, diag: None, contains: None, role: ChildRole::Structure, checked: None }
+    }
+    /// A group's check coverage (see `checked`).
+    pub fn checked(mut self, c: (u64, u64)) -> Self {
+        self.checked = Some(c);
+        self
+    }
+    pub fn role(mut self, r: ChildRole) -> Self {
+        self.role = r;
+        if r == ChildRole::Reference || r == ChildRole::Absent {
+            self.leaf = true;
+        }
+        self
     }
     pub fn contains(mut self, s: Option<Status>) -> Self {
         self.contains = s;

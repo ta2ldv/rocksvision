@@ -374,3 +374,13 @@ Appended after the 70-file set above (Total: 72 files; SHA256SUMS has 72 lines).
 
 SHA-256: wal-missing-last.log `3c204cf6e2a1886d3d3c66c80a7c1a181b36d945fd973d60b246a38b289de923`; wal-cut-in-middle.log `7c92d92ec9bc5f34308529e9ad91520f4c9de20cb00153b6eba6c63c32f954f1`.
 Distinction a good UI should make: missing-last = logical record incomplete (all bytes present are structurally valid); cut-in-middle = physical fragment truncated (file ends mid-fragment).
+
+
+## Added for task 0006 (handoff 0011): empty WAL
+Appended after the 72-file set (Total: 73 files; SHA256SUMS has 73 lines). Hand-made, not produced by the generator.
+
+| file | size | expected view |
+|---|---|---|
+| empty/000001.log | 0 | empty WAL: must show 'Empty file (0 bytes): no records', no Truncated/Unknown/Diagnosis |
+
+SHA-256: empty/000001.log `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (SHA-256 of the empty string).

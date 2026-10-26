@@ -8,14 +8,35 @@
 use super::actions::{Action, CopyKind, Effect, Panel, RowMove};
 use super::hex::PageState;
 use super::job_state::{CopyReply, JobState};
-use super::jobs::{self, CopyJob, Outcome, Request, Response, Tagged, Worker};
+use super::jobs::{self, CopyJob, Outcome, Request, Response, SelectHint, Tagged, ViewTarget, Worker};
+use super::provenance::{exact_file_ranges, field_at};
 use super::search::SearchState;
-use super::selection::SelectionState;
+use super::selection::{SelOrigin, SelSnapshot, SelectionState};
 use super::session::DocumentSession;
 use super::view_prefs::ViewPreferences;
 use crate::limits::LIMITS;
 use crate::model::*;
 use std::path::PathBuf;
+
+/// Selection to apply when an async view arrives — only if the selection epoch is still the
+/// one recorded at the request (a newer user choice always wins).
+#[derive(Clone, Debug)]
+struct PendingSel {
+    epoch: u64,
+    origin: SelOrigin,
+    anchor: Option<Span>,
+    hint: Option<SelectHint>,
+    /// Origin of a navigation, for the structure card ("Referenced from").
+    via: Option<String>,
+    /// Back: the saved selection and byte-view position to restore as they were.
+    restore: Option<(SelSnapshot, Space, u64)>,
+}
+
+impl PendingSel {
+    fn new(epoch: u64, origin: SelOrigin, anchor: Option<Span>, hint: Option<SelectHint>) -> Self {
+        PendingSel { epoch, origin, anchor, hint, via: None, restore: None }
+    }
+}
 
 pub use super::job_state::{copy_accepted, PendingCopy};
 pub use super::session::{TreeNode, FILE_SPACE_TITLE};
@@ -32,6 +53,8 @@ pub struct ScrollRequest {
     pub row: Option<usize>,
     /// Byte offset to bring into view in the hex rows.
     pub hex: Option<u64>,
+    /// Tree node to bring into view (a reveal).
+    pub tree: Option<usize>,
 }
 
 /// Clipboard text of exact decoded bytes: valid UTF-8 → the text itself (real newlines);
@@ -58,11 +81,12 @@ pub struct AppState {
     find: SearchState,
     jobs: JobState,
     view_prefs: ViewPreferences,
+    pending_sel: Option<PendingSel>,
 }
 
 impl AppState {
     pub fn new(worker: Worker) -> Self {
-        AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new() }
+        AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new(), pending_sel: None }
     }
 
     /// Test helper: a state with an idle worker, for UI tests (panels never name `app::jobs`).
@@ -176,8 +200,12 @@ impl AppState {
                 }
             }
             Action::SelectNode(i) => {
-                if let Some(k) = self.doc.select_node(Some(i)) {
-                    self.request_view(k, true);
+                // A reference node is a link: go to the canonical structure.
+                let reference = self.doc.nodes().get(i).filter(|n| n.role == ChildRole::Reference).map(|n| n.kind.clone());
+                if let Some(k) = reference {
+                    self.navigate(k, None);
+                } else if let Some(k) = self.doc.select_node(Some(i)) {
+                    self.open_structure(k);
                 }
             }
             Action::ToggleNode(i) => self.toggle_node(i),
@@ -188,8 +216,13 @@ impl AppState {
             }
             Action::CollapseSelectedNode => self.doc.collapse_selected(),
             Action::Back => {
-                if let Some(k) = self.doc.pop_history() {
-                    self.request_view(k, false);
+                // The previous view with its exact selection and byte-view position.
+                if let Some(h) = self.doc.pop_history() {
+                    self.doc.select_loaded(&h.kind);
+                    let mut p = PendingSel::new(self.sel.epoch(), h.sel.origin, None, None);
+                    p.restore = Some((h.sel, h.hex_space, h.hex_at));
+                    self.pending_sel = Some(p);
+                    self.request_view(h.kind, false);
                 }
             }
             Action::SelectRow(i) => self.select_row(i),
@@ -204,6 +237,10 @@ impl AppState {
                 }
             }
             Action::MoveRow(m) => self.move_row(m),
+            Action::Navigate { target, span } => self.navigate(target, span),
+            Action::StepField(forward) => self.step_field(forward),
+            Action::StepStructure(forward) => self.step_structure(forward),
+            Action::ToggleAllColumns => self.view_prefs.toggle_all_columns(),
             Action::HexPage(base) => self.load_hex_page(self.doc.hex().space, base),
             Action::HexShowSpace(space) => {
                 let (t, size) = self.doc.space_title(space);
@@ -212,20 +249,13 @@ impl AppState {
             }
             Action::SetGoto(s) => self.doc.set_goto(s),
             Action::GotoOffset => self.goto_offset(),
-            Action::HexClick(off) => {
-                let space = self.doc.hex().space;
-                if !self.select_row_for(space, off) {
-                    self.sel.select_raw(Span::new(space, off, 1), "No field in the current table covers this offset.");
-                }
-            }
+            Action::HexClick(off) => self.hex_click(off),
             Action::HexShiftClick(off) => {
                 let space = self.doc.hex().space;
-                let s = match self.sel.span().filter(|s| s.space == space) {
-                    Some(s) if off >= s.offset => Span::new(space, s.offset, off - s.offset + 1),
-                    Some(s) => Span::new(space, off, s.offset + s.len - off),
-                    None => Span::new(space, off, 1),
-                };
-                self.sel.select_raw(s, "Raw byte range (Shift+click).");
+                // Extends from the anchor (the last clicked byte), else from the range start.
+                let from = self.sel.anchor().filter(|a| a.space == space).or(self.sel.span().filter(|s| s.space == space)).map(|s| s.offset).unwrap_or(off);
+                let (a, b) = (from.min(off), from.max(off) + 1);
+                self.sel.extend_raw(Span::new(space, a, b - a));
             }
             Action::SelectSpan(span) => self.select_span(span),
             Action::HexRetry => self.load_hex_page(self.doc.hex().space, self.doc.hex().page_base),
@@ -254,7 +284,8 @@ impl AppState {
         let hex_ready = self.doc.file().is_some() && self.doc.hex().page().map(|p| !p.is_empty()).unwrap_or(false);
         let row = if self.doc.view().is_some() { self.sel.take_scroll_row() } else { None };
         let hex = if hex_ready && self.view_prefs.show_hex() { self.doc.hex_mut().scroll_to.take() } else { None };
-        ScrollRequest { row, hex }
+        let tree = if self.view_prefs.show_left() { self.doc.take_tree_scroll() } else { None };
+        ScrollRequest { row, hex, tree }
     }
 
     /// Background work that warrants a short repaint interval.
@@ -308,15 +339,64 @@ impl AppState {
 
     fn open_file(&mut self, p: PathBuf) {
         self.close_file();
+        self.pending_sel = None;
         self.doc.begin_open(p.clone());
         self.jobs.decode(self.doc.generation(), Request::Open(p));
         self.request_view(NodeKind::Root, false);
+        // A new file's byte view starts at 0x0 (no scroll position kept from the previous file).
+        let _ = self.doc.hex_mut().ensure_visible(0);
         self.load_hex_page(Space::File, 0);
     }
 
     fn request_view(&mut self, k: NodeKind, push_history: bool) {
-        self.doc.request_view(k.clone(), push_history);
-        self.jobs.decode(self.doc.generation(), Request::View(k));
+        self.request(ViewTarget::Node(k), push_history, false);
+    }
+
+    /// The current selection and byte-view position (what Back restores).
+    fn here(&self) -> (SelSnapshot, Space, u64) {
+        let hex = self.doc.hex();
+        let at = self.sel.span().filter(|s| s.space == hex.space()).map(|s| s.offset).unwrap_or(hex.page_base());
+        (self.sel.snapshot(), hex.space(), at)
+    }
+
+    /// Issues a view request; `reveal` also asks for the canonical tree path.
+    fn request(&mut self, t: ViewTarget, push_history: bool, reveal: bool) {
+        let h = push_history.then(|| self.here());
+        self.request_with(t, h, reveal);
+    }
+
+    fn request_with(&mut self, t: ViewTarget, history: Option<(SelSnapshot, Space, u64)>, reveal: bool) {
+        let req = self.jobs.decode(self.doc.generation(), Request::View { target: t.clone(), reveal });
+        self.doc.request_view(t, req, history);
+    }
+
+    /// What is selected now, in words (the origin of a navigation): "entry 2 of Index block
+    /// @0x…", else the tree node or view shown.
+    fn describe_here(&self) -> Option<String> {
+        let v = self.doc.view()?;
+        match self.selected_field() {
+            Some(f) => Some(format!("{} of {}", f.name, v.title)),
+            None => Some(self.doc.sel_node().and_then(|i| self.doc.nodes().get(i)).map(|n| n.label.clone()).unwrap_or_else(|| v.title.clone())),
+        }
+    }
+
+    /// The one navigation: canonical node, tree reveal, view, selection of `span` (or the
+    /// whole target structure), byte view, history (Back returns to the source).
+    fn navigate(&mut self, target: NodeKind, span: Option<Span>) {
+        let mut p = PendingSel::new(self.sel.epoch(), SelOrigin::Navigate, None, Some(SelectHint { at: None, span }));
+        p.via = self.describe_here();
+        self.pending_sel = Some(p);
+        self.request(ViewTarget::Node(target), true, true);
+        if span.is_some() {
+            self.show_span(span);
+        }
+    }
+
+    /// A tree click / structure step: the node's view with the whole structure selected (same
+    /// path for both).
+    fn open_structure(&mut self, k: NodeKind) {
+        self.pending_sel = Some(PendingSel::new(self.sel.epoch(), SelOrigin::Tree, None, None));
+        self.request_view(k, true);
     }
 
     fn toggle_node(&mut self, i: usize) {
@@ -429,17 +509,40 @@ impl AppState {
             Response::Opened { label, children, file_len, mtime } => self.doc.opened(label, children, file_len, mtime),
             Response::OpenFailed(e) => self.doc.open_failed(e),
             Response::Children { node, children, error } => self.doc.children_arrived(node as usize, children, error),
-            Response::View { kind, view } => {
+            Response::View { req, kind, view, reveal, select, .. } => {
+                let Some(kind) = kind else {
+                    // Nothing located (or a superseded request): the raw selection stays.
+                    if self.doc.drop_pending(req) {
+                        self.pending_sel = None;
+                        self.doc.set_status_msg("No known structure holds this byte");
+                    }
+                    return None;
+                };
                 // Keep the hex space only if the new view still describes it.
                 let hex_space = self.doc.hex().space;
                 let keep_space = hex_space == Space::File || view.spaces.iter().any(|s| s.space == hex_space);
-                if self.doc.accept_view(kind, view) {
+                let extent = view.extent;
+                if self.doc.accept_view(req, kind.clone(), view) {
+                    // A pending selection applies only if nothing was selected since the request.
+                    let pending = self.pending_sel.take().filter(|p| p.epoch == self.sel.epoch());
                     self.sel.clear();
                     self.find.clear_matches();
+                    if let Some(r) = reveal {
+                        self.doc.reveal(r.path, &kind);
+                    }
                     if !keep_space {
                         let len = self.doc.file_len();
                         self.doc.hex_mut().set_space(Space::File, len, FILE_SPACE_TITLE.into());
                         self.load_hex_page(Space::File, 0);
+                    }
+                    match pending {
+                        Some(p) => self.apply_pending(p, select, extent),
+                        // A plain node view moves the byte view to the structure's start.
+                        None => {
+                            if let Some(e) = extent {
+                                self.show_span(Some(Span::file(e.offset, 1)));
+                            }
+                        }
                     }
                     if !self.find.query().is_empty() {
                         self.find.update_matches(self.doc.view());
@@ -540,10 +643,145 @@ impl AppState {
     // ---------------- selection ----------------
 
     fn select_row(&mut self, i: usize) {
+        self.select_field_row(i, SelOrigin::Row, None);
+    }
+
+    /// Selects field row `i` with its span and exact file ranges. A byte-view click keeps the
+    /// byte view where it is (`anchor` = the clicked byte); other origins move it: to the file
+    /// range when the field maps exactly to file bytes (file offset is the primary location),
+    /// else to the field's own space.
+    fn select_field_row(&mut self, i: usize, origin: SelOrigin, anchor: Option<Span>) {
         self.jobs.set_copy_note("");
         let span = self.doc.row(Some(i)).and_then(|r| r.field.span);
-        self.sel.select_row(i, span);
-        self.show_span(span);
+        let extra: Vec<Span> = span.filter(|s| s.space != Space::File).map(|s| exact_file_ranges(self.doc.view(), &s)).unwrap_or_default();
+        self.sel.select_field(i, span, extra.clone(), origin, anchor);
+        if origin == SelOrigin::Hex {
+            return;
+        }
+        match extra.first() {
+            Some(f) if self.doc.hex().space == Space::File || self.doc.hex().space != span.map(|s| s.space).unwrap_or(Space::File) => self.show_span(Some(*f)),
+            _ => self.show_span(span),
+        }
+    }
+
+    /// A byte click: the narrowest field of the current table holding the byte (the clicked
+    /// byte stays outlined); otherwise the structure holding it is located (bounded worker
+    /// request) and its view opens with the field — or the structure — selected.
+    fn hex_click(&mut self, off: u64) {
+        let space = self.doc.hex().space;
+        let byte = Span::new(space, off, 1);
+        if let Some(i) = self.doc.view().and_then(|v| field_at(v, space, off)) {
+            self.select_field_row(i, SelOrigin::Hex, Some(byte));
+            // Reveal the left node of the table shown (no load, no new selection).
+            if let Some(k) = self.doc.view_kind().cloned() {
+                self.doc.select_loaded(&k);
+            }
+            return;
+        }
+        if space != Space::File && !matches!(space, Space::Record(_)) {
+            self.sel.click_raw(byte, "No field of the current table covers this offset.");
+            return;
+        }
+        let before = self.here();
+        self.sel.click_raw(byte, "Locating the structure that holds this byte…");
+        self.pending_sel = Some(PendingSel::new(self.sel.epoch(), SelOrigin::Hex, Some(byte), None));
+        self.request_with(ViewTarget::Locate { space, off }, Some(before), true);
+    }
+
+    /// Applies the selection of an arrived view (navigation or located byte): the narrowest
+    /// field at the byte, else the row with exactly the span, else the structure range. A
+    /// navigation without a span moves the byte view to the structure (`extent`).
+    fn apply_pending(&mut self, p: PendingSel, select: Option<SelectHint>, extent: Option<Span>) {
+        if let Some((snap, space, at)) = p.restore {
+            // Back: the exact previous selection, in the byte space and position it had.
+            self.sel.restore(snap);
+            let known = space == Space::File || self.doc.view().is_some_and(|v| v.spaces.iter().any(|s| s.space == space));
+            if known {
+                if space != self.doc.hex().space() {
+                    let (t, size) = self.doc.space_title(space);
+                    self.doc.hex_mut().set_space(space, size, t);
+                }
+                if self.doc.hex_mut().ensure_visible(at) {
+                    let base = self.doc.hex().page_base();
+                    self.load_hex_page(space, base);
+                }
+            }
+            return;
+        }
+        let hint = select.or(p.hint.clone()).unwrap_or(SelectHint { at: None, span: None });
+        let Some(view) = self.doc.view() else { return };
+        if let Some((space, off)) = hint.at {
+            if let Some(i) = field_at(view, space, off) {
+                self.select_field_row(i, p.origin, p.anchor);
+                return;
+            }
+        }
+        if let Some(s) = hint.span {
+            if let Some(i) = view.rows.iter().position(|r| r.field.span == Some(s)) {
+                self.select_field_row(i, p.origin, p.anchor);
+                return;
+            }
+            let compressed = view.spaces.iter().find(|sp| matches!(&sp.map, SpaceMap::Compressed { file, .. } if file.offset <= s.offset && s.offset < file.offset + file.len.max(1)));
+            let note = match compressed {
+                Some(sp) => format!("Compressed contents of {} [0x{:x},0x{:x}): stored bytes have no byte-to-byte mapping to decompressed fields. Open the decompressed view to select a field ({}).", view.title, s.offset, s.offset + s.len, sp.space.label()),
+                None => format!("{} [0x{:x},0x{:x}): structure bytes, not a single field.", view.title, s.offset, s.offset + s.len),
+            };
+            self.sel.select_structure(s, note, p.origin, p.anchor);
+            if p.origin != SelOrigin::Hex {
+                self.show_span(Some(s));
+            }
+            return;
+        }
+        if let Some(a) = p.anchor {
+            // Located, but no field of that view holds the byte: the structure is the answer.
+            let s = extent.unwrap_or(a);
+            self.sel.select_structure(s, format!("{}: the clicked byte is part of this structure, not of a single field.", view.title), p.origin, Some(a));
+        } else {
+            // Navigation without a target row, tree click, structure step: the whole structure
+            // (never "Nothing selected"); the byte view shows its first byte.
+            let note = "The whole structure is selected (no single field). Select a row or a byte for a field.".to_string();
+            self.sel.select_whole(extent, note, p.origin, p.via);
+            if let Some(e) = extent {
+                self.show_span(Some(Span::file(e.offset, 1)));
+            }
+        }
+    }
+
+    /// `]` / `[`: the next / previous field of the current table in span order (one step).
+    fn step_field(&mut self, forward: bool) {
+        let Some(v) = self.doc.view() else { return };
+        let mut order: Vec<(usize, Span)> = v.rows.iter().enumerate().filter_map(|(i, r)| r.field.span.map(|s| (i, s))).collect();
+        let space_key = |s: &Span| match s.space {
+            Space::File => 0u64,
+            Space::Block(o) | Space::Record(o) => 1 + o,
+        };
+        order.sort_by_key(|(i, s)| (space_key(s), s.offset, *i));
+        if order.is_empty() {
+            return;
+        }
+        let pos = self.sel.row().and_then(|r| order.iter().position(|(i, _)| *i == r));
+        let next = match (pos, forward) {
+            (Some(p), true) => (p + 1).min(order.len() - 1),
+            (Some(p), false) => p.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => order.len() - 1,
+        };
+        let row = order[next].0;
+        self.select_field_row(row, SelOrigin::Keyboard, None);
+    }
+
+    /// `Shift+]` / `Shift+[`: the next / previous sibling structure of the selected tree node
+    /// in tree (file) order, as one navigation.
+    fn step_structure(&mut self, forward: bool) {
+        let next = match self.doc.sel_node() {
+            Some(i) => self.doc.sibling(i, forward),
+            None if forward => self.doc.roots().first().copied(),
+            None => None,
+        };
+        // Same path as a tree click on the sibling (plus a one-shot tree reveal).
+        if let Some(k) = next.and_then(|j| self.doc.select_and_reveal(j)) {
+            self.open_structure(k);
+        }
     }
 
     fn move_row(&mut self, m: RowMove) {
@@ -563,11 +801,11 @@ impl AppState {
         self.select_row(t);
     }
 
-    /// Selects the smallest row whose span contains the offset. Returns false if none.
+    /// Selects the narrowest field holding the offset (byte view stays). Returns false if none.
     fn select_row_for(&mut self, space: Space, off: u64) -> bool {
-        match self.doc.row_at(space, off) {
-            Some((i, span)) => {
-                self.sel.select_row(i, span);
+        match self.doc.view().and_then(|v| field_at(v, space, off)) {
+            Some(i) => {
+                self.select_field_row(i, SelOrigin::Hex, Some(Span::new(space, off, 1)));
                 true
             }
             None => false,
@@ -579,7 +817,7 @@ impl AppState {
     fn select_span(&mut self, span: Span) {
         let row = self.doc.view().and_then(|v| v.rows.iter().position(|r| r.field.span == Some(span)));
         match row {
-            Some(i) => self.select_row(i),
+            Some(i) => self.select_field_row(i, SelOrigin::Diagnosis, None),
             None => {
                 self.sel.select_raw(span, "Bytes named by a diagnostic.");
                 self.show_span(Some(span));
@@ -598,7 +836,7 @@ impl AppState {
             self.open_file(p);
         } else if let Some(k) = &f.link {
             let k = k.clone();
-            self.request_view(k, true);
+            self.navigate(k, None);
         }
     }
 
@@ -610,7 +848,7 @@ impl AppState {
             Some(off) if off < size.max(1) => {
                 let sp = self.doc.hex().space;
                 if !self.select_row_for(sp, off) {
-                    self.sel.select_raw(Span::new(sp, off, 1), "No field in the current table covers this offset.");
+                    self.sel.click_raw(Span::new(sp, off, 1), "No field in the current table covers this offset.");
                 }
                 if self.doc.hex_mut().ensure_visible(off) {
                     let base = self.doc.hex().page_base;

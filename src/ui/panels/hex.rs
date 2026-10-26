@@ -11,6 +11,7 @@
 
 use super::{strong, PanelMemory};
 use crate::app::hex::{HexState, PageState};
+use crate::app::provenance;
 use crate::app::{Action, AppState, Panel};
 use crate::limits::LIMITS;
 use crate::model::{Space, Span, SpaceInfo, Status};
@@ -75,7 +76,7 @@ pub fn ceiling_groups(ui: &egui::Ui) -> [f32; 3] {
     let hl = widest("0123456789abcdef", egui::TextStyle::Body);
     let button = |s: &str| width(s, egui::TextStyle::Button) + pad;
     // Mode chip: label + frame margin (4 pt each side) + 1 pt stroke each side.
-    let chip = ["File", "Decompressed block", "Reassembled record"].iter().map(|s| width(s, egui::TextStyle::Body)).fold(0.0, f32::max) + 2.0 * 4.0 + 2.0;
+    let chip = ["File bytes", "Decompressed block", "Reassembled record"].iter().map(|s| width(s, egui::TextStyle::Body)).fold(0.0, f32::max) + 2.0 * 4.0 + 2.0;
     let h16 = run(hb, 16);
     let space_btn = [format!("show block@0x{h16} (decompressed)"), format!("show record@0x{h16} (reassembled)"), "show file bytes".to_string()].iter().map(|s| button(s)).fold(0.0, f32::max);
     let a = chip + space_btn + button("Hide bytes") + 2.0 * gap;
@@ -92,6 +93,14 @@ pub fn row_height(ui: &egui::Ui) -> f32 {
     ui.fonts_mut(|f| f.row_height(&font)) + 2.0
 }
 
+/// What the byte rows paint as selected: every range to fill (a field's span and its exact file
+/// ranges — two for a field crossing a fragment boundary) and the clicked byte (outlined).
+#[derive(Default)]
+struct Sel {
+    spans: Vec<Span>,
+    anchor: Option<Span>,
+}
+
 enum HexEvent {
     Clicked(u64),
     ShiftClicked(u64),
@@ -103,7 +112,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMemor
     let mut acts = Vec::new();
     let doc = st.session();
     let hex = doc.hex();
-    let m = metrics(ui, hex.size());
+    let mut m = metrics(ui, hex.size());
+    if hex.space() != Space::File {
+        // Derived offsets print "+0…" (one more column for the sign).
+        m.digits += 1;
+    }
     mem.hex.bytes_per_row = choose_bytes_per_row(mem.hex.bytes_per_row, ui.available_width(), &m);
     // Header strip background (Wooden grain), filled in once its height is known.
     let strip = ui.painter().add(egui::Shape::Noop);
@@ -114,14 +127,16 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMemor
             hide_button(ui, &mut acts);
         });
         let idle = if doc.dir().is_some() { "Select a file to view its bytes" } else { "No file opened" };
-        show_bytes(ui, hex, tok, None, &|_| None, idle, &mut mem.hex, &m, None, strip, top);
+        show_bytes(ui, hex, tok, &Sel::default(), &|_| None, idle, &mut mem.hex, &m, None, strip, top);
         return acts;
     }
     header(ui, st, tok, &mut mem.hex, &mut acts);
-    let view_rows: Vec<(Option<Span>, String)> = doc.view().map(|v| v.rows.iter().map(|r| (r.field.span, r.field.name.clone())).collect()).unwrap_or_default();
     let space = hex.space();
-    let owner = move |off: u64| -> Option<String> { view_rows.iter().filter(|(s, _)| s.map(|s| s.contains(space, off)).unwrap_or(false)).min_by_key(|(s, _)| s.map(|s| s.len).unwrap_or(u64::MAX)).map(|(_, n)| format!("field: {n}")) };
-    if let Some(ev) = show_bytes(ui, hex, tok, st.selection().span(), &owner, "No file opened", &mut mem.hex, &m, scroll_to, strip, top) {
+    // The same narrowest-field service the click uses (shared, span order).
+    let view = doc.view();
+    let owner = move |off: u64| -> Option<String> { view.and_then(|v| provenance::field_at(v, space, off).map(|i| format!("field: {} (click selects it)", v.rows[i].field.name))) };
+    let sel = Sel { spans: st.selection().spans().collect(), anchor: st.selection().anchor() };
+    if let Some(ev) = show_bytes(ui, hex, tok, &sel, &owner, "No file opened", &mut mem.hex, &m, scroll_to, strip, top) {
         acts.push(match ev {
             HexEvent::Clicked(off) => Action::HexClick(off),
             HexEvent::ShiftClicked(off) => Action::HexShiftClick(off),
@@ -172,9 +187,9 @@ fn group_space(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Ac
     let p = &tok.p;
     let hex = st.session().hex();
     let (word, tint, tip) = match hex.space() {
-        Space::File => ("File", p.hex_file_space, CHIP_FILE_TIP.to_string()),
-        Space::Block(_) => ("Decompressed block", p.hex_derived_space, format!("{CHIP_DERIVED_TIP}\n{}", hex.space_title())),
-        Space::Record(_) => ("Reassembled record", p.hex_derived_space, format!("{CHIP_DERIVED_TIP}\n{}", hex.space_title())),
+        Space::File => ("File bytes", p.hex_file_space, CHIP_FILE_TIP.to_string()),
+        Space::Block(o) => ("Decompressed block", p.hex_derived_space, format!("Decompressed block @0x{o:x} – offsets are not file offsets\n{CHIP_DERIVED_TIP}\n{}", hex.space_title())),
+        Space::Record(o) => ("Reassembled record", p.hex_derived_space, format!("Reassembled record @0x{o:x} – offsets are not file offsets\n{CHIP_DERIVED_TIP}\n{}", hex.space_title())),
     };
     egui::Frame::new()
         .fill(p.data)
@@ -297,7 +312,7 @@ pub fn row_selection(sel: Option<Span>, space: Space, row_off: u64, n: u64) -> O
 
 /// Draws the current page state. `idle_text` is shown when no page is requested.
 #[allow(clippy::too_many_arguments)]
-fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: Option<Span>, owner: &dyn Fn(u64) -> Option<String>, idle_text: &str, mem: &mut HexMemory, m: &HexMetrics, scroll_to: Option<u64>, strip: egui::layers::ShapeIdx, top: f32) -> Option<HexEvent> {
+fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: &Sel, owner: &dyn Fn(u64) -> Option<String>, idle_text: &str, mem: &mut HexMemory, m: &HexMetrics, scroll_to: Option<u64>, strip: egui::layers::ShapeIdx, top: f32) -> Option<HexEvent> {
     let p = &tok.p;
     let page = match hex.load() {
         PageState::Idle => {
@@ -364,7 +379,7 @@ fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: Option<Span>
             let (rect, _) = ui.allocate_exact_size(egui::vec2(content_w, row_h), Sense::hover());
             let (x0, y) = (rect.left() + lead, rect.center().y);
             let painter = ui.painter();
-            text_at(painter, x0, y, "OFFSET", gutter_col);
+            text_at(painter, x0, y, space.offset_header(), gutter_col);
             for i in 0..n {
                 text_at(painter, x0 + byte_col(i, n, d) as f32 * cw, y, &format!("{i:02x}"), gutter_col);
             }
@@ -407,23 +422,32 @@ fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: Option<Span>
             let at = |pos: egui::Pos2| byte_at((pos.x - x0) / cw, n, d).filter(|&i| have(i));
             let hovered = resp.hover_pos().and_then(at);
             let painter = ui.painter();
-            let sel_range = row_selection(sel, space, row_off, n);
-            if let Some((a, b)) = sel_range {
-                let edge = egui::Stroke::new(1.0, p.sel_edge);
+            // Every selected range of this space (a cross-fragment field fills two; the
+            // fragment header between them stays unfilled).
+            let ranges: Vec<(u64, u64)> = sel.spans.iter().filter_map(|s| row_selection(Some(*s), space, row_off, n)).collect();
+            let edge = egui::Stroke::new(1.0, p.sel_edge);
+            for &(a, b) in &ranges {
                 for r in [cell(a).union(cell(b)), acell(a).union(acell(b))] {
                     painter.rect_filled(r, rounding, p.sel_bg);
                     painter.rect_stroke(r, rounding, edge, egui::StrokeKind::Inside);
                 }
+            }
+            // The clicked byte stays distinguishable inside the filled field.
+            if let Some((i, _)) = sel.anchor.and_then(|a| row_selection(Some(Span { len: 1, ..a }), space, row_off, n)) {
+                let st = egui::Stroke::new(2.0, p.sel_edge);
+                painter.rect_stroke(cell(i), rounding, st, egui::StrokeKind::Outside);
+                painter.rect_stroke(acell(i), rounding, st, egui::StrokeKind::Outside);
             }
             if let Some(i) = hovered {
                 let st = egui::Stroke::new(1.0, p.outline);
                 painter.rect_stroke(cell(i), rounding, st, egui::StrokeKind::Outside);
                 painter.rect_stroke(acell(i), rounding, st, egui::StrokeKind::Outside);
             }
-            text_at(painter, x0, y, &format!("{row_off:0w$x}", w = d as usize), offset_col);
+            let off_text = if derived { format!("+{row_off:0w$x}", w = (d as usize).saturating_sub(1)) } else { format!("{row_off:0w$x}", w = d as usize) };
+            text_at(painter, x0, y, &off_text, offset_col);
             for i in 0..n {
                 let Some(&b) = page.get((row_off - page_base + i) as usize) else { break };
-                let selected = sel_range.map(|(a, z)| i >= a && i <= z).unwrap_or(false);
+                let selected = ranges.iter().any(|&(a, z)| i >= a && i <= z);
                 text_at(painter, x0 + byte_col(i, n, d) as f32 * cw, y, &format!("{b:02x}"), if selected { p.sel_fg } else { p.hex_byte });
                 let ch = if (0x20..0x7f).contains(&b) { b as char } else { '.' };
                 text_at(painter, x0 + ascii_col(i, n, d) as f32 * cw, y, &ch.to_string(), if selected { p.sel_fg } else { p.hex_ascii });

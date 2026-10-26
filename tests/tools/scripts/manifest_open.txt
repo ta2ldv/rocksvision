@@ -1,0 +1,19 @@
+# Capture 32 (PLACEHOLDER): MANIFEST opened -> VersionEdit table immediately visible, then Observed levels link.
+# Placeholders: PATH_X/Y, LEVELS_LINK_X/Y (the "Observed levels" link / node), EDIT_ROW_X/Y (a VersionEdit row).
+# Expected: on open (no click) the table lists VersionEdit summaries; Observed levels shows per-level files with coverage stated.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{EXAMPLES}}/files/manifest-basic/MANIFEST-000005
+key return
+sleep 2.5
+shot manifest_00_on_open
+note EXPECT VersionEdit table visible without any further click
+click {{EDIT_ROW_X}} {{EDIT_ROW_Y}}
+sleep 0.6
+shot manifest_01_edit_row
+click {{LEVELS_LINK_X}} {{LEVELS_LINK_Y}}
+sleep 0.8
+shot manifest_02_levels
+note PASS: levels view lists files per level; scan coverage / bounded work visible; nothing marked complete that is not
+release_mods

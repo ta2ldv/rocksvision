@@ -3,7 +3,7 @@
 
 use crate::discover;
 use crate::inspect;
-use crate::model::{Child, NodeKind, View};
+use crate::model::{check_suffix, Child, ChildRole, NodeKind, View};
 use std::io::Write;
 use std::path::Path;
 
@@ -49,7 +49,16 @@ pub fn dump(path: &Path, o: &DumpOpts, out: &mut dyn Write) -> std::io::Result<b
         }
         visited += 1;
         let ind = "  ".repeat(depth);
-        writeln!(out, "{ind}+ {} [{} {}]", c.label, c.status.symbol(), c.status.label())?;
+        if matches!(c.checked, Some((0, _))) {
+            // A group none of whose members was checked: no status claimed.
+            writeln!(out, "{ind}+ {}{} [not checked]", c.label, check_suffix(c.checked))?;
+        } else {
+            writeln!(out, "{ind}+ {}{} [{} {}]", c.label, check_suffix(c.checked), c.status.symbol(), c.status.label())?;
+        }
+        if c.role == ChildRole::Reference {
+            // A link to a structure printed at its canonical place (file order), not a copy.
+            continue;
+        }
         let v = insp.view(&c.kind, &never);
         print_view(&v, depth + 1, o, out)?;
         if !c.leaf {
@@ -64,6 +73,9 @@ pub fn dump(path: &Path, o: &DumpOpts, out: &mut dyn Write) -> std::io::Result<b
 fn print_view(v: &View, depth: usize, o: &DumpOpts, out: &mut dyn Write) -> std::io::Result<()> {
     let ind = "  ".repeat(depth);
     writeln!(out, "{ind}== {}{}", v.title, v.status.map(|s| format!(" [{}]", s.label())).unwrap_or_default())?;
+    for w in &v.location {
+        writeln!(out, "{ind}   where: {}", w.text)?;
+    }
     for n in &v.notes {
         writeln!(out, "{ind}   note: {n}")?;
     }

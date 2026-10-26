@@ -10,6 +10,8 @@ Built-ins: `{{FIXTURES}}` (tests/fixtures), `{{EXAMPLES}}` (examples/), `{{SHOT_
 Scripts (scripts/*.txt; every coordinate is a placeholder resolved from a prior screenshot): clipboard, clipboard_binary, shift_click, reset_view, windows,
 themes_capture, harness_slowjob; Phase B acceptance (v3): resize_sequence, collapse_restore, reset_view_contract, search_enter, derived_space, diagnosis,
 hex_sweep, themes_capture_v2. Each header lists its placeholders and the expected result; each ends with a `note PASS: ...` line.
+Task 0006 acceptance scripts (placeholders only; run with `--check` until coordinates exist): sst_canonical_order, manifest_open, wal_bidirectional,
+cross_fragment, compressed_provenance, empty_wal, narrow_900_110, nav_keys (uses `key rbracket|lbracket [shift]`), large_gui (needs `--set LARGE=<dir>` `--set F=<file>`; fixtures: tests/evidence-0011/large-fixtures.md).
 Check all placeholders without sending events: `--set` every name to 1 and add `--check`.
 ## Commands (coordinates = screen points, origin top-left of main display)
 click/rclick/dclick X Y [mods] | shift_click X Y | move|hover X Y | drag X1 Y1 X2 Y2 | type TEXT | key NAME [cmd shift alt ctrl]
@@ -37,3 +39,4 @@ shot NAME | crop NAME X Y W H | note TEXT | sleep S | front | winfo | winsize W 
   "System Events" to tell process "RocksVision" to get {position, size} of window 1'` (= `winfo`).
 - Use `clipclear` before each copy so a stale clipboard cannot pass; compare `clipsave` files to `expected_clipboard.md` (v3: byte-level hex/SHA-256 for NUL keys, non-UTF-8 values and the 64 KiB cap; check with `xxd` and `shasum -a 256`).
 - RULE: a screenshot never proves an interaction without the matching action.log lines (command, timestamp, front app).
+- RULE: coordinates come only from full-screen driver shots (apply the factor in action.log), never from window-only captures.

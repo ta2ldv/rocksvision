@@ -1,0 +1,16 @@
+# Capture 36 (PLACEHOLDER): empty (0-byte) WAL tests/fixtures/empty/000001.log (sha256 e3b0c442...b855).
+# Placeholders: PATH_X/Y, TREE_X/Y (tree area), EXPL_X/Y/W/H (Explanation rect).
+# Expected: text 'Empty file (0 bytes): no records'; NO Truncated, NO Unknown, NO Diagnosis section; no error banner; tree and root agree.
+front
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{FIXTURES}}/empty/000001.log
+key return
+sleep 2
+shot emptywal_01_open
+crop emptywal_02_expl {{EXPL_X}} {{EXPL_Y}} {{EXPL_W}} {{EXPL_H}}
+click {{TREE_X}} {{TREE_Y}}
+sleep 0.5
+shot emptywal_03_tree_click
+note PASS: 'Empty file (0 bytes): no records' visible; the words Truncated/Unknown/Diagnosis appear nowhere
+release_mods

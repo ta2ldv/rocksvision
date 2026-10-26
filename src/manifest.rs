@@ -98,6 +98,10 @@ pub struct Edit {
     /// The problem behind `status` (its note equals `note`).
     pub diag: Option<Diagnostic>,
     pub tags: Vec<&'static str>,
+    /// kLogNumber / kNextFileNumber / kLastSequence values, when the edit carries them.
+    pub log_number: Option<u64>,
+    pub next_file: Option<u64>,
+    pub last_seq: Option<u64>,
 }
 
 const RECOVER_EDIT: &str = "decoding of this VersionEdit stops here; the following records are still read";
@@ -188,9 +192,9 @@ fn decode_edit_capped(d: &[u8], sp: Space, max: usize) -> Edit {
         x.pos += tn;
         let ok = match tag {
             1 => x.slice("comparator", false).map(|b| e.comparator = Some(String::from_utf8_lossy(&b).into_owned())),
-            2 => x.v64("log number").map(|_| ()),
-            3 => x.v64("next file number").map(|_| ()),
-            4 => x.v64("last sequence").map(|_| ()),
+            2 => x.v64("log number").map(|v| e.log_number = Some(v)),
+            3 => x.v64("next file number").map(|v| e.next_file = Some(v)),
+            4 => x.v64("last sequence").map(|v| e.last_seq = Some(v)),
             9 => x.v64("prev log number").map(|_| ()),
             10 => x.v64("min log number to keep").map(|_| ()),
             203 => x.v32("max column family").map(|_| ()),
@@ -239,8 +243,13 @@ fn decode_edit_capped(d: &[u8], sp: Space, max: usize) -> Edit {
                                 // Bit 6 set = must-understand.
                                 l.status = if ct & 64 != 0 { Status::Invalid } else { Status::Unknown };
                                 let note = format!("unknown NewFile4 custom tag {ct}");
-                                let rec = if ct & 64 != 0 { "RocksDB fails with Corruption (must-understand bit set)" } else { "RocksDB skips this custom field" };
-                                l.diag = Some(Box::new(Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Partial, rec, note).values(None, Some(DV::U32(ct)))));
+                                // Verified: RocksDB 10.4.2 db/version_edit.cc DecodeNewFile4From lines 424–431.
+                                let eng = if ct & 64 != 0 {
+                                    "RocksDB 10.4.2 db/version_edit.cc DecodeNewFile4From (lines 427–429): an unknown custom tag with the must-understand bit (kCustomTagNonSafeIgnoreMask) fails with \"new-file4 custom field not supported\"."
+                                } else {
+                                    "RocksDB 10.4.2 db/version_edit.cc DecodeNewFile4From (lines 424–431): an unknown custom tag without the must-understand bit is skipped."
+                                };
+                                l.diag = Some(Box::new(Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Partial, "RocksVision lists the field undecoded and continues", note).values(None, Some(DV::U32(ct))).engine(eng)));
                             }
                         }
                     }
@@ -285,13 +294,20 @@ fn decode_edit_capped(d: &[u8], sp: Space, max: usize) -> Edit {
             t if t & 8192 != 0 => x.slice_kind("ignorable field", false, K::IgnorableField).map(|_| {
                 if let Some(l) = x.last() {
                     l.status = Status::Unknown;
-                    l.diag = Some(Box::new(Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Trusted, "RocksDB skips it (kTagSafeIgnoreMask)", format!("unknown tag {t} with the safe-ignore bit")).values(None, Some(DV::U32(t)))));
+                    // Verified: RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom lines 771–781.
+                    l.diag = Some(Box::new(
+                        Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Trusted, "RocksVision skips the length-prefixed field and continues", format!("unknown tag {t} with the safe-ignore bit"))
+                            .values(None, Some(DV::U32(t)))
+                            .engine("RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom (lines 771–781): an unknown tag with kTagSafeIgnoreMask set is skipped by its length prefix."),
+                    ));
                 }
             }),
             _ => {
                 let rest = &d[x.pos..];
                 // Unknown tag without the safe-ignore bit: RocksDB fails with Corruption.
-                let diag = Diagnostic::new(CheckKind::UnknownType, x.span(x.pos, rest.len()), Trust::Untrusted, "RocksDB fails with Corruption; the rest of the edit cannot be framed", format!("unknown tag {tag} without the safe-ignore bit")).values(None, Some(DV::U32(tag)));
+                let diag = Diagnostic::new(CheckKind::UnknownType, x.span(x.pos, rest.len()), Trust::Untrusted, "RocksVision stops decoding this edit; the rest cannot be framed", format!("unknown tag {tag} without the safe-ignore bit"))
+                    .values(None, Some(DV::U32(tag)))
+                    .engine("RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom (lines 782–784): an unknown tag without kTagSafeIgnoreMask sets the error \"unknown tag\".");
                 x.push(Fact::new("undecodable remainder", x.span(x.pos, rest.len()), bytes_preview(rest, 48)).kind(K::Remainder).raw(rest).status(Status::Unknown).diag(diag.clone()));
                 x.pos = d.len();
                 e.status = Some(Status::Unknown);

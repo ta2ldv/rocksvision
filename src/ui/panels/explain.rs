@@ -6,9 +6,10 @@
 use super::{btn, chip, chip_word, long_value, status_meaning, strong, title_line, LEGEND};
 use crate::app::diagnosis::{self, DiagLine, Diagnosis, Finding, NodeFailure, SUMMARY_LINES};
 use crate::app::hex::interpretations;
+use crate::app::provenance;
 use crate::app::{Action, AppState, Panel};
 use crate::limits::LIMITS;
-use crate::model::{Span, Status};
+use crate::model::{Space, SpaceMap, Span, Status};
 use crate::ui::layout;
 use crate::ui::menu::{self, MenuCmd};
 use crate::ui::theme::Tokens;
@@ -23,14 +24,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens) -> Vec<Action> {
     // interpretation tokens scroll horizontally, in their own row.
     egui::ScrollArea::vertical().id_salt("explain").auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(ui.available_width());
+        let whole = st.selection().is_structure() && st.selection().anchor().is_none() && (st.selection().span().is_none() || st.selection().span() == st.session().view().and_then(|v| v.extent));
         if let Some(f) = st.selected_field() {
             field(ui, st, tok, f, &mut acts);
+        } else if whole && st.session().view().is_some() {
+            structure_card(ui, st, tok, &mut acts);
         } else if let Some(s) = st.selection().span() {
-            if let Some(n) = st.selection().raw_note() {
-                ui.add(egui::Label::new(n).wrap());
-            }
-            ui.add(egui::Label::new(format!("Raw selection: {s}")).wrap());
-            interp(ui, st, tok, &s);
+            selection_range(ui, st, tok, &s, &mut acts);
         } else if !node(ui, st, tok, &mut acts) {
             empty(ui, tok);
         }
@@ -43,7 +43,135 @@ fn section(ui: &mut egui::Ui, tok: &Tokens, title: &str) {
     ui.label(RichText::new(title).strong().color(tok.p.heading));
 }
 
+/// "Where": one line per address space, File first (shared range service).
+fn where_section(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, span: Option<Span>) {
+    section(ui, tok, "Where");
+    match span {
+        Some(s) => {
+            for l in provenance::where_lines(st.session().view(), &s) {
+                ui.add(egui::Label::new(RichText::new(l).monospace()).wrap());
+            }
+        }
+        None => {
+            ui.add(egui::Label::new("No bytes in the file (derived, inferred, default or metadata value)").wrap());
+        }
+    }
+}
+
+/// Secondary, collapsed by default (its open state is kept for the session): the alternate
+/// notations of the decoded number ("0x7 / 0b111") and the byte interpretations of the span.
+fn other_interpretations(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: Option<&Span>, number: Option<u64>, open: bool) {
+    if s.is_none() && number.is_none() {
+        return;
+    }
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new(RichText::new("Other byte interpretations").color(tok.p.heading)).id_salt(("other_interp", open)).default_open(open).show(ui, |ui| {
+        if let Some(n) = number {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("decoded value  ").color(tok.p.text_muted));
+                ui.add(egui::Label::new(RichText::new(format!("{n} / 0x{n:x} / 0b{n:b}")).monospace().color(tok.p.text)).extend());
+            });
+        }
+        if let Some(s) = s {
+            interp(ui, st, tok, s);
+        }
+    });
+}
+
+/// The whole structure selected (tree click, structure step, navigation without a target
+/// row): title + status chip, Meaning, Where (file range, contents/trailer), Diagnosis, the
+/// "Referenced from" back-link and, for compressed contents, the decompressed view.
+fn structure_card(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Action>) {
+    let doc = st.session();
+    let Some(view) = doc.view() else { return };
+    let tree = doc.sel_node().and_then(|i| doc.nodes().get(i)).filter(|n| Some(&n.kind) == doc.view_kind());
+    let status = view.status.or(tree.filter(|n| !n.unchecked()).map(|n| n.shown_status()));
+    let title = tree.map(|n| n.full_label()).unwrap_or_else(|| view.title.clone());
+    ui.horizontal_wrapped(|ui| {
+        if let Some(s) = status {
+            match view.status_word.filter(|_| view.status.is_some()) {
+                Some(w) => chip_word(ui, tok, s, w, status_meaning(s)),
+                None => chip(ui, tok, s),
+            }
+        }
+        ui.add(egui::Label::new(RichText::new(&title).heading()).wrap());
+    });
+    ui.add_space(4.0);
+    section(ui, tok, "Meaning");
+    if title != view.title {
+        ui.add(egui::Label::new(&view.title).wrap());
+    }
+    if let Some(n) = st.selection().raw_note() {
+        ui.add(egui::Label::new(RichText::new(n).color(tok.p.text_muted)).wrap());
+    }
+    // Where: the structure's file range (shared service), then its contents/trailer lines.
+    let span = st.selection().span();
+    where_section(ui, st, tok, span);
+    for w in &view.location {
+        match &w.link {
+            Some(t) => {
+                if ui.link(&w.text).on_hover_text("Go to this structure (Back returns)").clicked() {
+                    acts.push(Action::Navigate { target: t.node.clone(), span: t.span });
+                }
+            }
+            None => {
+                ui.add(egui::Label::new(RichText::new(&w.text).monospace()).wrap());
+            }
+        }
+    }
+    // Diagnosis of the structure (same data as the node summary).
+    let fails = diagnosis::node_failures(view, tree.map(|n| n.status), tree.and_then(|n| n.diag.as_deref()));
+    if let [one] = fails.as_slice() {
+        ui.add_space(4.0);
+        let d = diagnosis::diagnosis(one.status, one.diag.as_ref());
+        diagnosis_ui(ui, tok, &d, "card", acts);
+        if let Some(r) = one.row {
+            if ui.link(format!("Select the failing field: {}", one.name)).clicked() {
+                acts.push(Action::SelectRow(r));
+            }
+        }
+    } else if !fails.is_empty() {
+        ui.add_space(4.0);
+        summary(ui, tok, &fails, acts);
+    }
+    if let Some(via) = st.selection().via() {
+        ui.add_space(6.0);
+        if ui.link(format!("Referenced from: {via} ›")).on_hover_text("Back to where this link was followed (restores that selection)").clicked() && doc.can_go_back() {
+            acts.push(Action::Back);
+        }
+    }
+    if let Some(sp) = view.spaces.iter().find(|sp| matches!(sp.map, SpaceMap::Compressed { .. })) {
+        ui.add_space(6.0);
+        if btn(ui, tok, "Open decompressed view").on_hover_text(&sp.title).clicked() {
+            acts.push(Action::HexShowSpace(sp.space));
+        }
+    }
+}
+
+/// A structure or raw byte range (no single field): what it is, where, and for compressed
+/// stored bytes the way to the decompressed fields.
+fn selection_range(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: &Span, acts: &mut Vec<Action>) {
+    let structure = st.selection().is_structure();
+    ui.horizontal_wrapped(|ui| {
+        ui.heading(if structure { "Structure bytes" } else { "Raw range" });
+    });
+    if let Some(n) = st.selection().raw_note() {
+        ui.add(egui::Label::new(n).wrap());
+    }
+    where_section(ui, st, tok, Some(*s));
+    // Compressed stored bytes: no byte maps to a field; offer the decompressed space.
+    let decompressed = st.session().view().and_then(|v| v.spaces.iter().find(|sp| matches!(&sp.map, SpaceMap::Compressed { file, .. } if s.space == Space::File && file.offset <= s.offset && s.offset < file.offset + file.len.max(1))));
+    if let Some(sp) = decompressed {
+        ui.add_space(6.0);
+        if btn(ui, tok, "Open decompressed view").on_hover_text(&sp.title).clicked() {
+            acts.push(Action::HexShowSpace(sp.space));
+        }
+    }
+    other_interpretations(ui, st, tok, Some(s), None, !structure);
+}
+
 fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field, acts: &mut Vec<Action>) {
+    // Title + status.
     ui.horizontal_wrapped(|ui| {
         if f.untrusted {
             chip_word(ui, tok, f.status, diagnosis::UNTRUSTED_WORD, diagnosis::UNTRUSTED_MEANING);
@@ -53,37 +181,30 @@ fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field
         ui.heading(&f.name);
     });
     ui.add_space(4.0);
-    // Diagnosis (or the separate Unsupported / Unknown statement) directly under the title.
-    if let Some(fd) = diagnosis::finding(f.status, f.diag.as_deref(), &f.name) {
-        finding(ui, tok, &fd, "field", acts);
-    }
-    section(ui, tok, "Where");
-    match f.span {
-        Some(s) => ui.add(egui::Label::new(format!("{}\n0x{:x}..0x{:x} ({} bytes)", s.space.label(), s.offset, s.offset + s.len, s.len)).wrap()),
-        None => ui.add(egui::Label::new("No on-disk bytes (derived, inferred or default value)").wrap()),
-    };
-    if !f.encoding.is_empty() {
-        section(ui, tok, "Encoding");
-        ui.add(egui::Label::new(&f.encoding).wrap());
-    }
-    section(ui, tok, "Value");
-    long_value(ui, "v_value", &f.value);
-    // Typed decoded value only; the display string is never parsed back.
-    if let Some(n) = f.decoded.as_ref().and_then(|d| d.as_u64()) {
-        section(ui, tok, "Hex / binary");
-        long_value(ui, "v_bin", &format!("0x{n:x}\n0b{n:b}"));
-    }
-    if !f.raw.is_empty() {
-        section(ui, tok, "Raw");
-        long_value(ui, "v_raw", &f.raw);
-    }
-    section(ui, tok, "Status");
-    let meaning = if f.untrusted { diagnosis::UNTRUSTED_MEANING } else { status_meaning(f.status) };
-    ui.add(egui::Label::new(format!("{} {meaning}", f.status.symbol())).wrap());
+    // Meaning: what the field is and its decoded value.
+    section(ui, tok, "Meaning");
     if !f.explain.is_empty() {
-        section(ui, tok, "Derivation");
         ui.add(egui::Label::new(&f.explain).wrap());
     }
+    // The decoded value once; its alternate notations sit in "Other byte interpretations".
+    long_value(ui, "v_value", &f.value);
+    if !f.encoding.is_empty() {
+        ui.add(egui::Label::new(RichText::new(format!("Encoding: {}", f.encoding)).color(tok.p.text_muted)).wrap());
+    }
+    if !f.raw.is_empty() {
+        long_value(ui, "v_raw", &f.raw);
+    }
+    // Where: every address space, File first.
+    where_section(ui, st, tok, f.span);
+    // Diagnosis (or the separate Unsupported / Unknown statement).
+    if let Some(fd) = diagnosis::finding(f.status, f.diag.as_deref(), &f.name) {
+        ui.add_space(4.0);
+        finding(ui, tok, &fd, "field", acts);
+    }
+    // Derivation: what the status means and where the link leads.
+    section(ui, tok, "Derivation");
+    let meaning = if f.untrusted { diagnosis::UNTRUSTED_MEANING } else { status_meaning(f.status) };
+    ui.add(egui::Label::new(format!("{} {meaning}", f.status.symbol())).wrap());
     if f.link.is_some() || f.open_path.is_some() {
         ui.add_space(6.0);
         let label = if f.open_path.is_some() { "Open referenced file ›" } else { "Go to target ›" };
@@ -91,12 +212,9 @@ fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field
             acts.push(Action::FollowSelected);
         }
     }
-    if let Some(s) = f.span {
-        ui.add_space(6.0);
-        ui.separator();
-        section(ui, tok, "Interpretations of the first bytes");
-        interp(ui, st, tok, &s);
-    }
+    // Typed decoded value only; the display string is never parsed back.
+    let number = f.decoded.as_ref().and_then(|d| d.as_u64());
+    other_interpretations(ui, st, tok, f.span.as_ref(), number, false);
 }
 
 /// Node-level explanation when no row is selected: title, status and a summary of the
@@ -259,8 +377,9 @@ fn empty(ui: &mut egui::Ui, tok: &Tokens) {
     ui.add_space(6.0);
     strong(ui, tok, "Hints");
     for h in [
-        "• Click a table row or a hex byte; double-click / Enter follows a handle or link.",
-        "• Shift+click in the byte view extends the byte selection.",
+        "• Click a table row or a byte: a byte selects the field that holds it (the byte stays outlined); double-click / Enter follows a link.",
+        "• Shift+click in the byte view selects a raw range from the clicked byte.",
+        "• ] / [ step through fields; Shift+] / Shift+[ step through structures in file order.",
         "• Help › RocksVision Help explains the panels, search and Reset View.",
         "• Help › Keyboard Shortcuts lists every shortcut.",
     ] {

@@ -110,12 +110,12 @@ For comparisons, try `data/bloom-full`, `data/bloom-absent`, `data/index-partiti
 
 | Area | What it shows |
 |---|---|
-| Left — Navigation | Files and the expandable structure tree |
-| Center top — Records | Fields and records of the selected structure |
-| Center bottom — Bytes | Offsets, hex and ASCII; synchronized with selection |
-| Right — Explanation | Encoding, derivation, interpretations and available corruption diagnostics |
+| Left — Navigation | Files; the structure tree in physical file order (each block once, SST Footer last), then labeled views (logical records, observed levels, data blocks via index) |
+| Center top — Records | Fields and records of the selected structure, with its file range, stored size and next structure |
+| Center bottom — Bytes | Offsets (FILE / BLK+ / REC+), hex and ASCII; synchronized with selection in both directions |
+| Right — Explanation | Meaning, where (every address space, file first), diagnosis, derivation and, collapsed, other byte interpretations |
 
-Select a row to highlight its byte range; double-click a link or handle to follow it. **File** offsets and **Decompressed block / Reassembled record** offsets are different address spaces. A standalone SST cannot establish its LSM level without MANIFEST context.
+Select a row to highlight its bytes; click a byte to select the field that holds it (the byte stays outlined); **Shift+click** selects a raw range. Double-click a link, handle or reference to go to the structure at its place in the tree; **Back** returns. **]** / **[** step through fields, **Shift+]** / **Shift+[** through structures. **File** offsets and **Decompressed block / Reassembled record** offsets are different address spaces: a reassembled field shows its exact file range(s); a decompressed field only the compressed block that contains it. A standalone SST cannot establish its LSM level without MANIFEST context.
 
 Search checks decoded cells of the current table and stored file bytes, not every decoded table or decompressed block. **Hex bytes** accepts a pattern such as `4d 41 4e`. In the search field, **Enter** advances and **Shift+Enter** goes back.
 

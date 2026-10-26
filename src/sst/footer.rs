@@ -216,7 +216,11 @@ pub fn decode(tail: &[u8], file_len: u64) -> Result<Footer, FooterError> {
                 .raw(&tail[p + 8..p + 12])
                 .enc("fixed32 LE")
                 .status(if base == 0 { Status::Invalid } else { Status::Present })
-                .diag_if(base == 0, || Diagnostic::new(CheckKind::Structure, span(p + 8, 4), Trust::Untrusted, "RocksDB rejects the file (format.cc DecodeFrom: Corruption)", "base context checksum must be non-zero for format_version >= 6")),
+                .diag_if(base == 0, || {
+                    // Verified: RocksDB 10.4.2 table/format.cc Footer::DecodeFrom lines 415–416.
+                    Diagnostic::new(CheckKind::Structure, span(p + 8, 4), Trust::Untrusted, "RocksVision still decodes the footer fields; they are not trusted", "base context checksum must be non-zero for format_version >= 6")
+                        .engine("RocksDB 10.4.2 table/format.cc Footer::DecodeFrom (lines 415–416): returns Corruption(\"Invalid base context checksum\").")
+                }),
         );
         let mi = Handle { offset: footer_off.saturating_sub(BLOCK_TRAILER).saturating_sub(u64::from(mis)), size: u64::from(mis) };
         f.push(Fact::new("metaindex size", span(p + 12, 4), mis.to_string()).kind(K::MetaindexSize).dv(DV::U32(mis)).raw(&tail[p + 12..p + 16]).enc("fixed32 LE"));
