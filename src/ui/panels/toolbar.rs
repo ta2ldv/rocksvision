@@ -201,7 +201,7 @@ mod tests {
         let mut out = 0.0;
         for _ in 0..frames {
             let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w * z, 900.0 * z))), ..Default::default() };
-            let _ = ctx.run_ui(input, |ui| {
+            crate::ui::test_frame(ctx, input, |ui| {
                 let frame = egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4));
                 egui::Panel::top("toolbar").frame(frame).show(ui, |ui| {
                     let right = ui.max_rect().right();
@@ -211,6 +211,54 @@ mod tests {
             });
         }
         out
+    }
+
+    /// 0015 C3 GUI-3: the zoom ceiling from the shell's own measurement (`measure_layout` over
+    /// real toolbar widths measured by `show_groups`, default theme) at the README windows; and
+    /// it is the same whether measured at 100 % or at the ceiling itself (no flip-flop).
+    #[test]
+    fn shell_zoom_ceilings_from_measured_toolbar() {
+        use crate::app::{ZoomFit, ZoomPolicy};
+        let st = AppState::idle_for_tests();
+        let mut out = Vec::new();
+        for (w, h) in [(1400.0f32, 900.0f32), (900.0, 700.0), (900.0, 560.0)] {
+            let mut at = Vec::new();
+            for z in [1.0f32, 1.1, 1.2, 1.6] {
+                let ctx = egui::Context::default();
+                let mut mem = PanelMemory::default();
+                let _ = run(&ctx, &st, &mut mem, 0, w / z, z, 4);
+                let tok = apply_theme(&ctx, &THEMES[0], &mut Vec::new());
+                let mut c = 0.0;
+                crate::ui::test_frame(&ctx, egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))), ..Default::default() }, |ui| {
+                    // The status bar and a hex header line as the shell measures them.
+                    let r = egui::Panel::bottom("status").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, LAYOUT.status_pad as i8)).stroke(egui::Stroke::new(1.0, tok.p.border))).resizable(false).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.set_height(ui.text_style_height(&egui::TextStyle::Body) + LAYOUT.status_pad);
+                            ui.label("selection");
+                        });
+                    });
+                    mem.status_h = r.response.rect.height();
+                    let line = ui.horizontal(|ui| {
+                        let mut s = String::new();
+                        ui.add(egui::TextEdit::singleline(&mut s).desired_width(LAYOUT.goto_width));
+                        let _ = ui.button("Go to");
+                        let _ = ui.small_button("Hide bytes");
+                    });
+                    mem.hex.line_h = line.response.rect.height() + ui.spacing().item_spacing.y;
+                    let (nw, nh) = crate::ui::measure_layout(ui, &tok, &mem, 0, true).need(true, true);
+                    c = ZoomPolicy::DEFAULT.ceiling(ZoomFit { at_zoom: z, avail_w: w / z, avail_h: h / z, need_w: nw, need_h: nh });
+                    eprintln!("{w}x{h} measured at {:.0}%: need {nw:.1}x{nh:.1} → ceiling {:.0}%", z * 100.0, c * 100.0);
+                });
+                at.push((z, c));
+            }
+            // The ceiling seen at 100 % must still hold when measured at that ceiling.
+            let c100 = at[0].1;
+            if let Some(&(_, c_at)) = at.iter().find(|(z, _)| (*z - c100).abs() < 1e-3) {
+                assert!((c_at - c100).abs() < 1e-3, "{w}x{h}: ceiling {c100} at 100 % but {c_at} at {c100}");
+            }
+            out.push(c100);
+        }
+        eprintln!("shell ceilings (1400x900, 900x700, 900x560): {out:?}");
     }
 
     /// Spec §6.6 / 0009 item 2: every group (incl. A− 100% A+ · Reset View) ends inside the

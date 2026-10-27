@@ -76,6 +76,39 @@ pub fn where_lines(view: Option<&View>, span: &Span) -> Vec<String> {
     }
 }
 
+/// Where the byte view goes for a field without bytes of its own (design B2/B6): the first byte
+/// of the enclosing structure — +0x0 of the view's derived space when the byte view already
+/// shows it (BLK+/REC+ stay), else the structure's file start (`extent`). Never leaves File for
+/// a derived space just for this. None when the view has no honest enclosing range.
+pub fn byteless_reveal(view: Option<&View>, hex_space: Space) -> Option<Span> {
+    let v = view?;
+    if hex_space != Space::File && v.spaces.iter().any(|s| s.space == hex_space) {
+        return Some(Span::new(hex_space, 0, 1));
+    }
+    v.extent.map(|e| Span::file(e.offset, 1))
+}
+
+/// "file 0x5eec" / "blk@0xd0 +0x0" / "rec@0x5eec +0x0": a position shown by the byte view.
+pub fn position_text(s: &Span) -> String {
+    match s.space {
+        Space::File => format!("file 0x{:x}", s.offset),
+        Space::Block(o) => format!("blk@0x{o:x} +0x{:x}", s.offset),
+        Space::Record(o) => format!("rec@0x{o:x} +0x{:x}", s.offset),
+    }
+}
+
+/// Explanation "Where" of a field without bytes whose enclosing structure is shown (B4).
+pub fn byteless_where(view: Option<&View>, shown: &Span) -> String {
+    let what = view.map(|v| v.title.as_str()).unwrap_or("structure");
+    format!("No bytes of its own (derived, inferred, default or metadata value). The hex view shows the start of the enclosing {what}: {}.", position_text(shown))
+}
+
+/// Status-bar mirror of a field without bytes (B5): "selection: reassembly · no bytes ·
+/// showing file 0x5eec".
+pub fn byteless_status(name: &str, shown: &Span) -> String {
+    format!("selection: {name} · no bytes · showing {}", position_text(shown))
+}
+
 /// Status-bar mirror of a selection, e.g. "file [0xf,0x13) · rec@0x0 +0x8 · 4 B".
 pub fn status_text(view: Option<&View>, span: &Span) -> String {
     let derived = match span.space {

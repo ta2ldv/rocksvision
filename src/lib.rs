@@ -33,3 +33,5 @@ mod diag_tests;
 mod nav_tests;
 #[cfg(test)]
 mod stall_tests;
+#[cfg(test)]
+mod status_tests;

@@ -1,45 +1,46 @@
 # RocksVision native packages (macOS arm64, macOS Intel x64, Ubuntu x64, Windows x64).
-# ONE workflow, ONE shared build job, two modes chosen by the trigger:
-#   workflow_dispatch  -> "Build test packages (artifacts only, no release)"
-#   release: published -> "Release packages (upload to published release vX.Y.Z)"
+# ONE workflow, ONE shared build job, two modes chosen by the REF TYPE (github.ref_type):
+#   tag    (push of a version tag, or Run workflow on a tag)
+#          -> "Release packages (build, then create or upload release vX.Y.Z)"
+#   branch (Run workflow on a branch) -> "Build test packages (artifacts only, no release)"
 # The mode is shown in the run name, every job name and the run summary.
+# `release: published` is NOT a trigger any more (task 0008): creating a release in the UI with
+# a new tag also creates the tag, so both triggers would have started two runs for one release.
 #
 # Owner steps (ta2ldv):
-#   1. Commit this workflow and push it to the default branch (the push itself runs nothing).
-#   2. Build test packages: Actions > "Build and release packages" > Run workflow, on any branch
-#      (no tag needed). Builds, tests and packages all four platforms and keeps 7-day artifacts
-#      only. The Run workflow button is NOT tag-aware: choosing a tag there is still an
-#      artifact-only build of that ref; it never touches any release.
-#   3. Release packages: set Cargo.toml version to X.Y.Z (>= 0.1.1), commit, push, create tag
-#      vX.Y.Z on that commit (a bare tag push runs nothing).
-#   4. Make sure "immutable releases" is OFF for the repository (see below), then publish a
-#      release for vX.Y.Z on GitHub (published, not draft). The workflow builds the commit the tag
-#      points to and, when all four builds and checks pass, uploads the four archives + .sha256
-#      files to THAT release. It never creates another release and never overwrites an asset.
+#   Release: set Cargo.toml version to X.Y.Z (>= 0.1.1), commit, `git push`, then
+#     `git tag vX.Y.Z && git push origin vX.Y.Z` (`git push` alone does NOT send local tags).
+#     Or create the release in the GitHub UI with a NEW tag vX.Y.Z on the bumped commit: that
+#     creates the tag, the tag push runs this workflow, which uploads to the existing release.
+#   Test build: Actions > "Build and release packages" > Run workflow on a BRANCH (artifacts only).
+#     Run workflow on a TAG takes the same release path as a tag push.
 #   Partial upload / retry: see docs/BUILD.md "Recovery after a partial upload".
 #
 # Gating matrix:
-#   ordinary branch push / pull request / schedule  -> no trigger, nothing runs
-#   tag push alone                                  -> no trigger, nothing runs
-#   draft release created or edited                 -> no trigger (only `release: published`)
-#   release published (or run/re-run) by non-owner  -> every job skipped (actor + triggering_actor)
-#   workflow_dispatch by ta2ldv (any branch or tag) -> build/test/package + artifacts only
-#   published v0.1.0 (also if re-published), or any tag not strictly vMAJOR.MINOR.PATCH >= 0.1.1
-#                                                   -> validate fails, nothing built or uploaded
-#   tag != Cargo.toml version at the tagged commit  -> validate fails
-#   release missing/draft, or an asset name exists  -> validate fails; re-checked before upload
-#   GitHub API error/network failure on that check  -> fails closed (logged distinctly)
-#   any platform build/check fails                  -> no upload
-#   repository other than ta2ldv/rocksvision (fork) -> no release write
-#   two runs for the same tag                       -> serialized (concurrency group)
+#   branch push / pull request / schedule / release events -> no trigger, nothing runs
+#   tag push not matching v<digits>.<digits>.<digits>      -> no trigger (filter below)
+#   tag deletion                                          -> every job skipped
+#   run/re-run by anyone but ta2ldv                       -> every job skipped (actor + triggering_actor)
+#   Run workflow on a branch                              -> build/test/package + 7-day artifacts only
+#   tag v0.1.0 or older (strict format)                   -> NEUTRAL SKIP: validate passes with a notice,
+#                                                            nothing built or released
+#   tag not strictly vMAJOR.MINOR.PATCH (e.g. v0.1.02)    -> validate FAILS, nothing built
+#   tag != Cargo.toml version at the tagged commit        -> validate fails
+#   tag on GitHub no longer at the built commit           -> fails (before builds and before any write)
+#   draft release, immutable release, asset name exists   -> fails (before builds; re-checked before write)
+#   GitHub API error/network failure on a check           -> fails closed (logged distinctly)
+#   any platform build/test fails                         -> no release write at all
+#   no release for the tag                                -> after all four pass: create it + 8 assets
+#   published release exists (e.g. created in the UI)     -> after all four pass: upload 8 assets only;
+#                                                            title/notes never edited
+#   repository other than ta2ldv/rocksvision (fork)       -> no release write
+#   runs for the same tag (push + manual, re-run)         -> serialized (concurrency group); the later one
+#                                                            stops at "asset name exists"
 #
-# Visibility window: a published release is public immediately, so it is visible WITHOUT these
-# assets until the upload job finishes (build + test time of the slowest platform).
-# Immutable releases: per GitHub docs (to verify: docs.github.com "Immutable releases"), once a
-# release is published with immutable releases enabled, its assets cannot be added, changed or
-# deleted; the recommended pattern there is draft -> attach assets -> publish. This flow adds
-# assets AFTER publication, so it only works with immutable releases OFF (the asset check refuses
-# a release whose REST `immutable` field is true; field name to verify).
+# Immutable releases: a release published with immutable releases ON cannot get assets later, so
+# the upload-only path refuses it (REST `immutable` must be false; field confirmed 2026-10-27).
+# The create path passes the assets to `gh release create`, which (per gh, to verify on the first
+# real run) creates a draft, uploads and then publishes; the result is verified afterwards.
 #
 # Runner labels (checked against actions/runner-images README, 2026-10-24): macos-13 is retired;
 # macos-15-intel is the x86_64 macOS image, macos-15 the arm64 one (macos-14 is deprecated).
@@ -48,20 +49,25 @@
 name: Build and release packages
 
 run-name: >-
-  ${{ github.event_name == 'release'
-  && format('Release packages (upload to published release {0}) @ {1}', github.event.release.tag_name, github.sha)
+  ${{ github.ref_type == 'tag'
+  && format('Release packages (build, then create or upload release {0}) [{1}] @ {2}', github.ref_name, github.event_name, github.sha)
   || format('Build test packages (artifacts only, no release) on {0} @ {1}', github.ref_name, github.sha) }}
 
 on:
-  release:
-    types: [published]
+  push:
+    # Only version-like tags start a run (anchored glob, `+` = one or more); validate-tag.sh then
+    # applies the strict rule. No `branches:` filter, so branch pushes never trigger.
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# One group per ref: a tag push and a manual run on the same tag (or a re-run) queue behind each
+# other, never in parallel and never cancelled midway. Branch builds use their own groups.
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref }}
+  group: ${{ github.ref_type == 'tag' && 'release' || 'build' }}-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -70,44 +76,74 @@ defaults:
 
 jobs:
   validate:
-    if: github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
-    name: ${{ github.event_name == 'release' && 'Release packages / validate tag, version and release' || 'Build test packages / resolve source (no release)' }}
+    # Tag deletions also arrive as push events (deleted == true): never build for those.
+    if: >-
+      github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv' &&
+      github.event.deleted != true
+    name: ${{ github.ref_type == 'tag' && 'Release packages / validate tag, version and release' || 'Build test packages / resolve source (no release)' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: read
     outputs:
       sha: ${{ steps.src.outputs.sha }}
+      proceed: ${{ steps.mode.outputs.proceed }}
+      plan: ${{ steps.plan.outputs.plan }}
     steps:
-      # Release event: the tag the release points to, never the branch tip.
+      # github.sha: the tagged commit (tag mode) or the branch tip at dispatch time.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Source (commit pinned for all later jobs)
         id: src
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           sha=$(git rev-parse HEAD)
-          if [ "$EVENT" = release ]; then
-            tagsha=$(git rev-parse "refs/tags/$TAG^{commit}")
-            [ "$sha" = "$tagsha" ] || { echo "error: checkout $sha != tag $TAG commit $tagsha" >&2; exit 1; }
-          fi
-          printf 'event: %s\nref: %s\ntag: %s\nsha: %s\n' "$EVENT" "$REF" "${TAG:--}" "$sha"
+          [ "$sha" = "$GITHUB_SHA" ] || { echo "error: checkout $sha != github.sha $GITHUB_SHA" >&2; exit 1; }
+          printf 'event: %s\nref: %s\nsha: %s\n' "$EVENT" "$REF" "$sha"
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
-      - name: Validate tag against Cargo.toml at the tagged commit (release only)
-        if: github.event_name == 'release'
+      # Tag mode: strict tag >= 0.1.1 equal to Cargo.toml of this commit. Exit 10 (older than
+      # 0.1.1) is a neutral skip: this job passes, proceed=false skips every other job.
+      - name: Mode and tag validation (tag must equal Cargo.toml at the tagged commit)
+        id: mode
         env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: bash scripts/ci/validate-tag.sh "$TAG"
-      - name: Release ready (exists, published, not immutable, no asset yet; release only, fail-closed)
-        if: github.event_name == 'release'
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          proceed=true
+          if [ "$REF_TYPE" = tag ]; then
+            rc=0
+            bash scripts/ci/validate-tag.sh "$TAG" || rc=$?
+            case "$rc" in
+              0) ;;
+              10)
+                proceed=false
+                echo "::notice::Tag $TAG is older than v0.1.1: skipped, nothing is built or released."
+                printf '## Release packages: SKIPPED (%s)\n\nTag %s is older than v0.1.1; old tags are never processed. Nothing was built or released.\n' "$TAG" "$TAG" >>"$GITHUB_STEP_SUMMARY"
+                ;;
+              *) exit "$rc" ;;
+            esac
+          fi
+          echo "proceed=$proceed" >>"$GITHUB_OUTPUT"
+      - name: Tag still points to this commit (tag mode, fail-closed)
+        if: github.ref_type == 'tag' && steps.mode.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ steps.src.outputs.sha }}
+        run: bash scripts/ci/check-tag-commit.sh "$REPO" "$TAG" "$SHA"
+      # Exit 0 = published release exists (upload-only), 10 = no release (create), anything else
+      # stops here, before any build. Re-checked with the write token right before the write.
+      - name: Release plan (create or upload-only; draft/immutable/existing asset stop; fail-closed)
+        id: plan
+        if: github.ref_type == 'tag' && steps.mode.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
           v=${TAG#v}
           names=()
@@ -115,28 +151,44 @@ jobs:
             "rocksvision-$v-ubuntu-x64.tar.gz" "rocksvision-$v-windows-x64.zip"; do
             names+=("$f" "$f.sha256")
           done
-          bash scripts/ci/check-release-ready.sh "$REPO" "$TAG" "${names[@]}"
+          rc=0
+          bash scripts/ci/check-release-ready.sh "$REPO" "$TAG" "${names[@]}" || rc=$?
+          case "$rc" in
+            0) plan=upload-only ;;
+            10) plan=create ;;
+            *) exit "$rc" ;;
+          esac
+          echo "plan=$plan" >>"$GITHUB_OUTPUT"
       - name: Run summary (mode)
+        if: steps.mode.outputs.proceed == 'true'
         env:
+          REF_TYPE: ${{ github.ref_type }}
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref_name }}
-          TAG: ${{ github.event.release.tag_name }}
           SHA: ${{ steps.src.outputs.sha }}
+          PLAN: ${{ steps.plan.outputs.plan }}
         run: |
-          if [ "$EVENT" = release ]; then
-            mode="Release packages (upload to published release $TAG)"
-            note="Builds commit $SHA of tag $TAG on all four platforms; uploads the eight assets to that release only after all four pass. Never overwrites an asset."
+          if [ "$REF_TYPE" = tag ]; then
+            mode="Release packages (build, then create or upload release $REF)"
+            case "$PLAN" in
+              create) what="no release exists yet: CREATE release $REF (minimal notes) with the eight assets" ;;
+              *) what="release $REF exists: UPLOAD the eight assets only (its title and notes are never edited)" ;;
+            esac
+            note="Trigger: $EVENT. Builds commit $SHA of tag $REF on all four platforms; only after all four pass: $what (decided again right before the write). Never overwrites an asset."
           else
             mode="Build test packages (artifacts only, no release)"
             note="Builds ref $REF at $SHA on all four platforms; 7-day artifacts only. No release is created, read or changed."
           fi
           echo "$mode"
+          echo "$note"
           printf '## %s\n\n%s\n' "$mode" "$note" >>"$GITHUB_STEP_SUMMARY"
 
   build:
     needs: validate
-    if: github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
-    name: ${{ github.event_name == 'release' && 'Release packages' || 'Build test packages' }} / ${{ matrix.platform }} (${{ matrix.runner }}; build, cargo test, CLI smoke)
+    if: >-
+      github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv' &&
+      needs.validate.outputs.proceed == 'true'
+    name: ${{ github.ref_type == 'tag' && 'Release packages' || 'Build test packages' }} / ${{ matrix.platform }} (${{ matrix.runner }}; build, cargo test, CLI smoke)
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -234,13 +286,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Runs only when validate AND all four matrix builds succeeded (implicit success() of needs).
   release-assets:
     needs: [validate, build]
     if: >-
-      github.event_name == 'release' &&
+      github.ref_type == 'tag' &&
+      needs.validate.outputs.proceed == 'true' &&
       github.repository == 'ta2ldv/rocksvision' &&
       github.actor == 'ta2ldv' && github.triggering_actor == 'ta2ldv'
-    name: Release packages / upload to published release ${{ github.event.release.tag_name }}
+    name: Release packages / ${{ needs.validate.outputs.plan == 'create' && 'create release' || 'upload to existing release' }} ${{ github.ref_name }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -257,7 +311,7 @@ jobs:
           merge-multiple: true
       - name: Verify the eight release files
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           v=${TAG#v}
           cd release-assets
@@ -269,22 +323,16 @@ jobs:
             n=$((n + 2))
           done
           [ "$(find . -type f | wc -l)" -eq "$n" ] || { echo "error: unexpected extra files:" >&2; ls -la >&2; exit 1; }
-      # The readiness check runs again in the SAME step, immediately before the upload (smallest
-      # window). No --clobber: gh refuses an asset name that already exists (to verify on the first
-      # real run; the check already fails in that case). Never creates a release. A failure part
-      # way through leaves the already uploaded assets; a retry then stops at the check (recovery:
-      # docs/BUILD.md "Recovery after a partial upload").
-      - name: Re-check release ready, then upload the eight assets (no overwrite)
+      # publish-release.sh re-checks tag commit and release state in the SAME step, right before
+      # the write (decided again here, not taken from the validate plan: a release may have been
+      # created in between). Absent -> gh release create --verify-tag + assets; present ->
+      # gh release upload (no --clobber, title/notes untouched); otherwise stop. Then verifies all
+      # eight assets are attached. A failure part way leaves what was uploaded; a retry stops at
+      # the check (recovery: docs/BUILD.md "Recovery after a partial upload").
+      - name: Re-check, then create the release or upload to the existing one (no overwrite)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          names=()
-          for f in release-assets/*; do names+=("${f##*/}"); done
-          bash scripts/ci/check-release-ready.sh "$REPO" "$TAG" "${names[@]}"
-          gh release upload "$TAG" --repo "$REPO" release-assets/*
-          {
-            printf '## Release packages: uploaded to %s\n\n' "$TAG"
-            printf -- '- %s\n' "${names[@]}"
-          } >>"$GITHUB_STEP_SUMMARY"
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ needs.validate.outputs.sha }}
+        run: bash scripts/ci/publish-release.sh "$REPO" "$TAG" "$SHA" release-assets

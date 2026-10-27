@@ -34,7 +34,6 @@ pub struct DiagLine {
 /// (`Field::untrusted`, status Invalid) and its meaning.
 pub const UNTRUSTED_WORD: &str = "Untrusted";
 pub const UNTRUSTED_MEANING: &str = "Untrusted: decoded from a block whose checksum failed; not trustworthy.";
-
 /// Short count line for a node whose own status does not show its failures, e.g.
 /// "1 truncated" or "2 invalid · 1 truncated". None without failures.
 pub fn failure_counts(fails: &[NodeFailure]) -> Option<(Status, String)> {

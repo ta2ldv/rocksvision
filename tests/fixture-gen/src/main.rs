@@ -1,6 +1,6 @@
 //! RocksVision fixture generator (RocksDB 10.4.2 via rocksdb 0.24.0 / librocksdb-sys 0.17.3).
 //!
-//! Usage: fixture-gen examples <EXAMPLES_DIR> | examples-verify <EXAMPLES_DIR> <SCRATCH> | --verify <FIXTURES> <SCRATCH> | [OUT_DIR]   (default: ../fixtures relative to the crate dir)
+//! Usage: fixture-gen large-sst|large-wal <DIR> --mb N | examples <EXAMPLES_DIR> | examples-verify <EXAMPLES_DIR> <SCRATCH> | --verify <FIXTURES> <SCRATCH> | [OUT_DIR]   (default: ../fixtures relative to the crate dir)
 //! Deletes and recreates OUT_DIR, writes all cases, MANIFEST.md and SHA256SUMS.
 //! Keys/values are deterministic; file bytes are NOT guaranteed identical across runs
 //! (DB id/session id, creation time, OPTIONS file timestamps). The committed files plus
@@ -1115,8 +1115,147 @@ fn large(out: &Path) -> R<()> {
     Ok(())
 }
 
+/// Deterministic incompressible bytes (splitmix64, fixed seed) so NoCompression/WAL size equals on-disk size.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn bytes(&mut self, n: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(n + 8);
+        while v.len() < n {
+            v.extend_from_slice(&self.next().to_le_bytes());
+        }
+        v.truncate(n);
+        v
+    }
+}
+
+fn sha256_file(p: &Path) -> R<String> {
+    let mut f = fs::File::open(p)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// `fixture-gen large-sst <OUT_DIR> --mb N`: `<OUT_DIR>/large-sst.sst` of >= N MiB (NOT a committed fixture).
+/// NoCompression, block_size 4096, no filter, seeded incompressible 1000 B values, ascending keys `lkey-NNNNNNNNN`.
+/// Stops as soon as `SstFileWriter::file_size()` reaches N MiB. Prints bytes, entries, SHA-256.
+fn large_sst(out: &Path, mb: u64) -> R<()> {
+    fs::create_dir_all(out)?;
+    let mut bbo = BlockBasedOptions::default();
+    bbo.set_block_size(4096);
+    let mut o = Options::default();
+    o.set_compression_type(DBCompressionType::None);
+    o.set_block_based_table_factory(&bbo);
+    let p = out.join("large-sst.sst");
+    let _ = fs::remove_file(&p);
+    let mut w = SstFileWriter::create(&o);
+    w.open(&p)?;
+    let mut rng = Rng(0x5253_5F53_5354_0001);
+    let target = mb << 20;
+    let mut n = 0u64;
+    while w.file_size() < target {
+        w.put(format!("lkey-{n:09}"), rng.bytes(1000))?;
+        n += 1;
+    }
+    w.finish()?;
+    println!("large-sst: {} bytes={} entries={} compression=none block_size=4096 sha256={}", p.display(), fs::metadata(&p)?.len(), n, sha256_file(&p)?);
+    Ok(())
+}
+
+/// `fixture-gen large-wal <OUT_DIR> --mb N`: `<OUT_DIR>/large-wal.log`, a real RocksDB WAL of >= N MiB written by the engine
+/// (WAL on, memtable 1 GiB so nothing is flushed, no recycling). Every batch = 8 Puts of seeded 1000 B values (key `wk-NNNNNNNNN`);
+/// every 50th batch is one 100 KiB Put (forces FIRST/MIDDLE/LAST fragments). Checks size every 64 batches.
+/// Afterwards a COPY of the DB dir is reopened (WAL recovery) and every key is counted/compared.
+fn large_wal(out: &Path, mb: u64) -> R<()> {
+    fs::create_dir_all(out)?;
+    let db_dir = out.join("large-wal-db");
+    let _ = fs::remove_dir_all(&db_dir);
+    let mut o = Options::default();
+    o.create_if_missing(true);
+    o.set_write_buffer_size(1 << 30);
+    o.set_max_write_buffer_number(2);
+    o.set_disable_auto_compactions(true);
+    o.set_recycle_log_file_num(0);
+    let target = mb << 20;
+    let (mut batches, mut puts) = (0u64, 0u64);
+    let mut rng = Rng(0x5253_5F57_414C_0001);
+    let mut logs;
+    {
+        let db = DB::open(&o, &db_dir)?;
+        loop {
+            let mut b = WriteBatch::default();
+            if batches % 50 == 49 {
+                b.put(format!("wk-{puts:09}"), rng.bytes(100 * 1024));
+                puts += 1;
+            } else {
+                for _ in 0..8 {
+                    b.put(format!("wk-{puts:09}"), rng.bytes(1000));
+                    puts += 1;
+                }
+            }
+            db.write(b)?;
+            batches += 1;
+            if batches % 64 == 0 {
+                db.flush_wal(false)?;
+                let sz: u64 = fs::read_dir(&db_dir)?.filter_map(|e| e.ok()).filter(|e| e.path().extension().map(|x| x == "log").unwrap_or(false)).map(|e| e.metadata().map(|m| m.len()).unwrap_or(0)).sum();
+                if sz >= target {
+                    break;
+                }
+            }
+        }
+        db.flush_wal(true)?;
+    }
+    logs = fs::read_dir(&db_dir)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map(|x| x == "log").unwrap_or(false)).collect::<Vec<_>>();
+    logs.sort();
+    if logs.len() != 1 {
+        return Err(format!("expected exactly 1 WAL, found {logs:?}").into());
+    }
+    let dst = out.join("large-wal.log");
+    fs::copy(&logs[0], &dst)?;
+    // Validity: recover a copy through the engine and compare key count.
+    let chk = out.join("large-wal-check");
+    let _ = fs::remove_dir_all(&chk);
+    copy_dir(&db_dir, &chk)?;
+    let mut ro = Options::default();
+    ro.create_if_missing(false);
+    let seen = {
+        let db = DB::open(&ro, &chk)?;
+        db.iterator(rocksdb::IteratorMode::Start).count() as u64
+    };
+    fs::remove_dir_all(&chk)?;
+    fs::remove_dir_all(&db_dir)?;
+    println!("large-wal: {} bytes={} batches={} puts={} recovered_keys={} ok={} sha256={}", dst.display(), fs::metadata(&dst)?.len(), batches, puts, seen, seen == puts, sha256_file(&dst)?);
+    if seen != puts {
+        return Err("recovered key count mismatch".into());
+    }
+    Ok(())
+}
+
+fn mb_arg(args: &[String]) -> u64 {
+    args.iter().position(|a| a == "--mb").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(100)
+}
+
 fn main() -> R<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s == "large-sst").unwrap_or(false) {
+        return large_sst(Path::new(&args[2]), mb_arg(&args));
+    }
+    if args.get(1).map(|s| s == "large-wal").unwrap_or(false) {
+        return large_wal(Path::new(&args[2]), mb_arg(&args));
+    }
     if args.get(1).map(|s| s == "examples").unwrap_or(false) {
         return examples::run(Path::new(&args[2]));
     }

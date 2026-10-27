@@ -4,8 +4,8 @@
 use super::{btn, btn_sized, chip, chip_word, status_meaning, status_text, strong, table_style};
 use crate::app::diagnosis;
 use crate::app::{Action, AppState, CopyKind};
-use crate::model::{ColumnRole, NodeKind, Status};
-use crate::ui::layout::{column_width, plan_columns, table_need_h, LAYOUT, STATUS_ICON_WIDTH};
+use crate::model::{ColumnRole, NodeKind, Status, NOT_CHECKED};
+use crate::ui::layout::{column_width, plan_columns, status_column_width, table_need_h, LAYOUT};
 use crate::ui::menu;
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
@@ -14,6 +14,22 @@ use egui_extras::{Column as TCol, TableBuilder};
 /// Table body rows that stay visible at the minimum window (900×700): the byte pane shrinks
 /// first (see `ui::center`).
 pub const TABLE_MIN_ROWS: f32 = 4.0;
+
+/// Every word a Status cell shows: the legend statuses with their glyph, "Not checked" and
+/// "✖ Untrusted".
+pub fn status_words() -> Vec<String> {
+    let mut v: Vec<String> = super::LEGEND.iter().map(|s| format!("{} {}", s.symbol(), s.label())).collect();
+    v.push(NOT_CHECKED.to_string());
+    v.push(format!("{} {}", Status::Invalid.symbol(), diagnosis::UNTRUSTED_WORD));
+    v
+}
+
+/// Width (points) of the widest status word in the current body font.
+pub fn widest_status_word(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    status_words().into_iter().map(|w| ui.fonts_mut(|f| f.layout_no_wrap(w, font.clone(), color).size().x)).fold(0.0, f32::max)
+}
 
 /// egui temp-data key: height the records panel needs above its table with its notes at full
 /// height (title, location, notes, separator, column toggle), from the last frame.
@@ -26,10 +42,18 @@ fn post_id() -> egui::Id {
     egui::Id::new("records_post_notes")
 }
 
-/// `scroll` is the one-shot "scroll this row into view" request taken from the app state.
-pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize>) -> Vec<Action> {
+/// `scroll` is the one-shot "scroll this row into view" request taken from the app state (row,
+/// centered?).
+pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usize, bool)>) -> Vec<Action> {
     let mut acts = Vec::new();
     let top_y = ui.cursor().top();
+    // F3: after a zoom, split or window resize the selected row is brought into view again
+    // (minimal scroll), so it is never left outside the table or under its header.
+    let geo_id = egui::Id::new("records_geometry");
+    let geo = [ui.available_width(), ui.available_height(), ui.ctx().zoom_factor()];
+    let resized = ui.ctx().data(|d| d.get_temp::<[f32; 3]>(geo_id)).is_some_and(|g| g != geo);
+    ui.ctx().data_mut(|d| d.insert_temp(geo_id, geo));
+    let scroll = scroll.or_else(|| st.selection().row().filter(|_| resized).map(|r| (r, false)));
     table_style(ui);
     let doc = st.session();
     let find = st.search();
@@ -187,7 +211,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
     // icon-only; Offset keeps 10 monospace characters. "+N columns" brings them back.
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
     let mono_w = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
-    let width_of = |r: ColumnRole| if r == ColumnRole::Offset { column_width(r).max(10.0 * mono_w + 8.0) } else { column_width(r) };
+    // Status keeps its widest word ("Not checked", "✂ Truncated" …) at every zoom (C2 GUI-1).
+    let status_w = status_column_width(widest_status_word(ui));
+    let width_of = |r: ColumnRole| match r {
+        ColumnRole::Offset => column_width(r).max(10.0 * mono_w + 8.0),
+        ColumnRole::Status => status_w,
+        _ => column_width(r),
+    };
     let roles: Vec<ColumnRole> = view.columns.iter().map(|c| c.role).collect();
     let avail_cols = ui.available_width() - ui.spacing().scroll.allocated_width();
     let plan = plan_columns(&roles, avail_cols, st.prefs().all_columns(), &width_of, ui.spacing().item_spacing.x);
@@ -212,7 +242,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
     order.extend((1..ncols).filter(|i| Some(*i) != status_idx));
     order.retain(|&i| plan.shown[i]);
     let ncols = order.len();
-    let col_w = |ci: usize| if Some(ci) == status_idx && plan.status_icon { STATUS_ICON_WIDTH } else { width_of(view.columns[ci].role) };
+    let col_w = |ci: usize| width_of(view.columns[ci].role);
     let nrows = view.rows.len();
     let mut clicked = None;
     let mut dbl = None;
@@ -248,14 +278,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
         let body_clip = std::cell::Cell::new(egui::Rect::NOTHING);
         let mut tb = TableBuilder::new(ui).id_salt(("tbl", &salt, epoch)).striped(true).sense(egui::Sense::click()).resizable(true).cell_layout(egui::Layout::left_to_right(egui::Align::Center));
         for (pos, &ci) in order.iter().enumerate() {
-            let c = &view.columns[ci];
-            let _ = c;
-            let min = if Some(ci) == status_idx && plan.status_icon { STATUS_ICON_WIDTH.min(LAYOUT.column_min) } else { LAYOUT.column_min };
+            // Status never narrower than its widest word (also when resized by hand).
+            let min = if Some(ci) == status_idx { status_w } else { LAYOUT.column_min };
             let col = if pos == rem_pos { TCol::remainder().at_least(LAYOUT.remainder_min).clip(true) } else { TCol::initial(col_w(ci)).at_least(min).resizable(true).clip(true) };
             tb = tb.column(col);
         }
-        if let Some(r) = scroll.filter(|r| *r < nrows) {
-            tb = tb.scroll_to_row(r, Some(egui::Align::Center));
+        if let Some((r, center)) = scroll.filter(|(r, _)| *r < nrows) {
+            tb = tb.scroll_to_row(r, center.then_some(egui::Align::Center));
         }
         tb.header(header_h, |mut h| {
             for &ci in &order {
@@ -300,9 +329,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                         cell = "—";
                     }
                     let full_cell = cell.to_string();
-                    if Some(ci) == status_idx && plan.status_icon {
-                        cell = r.field.status.symbol();
-                    }
+                    // Not checked: no glyph and no status colour (design A2).
+                    let not_checked = Some(ci) == status_idx && r.field.not_checked.is_some();
                     row.col(|ui| {
                         if pos == 0 {
                             let c = ui.clip_rect();
@@ -314,7 +342,9 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                             ui.painter().rect_filled(egui::Rect::from_min_size(rr.left_top() - egui::vec2(4.0, 0.0), egui::vec2(LAYOUT.selected_stripe, rr.height())), 0.0, tok.p.sel_edge);
                         }
                         let mut t = RichText::new(cell).color(tok.p.text);
-                        if Some(ci) == status_idx {
+                        if not_checked {
+                            t = t.color(tok.p.text_muted);
+                        } else if Some(ci) == status_idx {
                             t = t.color(tok.status(r.field.status));
                         }
                         if pos == 0 && matches.contains(&i) {
@@ -326,6 +356,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<usize
                         }
                         let tip = if Some(ci) == status_idx && r.field.untrusted {
                             diagnosis::UNTRUSTED_MEANING.to_string()
+                        } else if let Some(d) = r.field.not_checked.as_ref().filter(|_| not_checked) {
+                            d.clone()
                         } else if no_bytes {
                             "No bytes in the file (derived, inferred, default or metadata value)".to_string()
                         } else {

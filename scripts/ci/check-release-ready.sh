@@ -1,18 +1,36 @@
 #!/usr/bin/env bash
-# CI gate for release uploads (.github/workflows/release-build.yml, "Release packages" mode):
-# the release is ready to receive assets when it EXISTS, is PUBLISHED (not draft), is NOT
-# IMMUTABLE, and NONE of the given asset names is attached yet (assets are never overwritten).
-# Renamed from check-release-absent.sh (task 0006): it never checked that the release was absent.
+# CI gate for the release step of .github/workflows/release-build.yml ("Release packages": a
+# pushed tag or a manual run on a tag ref). Read-only (GET requests only); fail-closed.
+#
 # Usage: GH_TOKEN=... scripts/ci/check-release-ready.sh <owner/repo> <tag> <asset-name>...
-# Exit: 0 ready; 1 release missing/draft/immutable, immutability not verifiable (no boolean
-# `immutable` field) or an asset name exists; 2 usage/setup;
-# 3 API/network/unparsable answer (fail-closed: 401/403, 5xx, rate limit, bad JSON). The log
-# says which.
+#   Decides the release path for <tag>:
+#   exit 0  PRESENT: a published (non-draft) release exists, its REST answer says
+#           "immutable": false and none of the asset names is attached -> UPLOAD-ONLY path
+#           (the existing release's title/notes are never edited)
+#   exit 10 ABSENT: no release (published, or draft visible to the token) for <tag> -> CREATE path
+#   exit 1  NOT USABLE: a draft release for <tag>, immutable true, immutability not verifiable
+#           (no boolean `immutable` field), or an asset name already exists (never overwritten)
+#   exit 2  usage/setup
+#   exit 3  API/network/unparsable answer (401/403, 5xx, rate limit, bad JSON, inconsistency)
+#
+# Usage: GH_TOKEN=... scripts/ci/check-release-ready.sh --verify-uploaded <owner/repo> <tag> <asset-name>...
+#   After the upload: exit 0 when the release is published (not draft) and EVERY asset name is
+#   attached with state "uploaded"; 1 when not; 2 usage; 3 API/network error.
+#
+# Drafts: GET releases/tags/<tag> never returns drafts, so a 404 is followed by a paginated list
+# of all releases. Drafts are listed only for tokens with push access; a read-only token (the
+# validate job) can therefore report ABSENT for a draft, the write token of the release job sees
+# it and exits 1.
 set -euo pipefail
+mode=ready
+if [ "${1:-}" = --verify-uploaded ]; then
+  mode=verify
+  shift
+fi
 repo=${1:-}
 tag=${2:-}
 [ -n "$repo" ] && [ -n "$tag" ] && [ "$#" -ge 3 ] || {
-  echo "usage: check-release-ready.sh <owner/repo> <tag> <asset-name>..." >&2
+  echo "usage: check-release-ready.sh [--verify-uploaded] <owner/repo> <tag> <asset-name>..." >&2
   exit 2
 }
 shift 2
@@ -41,13 +59,60 @@ get() {
   printf '%s' "$code"
 }
 
+# paginate <url-with-?> <out-file>: appends every element of every page (JSON lines) to out-file.
+paginate() {
+  local page=1 code n
+  : >"$2"
+  while :; do
+    code=$(get "$1&per_page=100&page=$page")
+    if [ "$code" != 200 ]; then
+      echo "error: GitHub API answered HTTP $code for $1 (page $page); failing closed" >&2
+      exit 3
+    fi
+    n=$(jq 'if type == "array" then length else error("not an array") end' "$tmp/body") || {
+      echo "error: unexpected list response for $1 (page $page); failing closed" >&2
+      exit 3
+    }
+    jq -c '.[]' "$tmp/body" >>"$2"
+    [ "$n" -eq 100 ] || break
+    page=$((page + 1))
+    [ "$page" -le 20 ] || {
+      echo "error: more than 2000 entries listed for $1; failing closed" >&2
+      exit 3
+    }
+  done
+}
+
 # 1) The published release for the tag (this endpoint never returns drafts).
 code=$(get "$api/repos/$repo/releases/tags/$tag")
 case "$code" in
   200) ;;
   404)
-    echo "error: no published release for $tag (HTTP 404); this workflow only adds assets to an existing published release" >&2
-    exit 1
+    if [ "$mode" = verify ]; then
+      echo "error: no published release for $tag after the upload step" >&2
+      exit 1
+    fi
+    paginate "$api/repos/$repo/releases?" "$tmp/releases"
+    match=$(jq -rs --arg t "$tag" 'map(select(.tag_name == $t))
+      | if length == 0 then "none" elif any(.[]; .draft != false) then "draft" else "published" end' \
+      "$tmp/releases") || {
+      echo "error: unexpected release list entries; failing closed" >&2
+      exit 3
+    }
+    case "$match" in
+      none)
+        echo "release $tag: ABSENT (no published or visible draft release) -> create path"
+        exit 10
+        ;;
+      draft)
+        echo "error: a DRAFT release for $tag exists; this workflow neither publishes nor edits drafts (publish it in the UI, or delete it), stopping" >&2
+        exit 1
+        ;;
+      *)
+        echo "error: releases/tags/$tag answered 404 but the release list has a non-draft entry for it; failing closed" >&2
+        exit 3
+        ;;
+    esac
     ;;
   *)
     echo "error: GitHub API answered HTTP $code for releases/tags/$tag (permission, rate limit or server error); failing closed" >&2
@@ -62,44 +127,44 @@ if [ "$(jq -r '.draft' "$tmp/body")" != false ]; then
   echo "error: release for $tag is a draft, not published; stopping" >&2
   exit 1
 fi
-# Immutable releases (GitHub setting): assets cannot be added after publication. Fail closed:
-# only an explicit `"immutable": false` passes; true -> refuse, missing/other -> cannot verify.
-# REST field name `immutable` is to be confirmed on the first real release run.
-case "$(jq -r 'if has("immutable") then .immutable | tostring else "missing" end' "$tmp/body")" in
-  false) ;;
-  true)
-    echo "error: release $tag is immutable; assets cannot be uploaded after publication (turn immutable releases off for this flow)" >&2
-    exit 1
-    ;;
-  *)
-    echo "error: cannot verify whether release $tag is immutable (no boolean 'immutable' field in the API answer); stopping. Check the release's/repository's immutable releases setting (must be OFF) and the REST field name" >&2
-    exit 1
-    ;;
-esac
 id=$(jq -r '.id' "$tmp/body")
+if [ "$mode" = ready ]; then
+  # Immutable releases (GitHub setting): assets cannot be added after publication. Fail closed:
+  # only an explicit `"immutable": false` passes; true -> refuse, missing/other -> cannot verify.
+  # Field name confirmed 2026-10-27 (GET releases/tags/v0.1.1 answered "immutable": false).
+  case "$(jq -r 'if has("immutable") then .immutable | tostring else "missing" end' "$tmp/body")" in
+    false) ;;
+    true)
+      echo "error: release $tag is immutable; assets cannot be uploaded after publication (turn immutable releases off, or let the workflow create the release)" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: cannot verify whether release $tag is immutable (no boolean 'immutable' field in the API answer); stopping" >&2
+      exit 1
+      ;;
+  esac
+fi
 echo "published release for $tag: found (id $id)"
 
-# 2) Existing assets of that release (paginated); fail if any wanted name is already present.
-: >"$tmp/names"
-page=1
-while :; do
-  code=$(get "$api/repos/$repo/releases/$id/assets?per_page=100&page=$page")
-  if [ "$code" != 200 ]; then
-    echo "error: GitHub API answered HTTP $code listing assets (page $page); failing closed" >&2
-    exit 3
-  fi
-  n=$(jq 'if type == "array" then length else error("not an array") end' "$tmp/body") || {
-    echo "error: unexpected asset list response (page $page); failing closed" >&2
-    exit 3
-  }
-  jq -r '.[].name' "$tmp/body" >>"$tmp/names"
-  [ "$n" -eq 100 ] || break
-  page=$((page + 1))
-  [ "$page" -le 20 ] || {
-    echo "error: more than 2000 assets listed; failing closed" >&2
-    exit 3
-  }
-done
+# 2) Existing assets of that release (paginated).
+paginate "$api/repos/$repo/releases/$id/assets?" "$tmp/assets"
+jq -r '.name' "$tmp/assets" >"$tmp/names" || {
+  echo "error: unexpected asset list entries; failing closed" >&2
+  exit 3
+}
+if [ "$mode" = verify ]; then
+  jq -r 'select(.state == "uploaded") | .name' "$tmp/assets" >"$tmp/uploaded"
+  missing=0
+  for a in "$@"; do
+    grep -Fxq -- "$a" "$tmp/uploaded" || {
+      echo "error: asset $a is not attached (state uploaded) to release $tag" >&2
+      missing=1
+    }
+  done
+  [ "$missing" -eq 0 ] || exit 1
+  echo "release $tag: all $# asset names attached"
+  exit 0
+fi
 clash=0
 for a in "$@"; do
   if grep -Fxq -- "$a" "$tmp/names"; then
@@ -108,4 +173,4 @@ for a in "$@"; do
   fi
 done
 [ "$clash" -eq 0 ] || exit 1
-echo "release $tag: none of the $# asset names exist yet ($(wc -l <"$tmp/names" | tr -d ' ') other assets present)"
+echo "release $tag: PRESENT, none of the $# asset names exist yet ($(wc -l <"$tmp/names" | tr -d ' ') other assets present) -> upload-only path"

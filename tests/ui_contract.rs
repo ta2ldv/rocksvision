@@ -258,16 +258,23 @@ fn backend_panic_answers_with_matching_response_kind() {
     }
 }
 
-// ------------------------------------------------------------------ manual responsiveness helpers
-// RV_WAL=<path> cargo test --release --test ui_contract -- --ignored rv_gen_wal   (512 MiB WAL, needle ZZZ at the end)
+// ------------------------------------------------------------------ manual responsiveness helpers (ignored)
+// Fixture paths/sizes come from the environment; defaults point at the ~100 MB engine fixtures
+// (bash tests/tools/large-fixtures.sh large-wal /private/tmp/rocksvision-large --mb 100).
 mod common;
 
+const LARGE_WAL: &str = "/private/tmp/rocksvision-large/large-wal.log";
+
+/// GENERATOR (asserts nothing): `RV_WAL=<path> [RV_WAL_MB=100] cargo test --release --test ui_contract -- --ignored rv_gen_wal`
+/// writes a synthetic WAL of RV_WAL_MB MiB (default 100; NEVER a hardcoded size), one FULL record per 32 KiB block,
+/// key `key` except `ZZZ` in the last block (value `vv`). RV_WAL is required so it cannot overwrite the engine fixture by accident.
 #[test]
-#[ignore = "manual helper: generates a 512 MiB synthetic WAL at $RV_WAL"]
+#[ignore = "GENERATOR: RV_WAL=<path> [RV_WAL_MB=100] cargo test --release --test ui_contract -- --ignored rv_gen_wal"]
 fn rv_gen_wal() {
     use std::io::Write;
     let p = std::env::var("RV_WAL").expect("RV_WAL");
-    let blocks = 16384u64;
+    let mb: u64 = std::env::var("RV_WAL_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let blocks = (mb << 20) / 32768;
     let mut w = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&p).unwrap());
     for b in 0..blocks {
         let mut pl = Vec::new();
@@ -282,14 +289,36 @@ fn rv_gen_wal() {
         blk[..rec.len()].copy_from_slice(&rec);
         w.write_all(&blk).unwrap();
     }
+    w.flush().unwrap();
+    eprintln!("RV-GEN wrote {p} ({blocks} blocks, {mb} MiB)");
 }
 
+/// Independent reference: first offset of `needle` in `hay` (std only).
+fn naive_find(hay: &[u8], needle: &[u8]) -> Option<u64> {
+    hay.windows(needle.len()).position(|w| w == needle).map(|i| i as u64)
+}
+
+/// ASSERTION + timing: `search_file` on $RV_WAL (default the 100 MB engine WAL) for (1) a key near the end of the file
+/// (RV_NEEDLE, default `wk-000082504`, valid for the engine WAL only) and (2) an absent key. Checks the result against an
+/// independent std scan, that the absent search reports progress up to the file length, and a time bound of 500 ms
+/// (~10 x the measured 43-47 ms full scan of the 105 MB WAL, release build, warm cache, ~2.1-2.3 GiB/s; loose on purpose for a cold cache; the notes in tests/evidence-0015/ are local, the folder is git-ignored). Prints `RV-SEARCH ...` lines.
 #[test]
-#[ignore = "manual helper: times search_file on $RV_WAL"]
+#[ignore = "ASSERTION: [RV_WAL=<path>] [RV_NEEDLE=<present key>] cargo test --release --test ui_contract -- --ignored --nocapture rv_time_search"]
 fn rv_time_search() {
-    let p = PathBuf::from(std::env::var("RV_WAL").expect("RV_WAL"));
-    let t = Instant::now();
-    let hit = rocksvision::jobs::search_file(&p, b"ZZZ\x02vv", 0, false, &|| false, &|_, _| {});
-    eprintln!("RV-SEARCH-END-NEEDLE {:?} -> {hit:?}", t.elapsed());
-    assert!(matches!(hit, Some(Some(_))));
+    let p = PathBuf::from(std::env::var("RV_WAL").unwrap_or_else(|_| LARGE_WAL.into()));
+    let needle = std::env::var("RV_NEEDLE").unwrap_or_else(|_| "wk-000082504".into()).into_bytes();
+    let bytes = std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    let len = bytes.len() as u64;
+    let want = naive_find(&bytes, &needle).expect("RV_NEEDLE must occur in the file");
+    for (label, n, expect) in [("present-near-end", needle.clone(), Some(Some(want))), ("absent", b"\x00no-such-key-0015".to_vec(), Some(None))] {
+        let scanned = std::sync::atomic::AtomicU64::new(0);
+        let t = Instant::now();
+        let hit = rocksvision::jobs::search_file(&p, &n, 0, false, &|| false, &|d, _| scanned.store(d, std::sync::atomic::Ordering::Relaxed));
+        let wall = t.elapsed();
+        let sc = scanned.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!("RV-SEARCH {label}: {wall:?} result={hit:?} progress_bytes={sc} of {len} ({:.1} MiB/s)", len as f64 / 1048576.0 / wall.as_secs_f64());
+        assert_eq!(hit, expect, "{label}");
+        assert!(sc + (1 << 20) >= if label == "absent" { len } else { want }, "{label}: progress {sc} B did not cover the scanned range");
+        assert!(wall < Duration::from_millis(500), "{label}: {wall:?}");
+    }
 }

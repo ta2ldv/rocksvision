@@ -9,10 +9,10 @@ use super::actions::{Action, CopyKind, Effect, Panel, RowMove};
 use super::hex::PageState;
 use super::job_state::{CopyReply, JobState};
 use super::jobs::{self, CopyJob, Outcome, Request, Response, SelectHint, Tagged, ViewTarget, Worker};
-use super::provenance::{exact_file_ranges, field_at};
+use super::provenance::{self, exact_file_ranges, field_at};
 use super::search::SearchState;
-use super::selection::{SelOrigin, SelSnapshot, SelectionState};
-use super::session::DocumentSession;
+use super::selection::{SelOrigin, SelectionState};
+use super::session::{DocumentSession, Here, HistEntry};
 use super::view_prefs::ViewPreferences;
 use crate::limits::LIMITS;
 use crate::model::*;
@@ -28,8 +28,8 @@ struct PendingSel {
     hint: Option<SelectHint>,
     /// Origin of a navigation, for the structure card ("Referenced from").
     via: Option<String>,
-    /// Back: the saved selection and byte-view position to restore as they were.
-    restore: Option<(SelSnapshot, Space, u64)>,
+    /// Back: the saved selection, byte-view position and Go-to text to restore as they were.
+    restore: Option<Here>,
 }
 
 impl PendingSel {
@@ -49,8 +49,9 @@ mod state_tests;
 /// One-shot scroll requests for the UI (taken once per frame).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScrollRequest {
-    /// Records table row to bring into view.
-    pub row: Option<usize>,
+    /// Records table row to bring into view, and whether to center it (a jump) or scroll
+    /// minimally (row keys).
+    pub row: Option<(usize, bool)>,
     /// Byte offset to bring into view in the hex rows.
     pub hex: Option<u64>,
     /// Tree node to bring into view (a reveal).
@@ -82,11 +83,34 @@ pub struct AppState {
     jobs: JobState,
     view_prefs: ViewPreferences,
     pending_sel: Option<PendingSel>,
+    /// Ownership of the view request in flight. Recorded whenever a view is already shown; a
+    /// reply whose epoch is no longer current (newer selection, navigation or Back) is discarded
+    /// entirely — neither the view nor the selection is replaced, and the history is put back as
+    /// it was. A file change is covered by the generation.
+    view_owner: Option<ViewOwner>,
+}
+
+/// The view request in flight: its job id, the selection epoch at the request and what it did
+/// to the history (undone when the reply is dropped as overtaken).
+#[derive(Debug)]
+struct ViewOwner {
+    req: u64,
+    epoch: u64,
+    history: HistoryChange,
+}
+
+#[derive(Debug)]
+enum HistoryChange {
+    None,
+    /// The request pushed the source view (Navigate, tree click): pop it again.
+    Pushed,
+    /// Back popped this entry: push it back.
+    Popped(Box<HistEntry>),
 }
 
 impl AppState {
     pub fn new(worker: Worker) -> Self {
-        AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new(), pending_sel: None }
+        AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new(), pending_sel: None, view_owner: None }
     }
 
     /// Test helper: a state with an idle worker, for UI tests (panels never name `app::jobs`).
@@ -195,6 +219,8 @@ impl AppState {
             Action::ShowHelp => self.view_prefs.set_show_help(true),
             Action::CloseHelp => self.view_prefs.set_show_help(false),
             Action::SelectRoot => {
+                // A newer target: an in-flight Locate's pending selection must not reach Root.
+                self.pending_sel = None;
                 if let Some(k) = self.doc.select_node(None) {
                     self.request_view(k, true);
                 }
@@ -220,9 +246,13 @@ impl AppState {
                 if let Some(h) = self.doc.pop_history() {
                     self.doc.select_loaded(&h.kind);
                     let mut p = PendingSel::new(self.sel.epoch(), h.sel.origin, None, None);
-                    p.restore = Some((h.sel, h.hex_space, h.hex_at));
+                    p.restore = Some(Here { sel: h.sel.clone(), hex_space: h.hex_space, hex_at: h.hex_at, goto: h.goto.clone() });
                     self.pending_sel = Some(p);
-                    self.request_view(h.kind, false);
+                    self.request_view(h.kind.clone(), false);
+                    // Overtaken before it arrives: the entry goes back on the stack.
+                    if let Some(o) = self.view_owner.as_mut() {
+                        o.history = HistoryChange::Popped(Box::new(h));
+                    }
                 }
             }
             Action::SelectRow(i) => self.select_row(i),
@@ -241,11 +271,16 @@ impl AppState {
             Action::StepField(forward) => self.step_field(forward),
             Action::StepStructure(forward) => self.step_structure(forward),
             Action::ToggleAllColumns => self.view_prefs.toggle_all_columns(),
-            Action::HexPage(base) => self.load_hex_page(self.doc.hex().space, base),
+            // The Go-to text follows whatever the byte pane moves to (B3, 0015 C3).
+            Action::HexPage(base) => {
+                self.load_hex_page(self.doc.hex().space, base);
+                self.doc.set_goto(format!("0x{base:x}"));
+            }
             Action::HexShowSpace(space) => {
                 let (t, size) = self.doc.space_title(space);
                 self.doc.hex_mut().set_space(space, size, t);
                 self.load_hex_page(space, 0);
+                self.doc.set_goto("0x0".into());
             }
             Action::SetGoto(s) => self.doc.set_goto(s),
             Action::GotoOffset => self.goto_offset(),
@@ -329,6 +364,7 @@ impl AppState {
 
     fn close_file(&mut self) {
         self.doc.close();
+        self.view_owner = None;
         self.jobs.cancel_file_jobs();
         self.jobs.cancel_search();
         self.sel.clear();
@@ -352,11 +388,11 @@ impl AppState {
         self.request(ViewTarget::Node(k), push_history, false);
     }
 
-    /// The current selection and byte-view position (what Back restores).
-    fn here(&self) -> (SelSnapshot, Space, u64) {
+    /// The current selection, byte-view position and Go-to text (what Back restores).
+    fn here(&self) -> Here {
         let hex = self.doc.hex();
-        let at = self.sel.span().filter(|s| s.space == hex.space()).map(|s| s.offset).unwrap_or(hex.page_base());
-        (self.sel.snapshot(), hex.space(), at)
+        let at = self.sel.span().or(self.sel.shown()).filter(|s| s.space == hex.space()).map(|s| s.offset).unwrap_or(hex.page_base());
+        Here { sel: self.sel.snapshot(), hex_space: hex.space(), hex_at: at, goto: self.doc.goto().to_string() }
     }
 
     /// Issues a view request; `reveal` also asks for the canonical tree path.
@@ -365,9 +401,17 @@ impl AppState {
         self.request_with(t, h, reveal);
     }
 
-    fn request_with(&mut self, t: ViewTarget, history: Option<(SelSnapshot, Space, u64)>, reveal: bool) {
+    fn request_with(&mut self, t: ViewTarget, history: Option<Here>, reveal: bool) {
         let req = self.jobs.decode(self.doc.generation(), Request::View { target: t.clone(), reveal });
-        self.doc.request_view(t, req, history);
+        let pushed = self.doc.request_view(t, req, history);
+        // Without a view (file just opened) nothing newer can be overtaken: the view must arrive.
+        let history = if pushed { HistoryChange::Pushed } else { HistoryChange::None };
+        self.view_owner = self.doc.view().is_some().then(|| ViewOwner { req, epoch: self.sel.epoch(), history });
+    }
+
+    /// The view reply `req` was overtaken by a newer selection (its epoch is no longer current).
+    fn view_overtaken(&self, req: u64) -> bool {
+        self.view_owner.as_ref().is_some_and(|o| o.req == req && o.epoch != self.sel.epoch())
     }
 
     /// What is selected now, in words (the origin of a navigation): "entry 2 of Index block
@@ -421,7 +465,8 @@ impl AppState {
         self.doc.hex_mut().begin(req, base);
     }
 
-    /// Moves the hex view to the selected span (switching space / page as needed).
+    /// Moves the hex view to the selected span (switching space / page as needed); the Go-to
+    /// text follows the offset shown (design B3).
     fn show_span(&mut self, span: Option<Span>) {
         if let Some(s) = span {
             if s.space != self.doc.hex().space {
@@ -432,6 +477,7 @@ impl AppState {
                 let base = self.doc.hex().page_base;
                 self.load_hex_page(s.space, base);
             }
+            self.doc.set_goto(format!("0x{:x}", s.offset));
         }
     }
 
@@ -510,6 +556,24 @@ impl AppState {
             Response::OpenFailed(e) => self.doc.open_failed(e),
             Response::Children { node, children, error } => self.doc.children_arrived(node as usize, children, error),
             Response::View { req, kind, view, reveal, select, .. } => {
+                if self.view_overtaken(req) {
+                    // A newer selection was made since the request: the reply is stale and is
+                    // discarded entirely (no view, no selection, no tree reveal).
+                    if self.doc.drop_pending(req) {
+                        self.pending_sel = None;
+                        // The history as it was before the request (Back keeps its level).
+                        match self.view_owner.take().map(|o| o.history) {
+                            Some(HistoryChange::Pushed) => self.doc.undo_push(),
+                            Some(HistoryChange::Popped(h)) => self.doc.push_back(*h),
+                            _ => {}
+                        }
+                        // The tree follows the view that stays (a tree click may have moved it).
+                        if let Some(k) = self.doc.view_kind().cloned() {
+                            self.doc.select_loaded(&k);
+                        }
+                    }
+                    return None;
+                }
                 let Some(kind) = kind else {
                     // Nothing located (or a superseded request): the raw selection stays.
                     if self.doc.drop_pending(req) {
@@ -534,6 +598,7 @@ impl AppState {
                         let len = self.doc.file_len();
                         self.doc.hex_mut().set_space(Space::File, len, FILE_SPACE_TITLE.into());
                         self.load_hex_page(Space::File, 0);
+                        self.doc.set_goto("0x0".into());
                     }
                     match pending {
                         Some(p) => self.apply_pending(p, select, extent),
@@ -658,6 +723,15 @@ impl AppState {
         if origin == SelOrigin::Hex {
             return;
         }
+        if span.is_none() {
+            // No bytes of its own (design B1–B6): the byte view shows the first byte of the
+            // enclosing structure; no span is created, nothing is filled or outlined, no
+            // history entry. Without an honest enclosing range the byte view stays.
+            let at = provenance::byteless_reveal(self.doc.view(), self.doc.hex().space());
+            self.sel.set_shown(at);
+            self.show_span(at);
+            return;
+        }
         match extra.first() {
             Some(f) if self.doc.hex().space == Space::File || self.doc.hex().space != span.map(|s| s.space).unwrap_or(Space::File) => self.show_span(Some(*f)),
             _ => self.show_span(span),
@@ -692,9 +766,10 @@ impl AppState {
     /// field at the byte, else the row with exactly the span, else the structure range. A
     /// navigation without a span moves the byte view to the structure (`extent`).
     fn apply_pending(&mut self, p: PendingSel, select: Option<SelectHint>, extent: Option<Span>) {
-        if let Some((snap, space, at)) = p.restore {
-            // Back: the exact previous selection, in the byte space and position it had.
-            self.sel.restore(snap);
+        if let Some(Here { sel, hex_space: space, hex_at: at, goto }) = p.restore {
+            // Back: the exact previous selection, in the byte space and position it had, and
+            // the Go-to text (design B7).
+            self.sel.restore(sel);
             let known = space == Space::File || self.doc.view().is_some_and(|v| v.spaces.iter().any(|s| s.space == space));
             if known {
                 if space != self.doc.hex().space() {
@@ -705,6 +780,8 @@ impl AppState {
                     let base = self.doc.hex().page_base();
                     self.load_hex_page(space, base);
                 }
+                // Restored only with the byte view it describes.
+                self.doc.set_goto(goto);
             }
             return;
         }

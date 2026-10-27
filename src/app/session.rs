@@ -15,14 +15,24 @@ use std::time::{Instant, SystemTime};
 
 pub const FILE_SPACE_TITLE: &str = "File offsets (physical bytes as stored)";
 
-/// One history step: the view, its selection and the byte-view position (space + the offset
-/// shown), restored together by Back.
+/// One history step: the view, its selection, the byte-view position (space + the offset
+/// shown) and the Go-to text, restored together by Back.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistEntry {
     pub kind: NodeKind,
     pub sel: SelSnapshot,
     pub hex_space: Space,
     pub hex_at: u64,
+    pub goto: String,
+}
+
+/// Where the user is (what Back restores): selection, byte-view space and offset, Go-to text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Here {
+    pub sel: SelSnapshot,
+    pub hex_space: Space,
+    pub hex_at: u64,
+    pub goto: String,
 }
 
 #[derive(Clone, Debug)]
@@ -45,13 +55,23 @@ pub struct TreeNode {
 }
 
 impl TreeNode {
-    /// No status glyph: a group none of whose members was checked yet.
+    /// No status glyph (design A3): a group none of whose members was checked yet, or whose
+    /// checked members are clean while not all were checked.
     pub fn unchecked(&self) -> bool {
-        matches!(self.checked, Some((0, _)))
+        group_glyph(self.status, self.checked).is_none()
     }
-    /// Label with the group coverage suffix (" · not checked" / " · 3 of 64 checked").
+    /// Label with the group coverage after its head ("Data blocks #0–#63 · not checked ·
+    /// [0x0,0x3f780) · 64 blocks"); the same string as the dump and the card title.
     pub fn full_label(&self) -> String {
-        format!("{}{}", self.label, check_suffix(self.checked))
+        with_coverage(&self.label, self.checked)
+    }
+    /// Length (bytes) of the label head that is never truncated: up to and including the
+    /// coverage of a group (design A5); 0 for other nodes.
+    pub fn head_len(&self) -> usize {
+        match (coverage_text(self.checked), self.label.split_once(" · ")) {
+            (Some(cov), Some((head, _))) => head.len() + " · ".len() + cov.len(),
+            _ => 0,
+        }
     }
     /// The one glyph a node shows: the worse of its own status and a problem inside it.
     pub fn shown_status(&self) -> Status {
@@ -59,16 +79,6 @@ impl TreeNode {
             Some(c) if rank(c) > rank(self.status) => c,
             _ => self.status,
         }
-    }
-}
-
-/// Severity order for the single tree glyph (higher is worse).
-fn rank(s: Status) -> u8 {
-    match s {
-        Status::Present | Status::Implicit | Status::NotPresent => 0,
-        Status::Unknown | Status::Unsupported | Status::Limited => 1,
-        Status::Truncated => 2,
-        Status::Invalid => 3,
     }
 }
 
@@ -291,6 +301,8 @@ impl DocumentSession {
         self.history.clear();
         self.tree_scroll = None;
         self.hex = HexState::default();
+        // A new file starts with the Go-to placeholder (design B3).
+        self.goto.clear();
     }
 
     /// File chosen (after `close`): label "opening…" until the decoder answers.
@@ -382,7 +394,8 @@ impl DocumentSession {
     }
 
     /// A group's status from its loaded members (gaps are not members): the worst checked
-    /// status, Present only when every member was checked and Present; then its parent groups.
+    /// status (Present when the checked ones are clean; the glyph rule is `group_glyph`); then
+    /// its parent groups.
     fn aggregate_group(&mut self, node: usize) {
         let mut cur = Some(node);
         while let Some(i) = cur {
@@ -391,12 +404,17 @@ impl DocumentSession {
             }
             let Some(kids) = self.nodes[i].children.clone() else { return };
             let members: Vec<usize> = kids.into_iter().filter(|&k| !matches!(self.nodes[k].kind, NodeKind::SstGap { .. })).collect();
-            let checked: Vec<Status> = members.iter().filter(|&&k| !self.nodes[k].unchecked() && !(self.nodes[k].checked.is_some_and(|(x, y)| x < y))).map(|&k| self.nodes[k].shown_status()).collect();
-            let worst = checked.iter().copied().max_by_key(|s| rank(*s)).unwrap_or(Status::Unknown);
-            let n = members.len() as u64;
-            let x = checked.len() as u64;
+            // Coverage in blocks (0015 C3 UI-6): a listed block is 1 of 1, a sub-group its own
+            // (x, y), so the parent reads "64 of 4096 checked" like the table's `group_check`.
+            // The worst status is taken over every member that shows a glyph, so a problem
+            // inside a partly checked sub-group still shows.
+            let (x, n) = members.iter().fold((0u64, 0u64), |(x, n), &k| match self.nodes[k].checked {
+                Some((a, b)) => (x + a, n + b),
+                None => (x + 1, n + 1),
+            });
+            let worst = members.iter().filter(|&&k| !self.nodes[k].unchecked()).map(|&k| self.nodes[k].shown_status()).max_by_key(|s| rank(*s)).unwrap_or(Status::Present);
             self.nodes[i].checked = Some((x, n));
-            self.nodes[i].status = if x == 0 || (x < n && rank(worst) == 0) { Status::Unknown } else { worst };
+            self.nodes[i].status = if rank(worst) > 0 { worst } else if x == 0 { Status::Unknown } else { Status::Present };
             cur = self.nodes.iter().position(|p| p.children.as_deref().is_some_and(|c| c.contains(&i)));
         }
     }
@@ -460,18 +478,35 @@ impl DocumentSession {
     }
 
     /// Records the view request `req`; with `history` (the current selection and byte-view
-    /// position) the current view is pushed on the history so Back restores all of it.
-    pub(super) fn request_view(&mut self, t: ViewTarget, req: u64, history: Option<(SelSnapshot, Space, u64)>) {
-        if let (Some((sel, hex_space, hex_at)), Some(kind)) = (history, self.view_kind.clone()) {
-            let e = HistEntry { kind, sel, hex_space, hex_at };
+    /// position) the current view is pushed on the history so Back restores all of it. Returns
+    /// true when an entry was pushed (see `undo_push`).
+    pub(super) fn request_view(&mut self, t: ViewTarget, req: u64, history: Option<Here>) -> bool {
+        let mut pushed = false;
+        if let (Some(Here { sel, hex_space, hex_at, goto }), Some(kind)) = (history, self.view_kind.clone()) {
+            let e = HistEntry { kind, sel, hex_space, hex_at, goto };
             if self.history.last() != Some(&e) {
                 self.history.push(e);
+                pushed = true;
             }
             if self.history.len() > LIMITS.history {
                 self.history.remove(0);
             }
         }
         self.pending_view = Some((t, req));
+        pushed
+    }
+
+    /// A view request that pushed its source entry was dropped (overtaken): remove the entry.
+    pub(super) fn undo_push(&mut self) {
+        self.history.pop();
+    }
+
+    /// A Back whose view was dropped (overtaken): its entry goes back on the stack.
+    pub(super) fn push_back(&mut self, e: HistEntry) {
+        self.history.push(e);
+        if self.history.len() > LIMITS.history {
+            self.history.remove(0);
+        }
     }
 
     pub(super) fn pop_history(&mut self) -> Option<HistEntry> {

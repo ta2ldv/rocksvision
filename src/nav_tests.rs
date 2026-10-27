@@ -220,7 +220,8 @@ fn declared_vs_actual_compression_and_property_spans() {
     let declared = v.rows.iter().find(|r| r.field.name.starts_with("Declared compression policy")).unwrap();
     assert!(declared.field.span.is_some() && declared.field.status == Status::Present && declared.field.value.contains("ZSTD"));
     let actual = v.rows.iter().find(|r| r.field.name == "Actual block compression").unwrap();
-    assert!(actual.field.value.contains(" ZSTD") && actual.field.value.contains("data blocks checked"), "{}", actual.field.value);
+    // 0015 A7: reading the trailer type byte is a read, never a check.
+    assert!(actual.field.value.contains(" ZSTD") && actual.field.value.contains("(type byte read for ") && !actual.field.value.contains("checked"), "{}", actual.field.value);
     let entries = v.rows.iter().find(|r| r.field.name == "entries (declared)").unwrap();
     assert_eq!(entries.field.status, Status::Present);
 }

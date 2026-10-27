@@ -13,6 +13,14 @@ pub mod panels;
 pub mod platform;
 pub mod theme;
 
+/// Test helper: runs one headless egui frame and consumes its texture delta (epaint's
+/// `TexturesDelta` asserts on drop with unapplied deltas when debug assertions are on).
+#[cfg(test)]
+pub(crate) fn test_frame(ctx: &egui::Context, input: egui::RawInput, f: impl FnMut(&mut egui::Ui)) {
+    let mut out = ctx.run_ui(input, f);
+    out.textures_delta.clear();
+}
+
 use crate::app::jobs::Worker;
 use crate::app::prefs::Prefs;
 use crate::app::{Action, AppState, Effect, Panel, ZoomFit};
@@ -131,30 +139,37 @@ impl App {
     /// reserves the path-error line. Without it (row planning: records/bytes split) the live
     /// space size and last frame's measured header widths are used.
     fn measured(&self, ui: &egui::Ui, ceiling: bool) -> Measured {
-        let hex = panels::hex::metrics(ui, if ceiling { u64::MAX } else { self.st.session().hex().size() });
-        let rh = self.tok.row_height(ui);
-        let line = ui.text_style_height(&egui::TextStyle::Body);
-        let hex_row = panels::hex::row_height(ui);
-        Measured {
-            nav_min: LAYOUT.left_min,
-            explain_min: LAYOUT.right_min,
-            strip: self.tok.header_height(ui),
-            hex,
-            toolbar_groups: self.mem.toolbar_w.to_vec(),
-            toolbar_gap: ui.spacing().item_spacing.x,
-            toolbar_row_h: self.mem.toolbar_row_h,
-            // Frame (4 pt top/bottom + 1 pt stroke) + the path-error line (`status_text`: one
-            // body line, 1 pt margins, item spacing), reserved whether or not it is shown.
-            toolbar_pad_h: 2.0 * 4.0 + 1.0 + if ceiling { line + 2.0 + ui.spacing().item_spacing.y } else { 0.0 },
-            status_h: self.mem.status_h,
-            records_min_h: self.tok.header_height(ui) + (LAYOUT.records_min_rows - 1.0) * rh + line + ui.text_style_height(&egui::TextStyle::Small) + 2.0 * LAYOUT.center_margin[1],
-            hex_groups: if ceiling { panels::hex::ceiling_groups(ui) } else { self.mem.hex.groups },
-            hex_gap: ui.spacing().item_spacing.x,
-            hex_line_h: self.mem.hex.line_h,
-            hex_ruler_h: hex_row,
-            hex_row_h: hex_row,
-            hex_pad_h: 2.0 * LAYOUT.center_margin[1] + ui.spacing().scroll.allocated_width(),
-        }
+        measure_layout(ui, &self.tok, &self.mem, self.st.session().hex().size(), ceiling)
+    }
+}
+
+/// `App::measured` as a function of the UI memory (shared with the headless ceiling test).
+pub(crate) fn measure_layout(ui: &egui::Ui, tok: &theme::Tokens, mem: &PanelMemory, hex_size: u64, ceiling: bool) -> Measured {
+    let hex = panels::hex::metrics(ui, if ceiling { u64::MAX } else { hex_size });
+    let rh = tok.row_height(ui);
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let hex_row = panels::hex::row_height(ui);
+    Measured {
+        nav_min: LAYOUT.left_min,
+        explain_min: LAYOUT.right_min,
+        strip: tok.header_height(ui),
+        hex,
+        toolbar_groups: mem.toolbar_w.to_vec(),
+        toolbar_gap: ui.spacing().item_spacing.x,
+        toolbar_row_h: mem.toolbar_row_h,
+        // Frame (4 pt top/bottom + 1 pt stroke) + the path-error line (`status_text`: one body
+        // line, 1 pt margins, item spacing), reserved whether or not it is shown.
+        toolbar_pad_h: 2.0 * 4.0 + 1.0 + if ceiling { line + 2.0 + ui.spacing().item_spacing.y } else { 0.0 },
+        status_h: mem.status_h,
+        // Overhead with the notes collapsed + header + 3 table rows (0015 F2): the ceiling and
+        // the split keep them at the minimum height.
+        records_min_h: layout::records_min_h(mem.toolbar_row_h, ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y, tok.header_height(ui), rh, ui.spacing().item_spacing.y, ui.spacing().scroll.allocated_width()),
+        hex_groups: if ceiling { panels::hex::ceiling_groups(ui) } else { mem.hex.groups },
+        hex_gap: ui.spacing().item_spacing.x,
+        hex_line_h: mem.hex.line_h,
+        hex_ruler_h: hex_row,
+        hex_row_h: hex_row,
+        hex_pad_h: 2.0 * LAYOUT.center_margin[1] + ui.spacing().scroll.allocated_width(),
     }
 }
 
@@ -292,6 +307,10 @@ impl eframe::App for App {
         self.dispatch(&ctx, acts);
         let acts = panels::help::show(&ctx, &self.st, &self.tok);
         self.dispatch(&ctx, acts);
+        if self.st.prefs().zoom_fit_pending() {
+            // One over-fit frame seen: measure once more before lowering the zoom.
+            ctx.request_repaint();
+        }
         if self.st.needs_fast_repaint() {
             ctx.request_repaint_after(std::time::Duration::from_millis(LIMITS.busy_repaint_ms));
         }

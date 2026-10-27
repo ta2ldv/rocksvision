@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn ui_glyphs_render_in_bundled_fonts() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        crate::ui::test_frame(&ctx, Default::default(), |_| {});
         for fam in [FontId::proportional(14.0), FontId::monospace(14.0)] {
             let uv = |c: char| ctx.fonts_mut(|f| f.layout_no_wrap(c.to_string(), fam.clone(), Color32::WHITE).rows[0].row.glyphs[0].uv_rect);
             let tofu = uv('◻');
@@ -881,6 +881,38 @@ mod tests {
             chk(t.id, "chip file/data", p.hex_file_space, p.data, 4.5);
             chk(t.id, "chip derived/data", p.hex_derived_space, p.data, 4.5);
         }
+        assert!(fails.is_empty(), "{}", fails.join("\n"));
+    }
+
+    /// 0015 F1: the pairs the status-truth and wrapping changes draw, in every theme: "Not
+    /// checked" (text_muted) on both row stripes and the data fill; a selected unchecked row
+    /// (sel_fg on sel_bg); the tree label with its coverage (text on panel); wrapped monospace
+    /// values, their "…" and the muted derivation on the explain surface; diagnosis links.
+    #[test]
+    fn not_checked_and_wrapped_value_pairs() {
+        let mut fails = Vec::new();
+        for t in THEMES {
+            let p = &t.palette;
+            for (what, fg, bg) in [
+                ("not checked/stripe_a", p.text_muted, p.stripe_a),
+                ("not checked/stripe_b", p.text_muted, p.stripe_b),
+                ("not checked/data", p.text_muted, p.data),
+                // A selected row draws every cell, "Not checked" included, in sel_fg (records.rs
+                // overrides the muted colour), so text_muted never lands on sel_bg (it would be
+                // 1.1–3.1:1 in these themes).
+                ("selected not checked/sel_bg", p.sel_fg, p.sel_bg),
+                ("tree coverage/panel", p.text, p.panel),
+                ("wrapped value and …/explain", p.text, p.explain),
+                ("derivation muted/explain", p.text_muted, p.explain),
+                ("diag link/explain", p.accent_text, p.explain),
+            ] {
+                let r = contrast(fg, bg);
+                if r < 4.5 {
+                    fails.push(format!("{}: {what} = {r:.2} < 4.5", t.id));
+                }
+            }
+        }
+        assert_eq!(THEMES.len(), 6, "Matrix, Amiga Workbench, Amiga Tool Style, XCopy, Wooden, Autistic");
         assert!(fails.is_empty(), "{}", fails.join("\n"));
     }
 

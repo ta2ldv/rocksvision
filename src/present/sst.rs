@@ -3,8 +3,8 @@
 
 use super::common::{bytes_dec_hex, error_view, explained, field_row, of_fields, range, size_row, st_cell, with_error_diag, Location};
 use crate::format::codec::compression_name;
-use crate::format::ikey::{split_ikey, value_type_name as tag_name, MAX_SEQUENCE};
-use crate::limits::{COMPRESSION_SAMPLE, RESTARTS_LISTED, SST_DATA_PAGE as DATA_PAGE, SST_TREE_CHILDREN as TREE_CHILD_CAP};
+use crate::format::ikey::{ikey_meaning, split_ikey, value_type_name as tag_name, MAX_SEQUENCE};
+use crate::limits::{COMPRESSION_SAMPLE, LIST_CHECK_BYTES, RESTARTS_LISTED, SST_DATA_PAGE as DATA_PAGE, SST_TREE_CHILDREN as TREE_CHILD_CAP};
 use crate::model::*;
 use crate::model::{DecodedValue as DV, FieldKind as K, HandleTarget as HT};
 use crate::sst::block::{Block, Entry as BlockEntry};
@@ -67,14 +67,41 @@ fn layout_coverage(l: &PhysLayout) -> String {
     format!("Physical layout: {} structures in file order (Footer last) · {gaps} unaccounted gap(s){bad} · data blocks {} (from index){}", l.items.len(), l.listed_text(), l.note.as_ref().map(|n| format!(" · {n}")).unwrap_or_default())
 }
 
-/// Severity order of statuses (higher is worse), for a group's worst checked member.
-fn rank(s: Status) -> u8 {
-    match s {
-        Status::Present | Status::Implicit | Status::NotPresent => 0,
-        Status::Unknown | Status::Unsupported | Status::Limited => 1,
-        Status::Truncated => 2,
-        Status::Invalid => 3,
+/// Status of a layout row from the check cache only (never reads): status, Status cell, the
+/// "Not checked" derivation, and the derivation of a checked Present block.
+struct RowCheck {
+    status: Status,
+    cell: String,
+    not_checked: Option<String>,
+    note: Option<&'static str>,
+}
+
+/// The handle that places a block of this kind (for the "Not checked" derivation).
+fn handle_source(kind: Option<BlockKind>) -> &'static str {
+    match kind {
+        Some(BlockKind::Data) => "index handle",
+        Some(BlockKind::IndexPartition) => "top-level index handle",
+        Some(BlockKind::FilterPartition) => "partitioned filter index handle",
+        Some(BlockKind::Metaindex) => "footer handle",
+        Some(BlockKind::Index | BlockKind::TopIndex) => "footer/metaindex index handle",
+        _ => "metaindex handle",
     }
+}
+
+/// "Data blocks #0–#63" / "Index partitions @0x…–@0x…": the head of a group's label (what and
+/// first/last member), never truncated in the tree (design A4/A5).
+fn group_head(l: &PhysLayout, first: usize, count: usize) -> String {
+    let (a, z) = (&l.items[first], &l.items[first + count - 1]);
+    let what = match a.block_kind() {
+        Some(BlockKind::Data) => "Data blocks",
+        Some(BlockKind::IndexPartition) => "Index partitions",
+        _ => "Filter partitions",
+    };
+    let ord = |it: &Item| match &it.kind {
+        ItemKind::Block { ordinal: Some(n), .. } => format!("#{n}"),
+        _ => format!("@0x{:x}", it.start),
+    };
+    format!("{what} {}–{}", ord(a), ord(z))
 }
 
 /// Footer facts with explanations and navigation (table/format.cc layouts).
@@ -161,36 +188,38 @@ impl SstInspector {
         }
     }
 
-    fn item_child(&mut self, it: &Item) -> Child {
+    fn item_child(&mut self, it: &Item, budget: &mut u64) -> Child {
         let node = Self::item_node(it);
         let label = self.item_label(it);
         match &it.kind {
             ItemKind::Footer => Child::new(label, node).leaf().status(if self.footer().is_ok() { Status::Present } else { Status::Invalid }).diag(self.footer_diagnostic().cloned()),
             ItemKind::Block { kind: BlockKind::Metaindex, .. } => Child::new(label, node).status(if self.meta().is_ok() { Status::Present } else { Status::Invalid }),
             ItemKind::Block { kind: BlockKind::Meta, name, .. } => Child::new(label, node).status(if is_legacy_filter_name(name) { Status::Unsupported } else { Status::Unknown }),
-            ItemKind::Block { .. } => {
-                let (st, d) = self.block_check(it.handle());
-                Child::new(label, node).status(st).diag(d)
-            }
+            ItemKind::Block { .. } => self.checked_child(Child::new(label, node), it.handle(), budget),
         }
     }
 
-    fn entry_child(&mut self, l: &PhysLayout, e: Entry) -> Child {
+    /// A listed block's child: listing checks it (one bounded read on the decode worker)
+    /// while the listing's byte budget lasts; beyond it the block is listed "not checked"
+    /// (no glyph, coverage 0 of 1) until opened (0015 C3 GUI-5).
+    fn checked_child(&mut self, c: Child, h: Handle, budget: &mut u64) -> Child {
+        let cost = h.size.saturating_add(BLOCK_TRAILER);
+        if self.checked_status(h).is_none() && cost > *budget {
+            return c.status(Status::Unknown).checked((0, 1));
+        }
+        *budget = budget.saturating_sub(cost);
+        let (st, d) = self.block_check(h);
+        c.status(st).diag(d)
+    }
+
+    fn entry_child(&mut self, l: &PhysLayout, e: Entry, budget: &mut u64) -> Child {
         match e {
-            Entry::Item(i) => self.item_child(&l.items[i]),
+            Entry::Item(i) => self.item_child(&l.items[i], budget),
             Entry::Group { first, count } => {
                 let (a, z) = (&l.items[first], &l.items[first + count - 1]);
-                let what = match a.block_kind() {
-                    Some(BlockKind::Data) => "Data blocks",
-                    Some(BlockKind::IndexPartition) => "Index partitions",
-                    _ => "Filter partitions",
-                };
-                let ord = |it: &Item| match &it.kind {
-                    ItemKind::Block { ordinal: Some(n), .. } => format!("#{n}"),
-                    _ => format!("@0x{:x}", it.start),
-                };
                 let (st, c) = self.group_check(l, first, count);
-                Child::new(format!("{what} {}–{} {} · {count} blocks", ord(a), ord(z), range(a.start, z.end())), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }).status(st).checked(c)
+                // The coverage goes after the head at display time (`with_coverage`).
+                Child::new(format!("{} · {} · {count} blocks", group_head(l, first, count), range(a.start, z.end())), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }).status(st).checked(c)
             }
             Entry::Gap { start, end } => Child::new(format!("Unaccounted bytes {} · {} B", range(start, end), end - start), NodeKind::SstGap { start, end }).leaf().status(Status::Unknown),
             Entry::Invalid(i) => {
@@ -200,8 +229,9 @@ impl SstInspector {
         }
     }
 
-    /// Coverage of a group of layout items from blocks already checked (no read): the worst
-    /// checked status (Present only when every member was checked) and (checked, members).
+    /// Coverage of a group of layout items from blocks already checked (cache only, no read):
+    /// the worst checked status (Present when the checked ones are clean; Unknown when none was
+    /// checked) and (checked, members). Which glyph that allows is `group_glyph`.
     fn group_check(&self, l: &PhysLayout, first: usize, count: usize) -> (Status, (u64, u64)) {
         let mut checked = 0u64;
         let mut worst = Status::Present;
@@ -213,8 +243,55 @@ impl SstInspector {
                 }
             }
         }
-        let st = if checked == 0 || (checked < count as u64 && worst == Status::Present) { Status::Unknown } else { worst };
-        (st, (checked, count as u64))
+        (if checked == 0 { Status::Unknown } else { worst }, (checked, count as u64))
+    }
+
+    /// Status of a layout item from the check cache only (never reads): the Footer is Present
+    /// when it decoded at open; a block is its checked status, or Unknown with the "Not
+    /// checked" derivation (design A2/A6/A9).
+    fn item_check(&self, it: &Item) -> RowCheck {
+        if it.block_kind().is_none() {
+            let st = if self.footer().is_ok() { Status::Present } else { Status::Invalid };
+            return RowCheck { status: st, cell: st_cell(st), not_checked: None, note: None };
+        }
+        match self.checked_status(it.handle()) {
+            Some(s) => RowCheck { status: s, cell: st_cell(s), not_checked: None, note: self.check_note(it.handle()) },
+            None => RowCheck {
+                status: Status::Unknown,
+                cell: NOT_CHECKED.into(),
+                not_checked: Some(format!("{NOT_CHECKED}: the {} places this block at {}; its checksum is verified only when the block is opened.", handle_source(it.block_kind()), range(it.start, it.end()))),
+                note: None,
+            },
+        }
+    }
+
+    /// Derivation of a checked Present block (cache only): "checksum verified" only when a
+    /// checksum was actually compared; kNoChecksum / unknown types say so instead.
+    fn check_note(&self, h: Handle) -> Option<&'static str> {
+        (self.checked_status(h) == Some(Status::Present)).then(|| self.present_note(self.checksum_verified(h)))
+    }
+
+    fn present_note(&self, compared: bool) -> &'static str {
+        match (compared, self.footer().map(|f| f.checksum_type)) {
+            (true, _) => CHECKSUM_VERIFIED,
+            (false, Ok(0)) => NO_CHECKSUM,
+            _ => CHECKSUM_NOT_COMPARED,
+        }
+    }
+
+    /// Status of a group row (layout table, root summary) from the cache, and its coverage;
+    /// the "Not checked" derivation when the group shows no glyph (design A3).
+    fn group_row(&self, l: &PhysLayout, first: usize, count: usize) -> (RowCheck, (u64, u64)) {
+        let (st, c) = self.group_check(l, first, count);
+        let row = match group_glyph(st, Some(c)) {
+            Some(g) => {
+                let all_compared = l.items.iter().skip(first).take(count).all(|it| self.checksum_verified(it.handle()));
+                RowCheck { status: g, cell: st_cell(g), not_checked: None, note: (g == Status::Present).then(|| self.present_note(all_compared)) }
+            }
+            None if c.0 == 0 => RowCheck { status: Status::Unknown, cell: NOT_CHECKED.into(), not_checked: Some(format!("{NOT_CHECKED}: none of the {} blocks of this group was checked yet; a block's checksum is verified when it is opened or listed.", c.1)), note: None },
+            None => RowCheck { status: Status::Unknown, cell: format!("{} of {} checked", c.0, c.1), not_checked: Some(format!("{NOT_CHECKED} as a whole: {} of {} blocks of this group were checked (blocks opened or listed so far), none with a problem; the others are verified when opened.", c.0, c.1)), note: None },
+        };
+        (row, c)
     }
 
     /// Diagnostic of a handle that does not address bytes before the footer.
@@ -304,7 +381,8 @@ impl SstInspector {
             NodeKind::Root => self.root_children(cancel),
             NodeKind::SstLayoutGroup { first, count } => {
                 let l = self.layout(cancel);
-                l.group(*first as usize, *count as usize).into_iter().map(|e| self.entry_child(&l, e)).collect()
+                let mut budget = LIST_CHECK_BYTES;
+                l.group(*first as usize, *count as usize).into_iter().map(|e| self.entry_child(&l, e, &mut budget)).collect()
             }
             NodeKind::SstBlock { off, size, kind } => {
                 let h = Handle { offset: *off, size: *size };
@@ -329,11 +407,13 @@ impl SstInspector {
                     let (_, res) = self.block_entries(h, *kind);
                     if let Ok((_, es, _)) = res {
                         let n = es.len();
+                        let mut budget = LIST_CHECK_BYTES;
                         for e in es.iter().take(TREE_CHILD_CAP) {
                             if let Some((th, _, _)) = &e.handle {
-                                let (st, d) = self.block_check(*th);
                                 let it = Item { start: th.offset, size: th.size, trailer: BLOCK_TRAILER, kind: ItemKind::Block { kind: t, name: String::new(), ordinal: None } };
-                                out.push(Child::new(format!("{} ≤ {} ›", self.item_label(&it), self.key_label(&e.key, true)), NodeKind::SstBlock { off: th.offset, size: th.size, kind: t }).status(st).diag(d).role(ChildRole::Reference));
+                                let c = Child::new(format!("{} ≤ {} ›", self.item_label(&it), self.key_label(&e.key, true)), NodeKind::SstBlock { off: th.offset, size: th.size, kind: t });
+                                let c = self.checked_child(c, *th, &mut budget);
+                                out.push(c.role(ChildRole::Reference));
                             }
                         }
                         if n > TREE_CHILD_CAP {
@@ -350,10 +430,12 @@ impl SstInspector {
             NodeKind::SstDataBlocks { skip } => {
                 let (hs, more, _) = self.data_handles(*skip, DATA_PAGE, cancel);
                 let mut out: Vec<Child> = Vec::with_capacity(hs.len() + 1);
+                let mut budget = LIST_CHECK_BYTES;
                 for (i, (h, k)) in hs.iter().enumerate() {
-                    let (st, d) = self.block_check(*h);
                     let it = Item { start: h.offset, size: h.size, trailer: BLOCK_TRAILER, kind: ItemKind::Block { kind: BlockKind::Data, name: String::new(), ordinal: Some(*skip + i as u64) } };
-                    out.push(Child::new(format!("{} ≤ {} ›", self.item_label(&it), self.key_label(k, true)), NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Data }).status(st).diag(d).role(ChildRole::Reference));
+                    let c = Child::new(format!("{} ≤ {} ›", self.item_label(&it), self.key_label(k, true)), NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Data });
+                    let c = self.checked_child(c, *h, &mut budget);
+                    out.push(c.role(ChildRole::Reference));
                 }
                 if more {
                     out.push(Child::new(format!("Next {} data blocks ›", DATA_PAGE), NodeKind::SstDataBlocks { skip: skip + hs.len() as u64 }).role(ChildRole::View));
@@ -370,7 +452,8 @@ impl SstInspector {
         };
         // Physical layout, file order (Footer last); then the views.
         let l = self.layout(cancel);
-        let mut v: Vec<Child> = l.top().into_iter().map(|e| self.entry_child(&l, e)).collect();
+        let mut budget = LIST_CHECK_BYTES;
+        let mut v: Vec<Child> = l.top().into_iter().map(|e| self.entry_child(&l, e, &mut budget)).collect();
         if !l.data_complete {
             v.push(Child::new(format!("Data blocks: {} ({})", l.listed_text(), l.note.clone().unwrap_or_default()), NodeKind::SstDataBlocks { skip: 0 }).role(ChildRole::Absent).status(Status::Limited));
         }
@@ -430,8 +513,11 @@ impl SstInspector {
                 }
             },
             NodeKind::SstProperties => of_fields("Not present", vec![Field::new("structure", None, "This optional structure is not listed in the metaindex.").status(if self.meta().is_ok() { Status::NotPresent } else { Status::Unknown })]),
+            // Opening a block (or a part of it) is its single bounded check (design A8): the
+            // block was just read for the view, so `block_check` answers from the cache.
             NodeKind::SstBlock { off, size, kind } => {
                 let mut v = self.block_view(Handle { offset: *off, size: *size }, *kind);
+                self.block_check(Handle { offset: *off, size: *size });
                 let dec = v.spaces.first().map(|s| s.size);
                 let (o, s) = (*off, *size);
                 self.location(o, o + s + BLOCK_TRAILER, Some((o, o + s)), Some((o + s, o + s + BLOCK_TRAILER)), dec, cancel).apply(&mut v);
@@ -439,12 +525,21 @@ impl SstInspector {
             }
             NodeKind::SstTrailer { off, size, kind } => {
                 let mut v = self.trailer_view(Handle { offset: *off, size: *size }, *kind);
+                self.block_check(Handle { offset: *off, size: *size });
                 let t = off + size;
                 self.location(t, t + BLOCK_TRAILER, None, None, None, cancel).apply(&mut v);
                 v
             }
-            NodeKind::SstRestarts { off, size, kind } => self.restarts_view(Handle { offset: *off, size: *size }, *kind),
-            NodeKind::SstEntry { off, size, kind, idx } => self.entry_view(Handle { offset: *off, size: *size }, *kind, *idx),
+            NodeKind::SstRestarts { off, size, kind } => {
+                let v = self.restarts_view(Handle { offset: *off, size: *size }, *kind);
+                self.block_check(Handle { offset: *off, size: *size });
+                v
+            }
+            NodeKind::SstEntry { off, size, kind, idx } => {
+                let v = self.entry_view(Handle { offset: *off, size: *size }, *kind, *idx);
+                self.block_check(Handle { offset: *off, size: *size });
+                v
+            }
             NodeKind::SstDataBlocks { skip } => self.data_blocks_view(*skip, cancel),
             NodeKind::SstLayout => {
                 let l = self.layout(cancel);
@@ -485,21 +580,22 @@ impl SstInspector {
         let mut prev_end: Option<u64> = None;
         let mut codecs_read = 0usize;
         for (n, e) in entries.iter().enumerate() {
-            let (start, end, contents, trailer, structure, node, status) = match *e {
+            // Status from the check cache only: never Present for a block that was not checked.
+            let plain = |s: Status| RowCheck { status: s, cell: st_cell(s), not_checked: None, note: None };
+            let (start, end, contents, trailer, structure, node, chk) = match *e {
                 Entry::Item(i) => {
                     let it = &l.items[i];
-                    let st = if it.block_kind().is_some() { Status::Present } else if self.footer().is_ok() { Status::Present } else { Status::Invalid };
-                    (it.start, it.end(), it.size, it.trailer, self.item_label(it), Self::item_node(it), st)
+                    (it.start, it.end(), it.size, it.trailer, self.item_label(it), Self::item_node(it), self.item_check(it))
                 }
                 Entry::Group { first, count } => {
                     let (a, z) = (&l.items[first], &l.items[first + count - 1]);
-                    let (st, c) = self.group_check(l, first, count);
-                    (a.start, z.end(), z.end() - a.start, 0, format!("{count} structures #{first}–#{} (group){}", first + count - 1, check_suffix(Some(c))), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }, st)
+                    let (chk, c) = self.group_row(l, first, count);
+                    (a.start, z.end(), z.end() - a.start, 0, with_coverage(&format!("{} · {count} blocks", group_head(l, first, count)), Some(c)), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }, chk)
                 }
-                Entry::Gap { start, end } => (start, end, end - start, 0, format!("Unaccounted bytes {}", range(start, end)), NodeKind::SstGap { start, end }, Status::Unknown),
+                Entry::Gap { start, end } => (start, end, end - start, 0, format!("Unaccounted bytes {}", range(start, end)), NodeKind::SstGap { start, end }, plain(Status::Unknown)),
                 Entry::Invalid(i) => {
                     let it = &l.invalid[i];
-                    (it.start, it.end(), it.size, it.trailer, format!("{} · handle beyond footer/file", self.item_label(it)), Self::item_node(it), Status::Invalid)
+                    (it.start, it.end(), it.size, it.trailer, format!("{} · handle beyond footer/file", self.item_label(it)), Self::item_node(it), plain(Status::Invalid))
                 }
             };
             let invalid = matches!(e, Entry::Invalid(_));
@@ -518,10 +614,12 @@ impl SstInspector {
             let trailer_cell = if trailer > 0 { range(start + contents, end) } else { "-".into() };
             let fld = Field::new(structure.clone(), (!invalid).then(|| Span::file(start, end - start)), format!("{} · contents {} · trailer {trailer_cell}", range(start, end), bytes_dec_hex(contents)))
                 .kind(K::StructureRef)
-                .status(status)
+                .status(chk.status)
+                .not_checked(chk.not_checked)
+                .check_note(chk.note)
                 .link(node)
                 .explain("Physical structure in file order; double-click (or Enter) to go to it.");
-            rows.push(Row { cells: vec![n.to_string(), format!("0x{start:x}"), format!("0x{end:x}"), (end - start).to_string(), contents.to_string(), trailer_cell, gap, codec, structure, st_cell(status)], field: fld });
+            rows.push(Row { cells: vec![n.to_string(), format!("0x{start:x}"), format!("0x{end:x}"), (end - start).to_string(), contents.to_string(), trailer_cell, gap, codec, structure, chk.cell], field: fld });
         }
         View {
             title: title.to_string(),
@@ -600,26 +698,35 @@ impl SstInspector {
             // First-use clarity: the physical layout in file order, each row linking to its node.
             v.notes.push(layout_coverage(&l).into());
             for e in l.top() {
-                let (name, span, value, node, st) = match e {
+                // Status from the check cache only (design A6); a group's cell names its coverage.
+                let plain = |s: Status| RowCheck { status: s, cell: st_cell(s), not_checked: None, note: None };
+                let (name, span, value, node, chk, group) = match e {
                     Entry::Item(i) => {
                         let it = &l.items[i];
                         let codec = if it.trailer > 0 { self.block_ctype(it.handle()).map(|c| format!(" · {}", compression_name(c))).unwrap_or_default() } else { String::new() };
                         let tr = if it.trailer > 0 { format!(" · trailer {}", range(it.start + it.size, it.end())) } else { String::new() };
-                        (self.item_label(it), Some(Span::file(it.start, it.end() - it.start)), format!("{} · contents {}{tr}{codec}", range(it.start, it.end()), bytes_dec_hex(it.size)), Self::item_node(it), Status::Present)
+                        (self.item_label(it), Some(Span::file(it.start, it.end() - it.start)), format!("{} · contents {}{tr}{codec}", range(it.start, it.end()), bytes_dec_hex(it.size)), Self::item_node(it), self.item_check(it), false)
                     }
                     Entry::Group { first, count } => {
-                        let c = self.entry_child(&l, e);
+                        // Same label as the tree child, from the one cache-only group check.
+                        let (chk, cov) = self.group_row(&l, first, count);
                         let (a, z) = (l.items[first].start, l.items[first + count - 1].end());
-                        (format!("{}{}", c.label, check_suffix(c.checked)), Some(Span::file(a, z - a)), format!("{} · {count} structures", range(a, z)), c.kind, c.status)
+                        let label = format!("{} · {} · {count} blocks", group_head(&l, first, count), range(a, z));
+                        (with_coverage(&label, Some(cov)), Some(Span::file(a, z - a)), format!("{} · {count} structures", range(a, z)), NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 }, chk, true)
                     }
-                    Entry::Gap { start, end } => (format!("Unaccounted bytes {}", range(start, end)), Some(Span::file(start, end - start)), format!("{} B no handle names", end - start), NodeKind::SstGap { start, end }, Status::Unknown),
+                    Entry::Gap { start, end } => (format!("Unaccounted bytes {}", range(start, end)), Some(Span::file(start, end - start)), format!("{} B no handle names", end - start), NodeKind::SstGap { start, end }, plain(Status::Unknown), false),
                     Entry::Invalid(i) => {
                         let it = &l.invalid[i];
-                        (format!("{} · handle beyond footer/file", self.item_label(it)), None, format!("{} · beyond the footer at 0x{:x}", range(it.start, it.end()), l.footer_off), Self::item_node(it), Status::Invalid)
+                        (format!("{} · handle beyond footer/file", self.item_label(it)), None, format!("{} · beyond the footer at 0x{:x}", range(it.start, it.end()), l.footer_off), Self::item_node(it), plain(Status::Invalid), false)
                     }
                 };
-                let fld = Field::new(name, span, value).kind(K::StructureRef).status(st).enc("physical structure").link(node).explain("Physical layout in file order; double-click (or Enter) to go to the structure.");
-                v.rows.push(field_row(fld));
+                let fld = Field::new(name, span, value).kind(K::StructureRef).status(chk.status).not_checked(chk.not_checked).check_note(chk.note).enc("physical structure").link(node).explain("Physical layout in file order; double-click (or Enter) to go to the structure.");
+                let mut row = field_row(fld);
+                // A group's Status cell names its coverage ("3 of 64 checked").
+                if let (true, Some(last)) = (group, row.cells.last_mut()) {
+                    *last = chk.cell;
+                }
+                v.rows.push(row);
             }
         }
         v
@@ -630,19 +737,20 @@ impl SstInspector {
     fn actual_compression(&self, l: &PhysLayout) -> Field {
         let data: Vec<&Item> = l.items.iter().filter(|it| it.block_kind() == Some(BlockKind::Data)).collect();
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
-        let mut checked = 0u64;
+        let mut read = 0u64;
         for it in data.iter().take(COMPRESSION_SAMPLE) {
             if let Some(c) = self.block_ctype(it.handle()) {
-                *counts.entry(if c == 0 { "none".to_string() } else { compression_name(c) }).or_default() += 1;
-                checked += 1;
+                *counts.entry(compression_name(c)).or_default() += 1;
+                read += 1;
             }
         }
         let total = if l.data_complete { data.len().to_string() } else { format!("≥{}", data.len()) };
         let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
-        let value = format!("{} ({checked} of {total} data blocks checked)", if parts.is_empty() { "no data block read".to_string() } else { parts.join(", ") });
+        // Reading the type byte is a read, never a check (design A1/A7).
+        let value = format!("{} (type byte read for {read} of {total} data blocks)", if parts.is_empty() { "no data block read".to_string() } else { parts.join(", ") });
         Field::new("Actual block compression", None, value)
             .kind(K::CompressionType)
-            .explain("Compression type byte of each data block's trailer (what the blocks actually use; meta blocks are usually stored uncompressed). The declared policy is the rocksdb.compression property.")
+            .explain("Compression type byte of each data block's trailer (what the blocks actually use; meta blocks are usually stored uncompressed). Only the type byte is read here; block checksums are verified when a block is opened. The declared policy is the rocksdb.compression property.")
     }
 
     /// Smallest and largest internal key (first entry of the first data block, last entry of
@@ -838,6 +946,14 @@ impl SstInspector {
                 _ => {
                     // Data / range-deletion entries: Copy value = entry value, Copy key = internal key.
                     fld = fld.value_bytes(val).key_bytes(&e.key);
+                    // Meaning: the readable key (design D1); the raw key bytes go under "Other
+                    // byte interpretations" (D4). Cells (and so the dump) are unchanged.
+                    fld.value = ikey_meaning(&e.key);
+                    let n = e.key.len().min(64);
+                    let more = if e.key.len() > n { format!("… · {} B", e.key.len()) } else { String::new() };
+                    fld.interp.push(("internal key", format!("0x{}{more}", crate::util::hex(&e.key[..n]).replace(' ', ""))));
+                    let uk = split_ikey(&e.key).map(|x| x.0).unwrap_or(&e.key);
+                    fld.interp.push(("user key", hex_preview(uk, 64)));
                     let (uk, seq, ty) = self.split_key(&e.key, false);
                     let vp = if kind == BlockKind::RangeDel { format!("end: {}", bytes_preview(val, 64)) } else { bytes_preview(val, 64) };
                     vec![e.idx.to_string(), off_cell, if e.restart { "R".into() } else { String::new() }, e.shared.to_string(), e.non_shared.to_string(), e.value_len.to_string(), uk, seq, ty, vp, st_cell(cell_status)]
@@ -1104,13 +1220,20 @@ impl SstInspector {
             .iter()
             .enumerate()
             .map(|(i, (h, k))| {
-                // A link row (the block is shown at its canonical place in file order).
+                // A link row (the block is shown at its canonical place in file order); its
+                // status from the check cache only.
+                let nc = self.checked_status(*h).is_none().then(|| format!("{NOT_CHECKED}: the index handle places this block at {}; its checksum is verified only when the block is opened.", range(h.offset, h.offset + h.size + BLOCK_TRAILER)));
+                let st = self.checked_status(*h).unwrap_or(Status::Unknown);
+                let cell = if nc.is_some() { NOT_CHECKED.to_string() } else { st_cell(st) };
                 let fld = Field::new(format!("data block {}", skip as usize + i), Some(Span::file(h.offset, h.size + BLOCK_TRAILER)), format!("offset {} size {}", h.offset, h.size))
                     .kind(K::StructureRef)
+                    .check_note(self.check_note(*h))
+                    .status(st)
+                    .not_checked(nc)
                     .dv(DV::Handle { offset: h.offset, size: h.size })
                     .link(NodeKind::SstBlock { off: h.offset, size: h.size, kind: BlockKind::Data })
                     .explain("Handle from the index; the separator key is ≥ every key in the block and < every key in the next.");
-                Row { cells: vec![(skip as usize + i).to_string(), format!("0x{:x}", h.offset), h.size.to_string(), self.key_label(k, true), st_cell(Status::Present)], field: fld }
+                Row { cells: vec![(skip as usize + i).to_string(), format!("0x{:x}", h.offset), h.size.to_string(), self.key_label(k, true), cell], field: fld }
             })
             .collect();
         use ColumnRole as R;
@@ -1122,5 +1245,26 @@ impl SstInspector {
             v.notes.push(e.into());
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0015 C3 GUI-5: a tree listing reads and checks blocks only while its byte budget lasts;
+    /// beyond it a block is listed "not checked" (coverage 0 of 1) and nothing is read.
+    #[test]
+    fn listing_checks_stop_at_the_byte_budget() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sst-none/data.sst");
+        let mut s = SstInspector::open(crate::io::RangeReader::open(&p).unwrap());
+        let l = s.layout(&|| false);
+        let (a, b) = (l.items[0].handle(), l.items[1].handle());
+        let mut budget = a.size + BLOCK_TRAILER;
+        let c0 = s.checked_child(Child::new("a", NodeKind::Root), a, &mut budget);
+        let c1 = s.checked_child(Child::new("b", NodeKind::Root), b, &mut budget);
+        assert_eq!((c0.status, c0.checked, budget), (Status::Present, None, 0));
+        assert_eq!((c1.status, c1.checked), (Status::Unknown, Some((0, 1))));
+        assert_eq!(s.checked_status(b), None, "nothing read beyond the budget");
     }
 }

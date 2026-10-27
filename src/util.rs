@@ -156,6 +156,32 @@ pub fn bytes_preview(bytes: &[u8], max: usize) -> String {
     }
 }
 
+/// Key bytes as a readable quoted string (design D2): valid UTF-8 → `str::escape_debug`;
+/// otherwise `<[u8]>::escape_ascii` (`\xNN` lowercase, `\"`, `\\`) and " (not UTF-8"); empty →
+/// `""`; longer than `max` bytes → the first `max` bytes escaped, "…", " · key {n} B".
+pub fn escape_key(bytes: &[u8], max: usize) -> String {
+    let long = bytes.len() > max;
+    let (body, utf8) = match std::str::from_utf8(bytes) {
+        Ok(s) => {
+            // Cut at a char boundary at or below `max` bytes.
+            let mut end = s.len().min(max);
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            (s[..end].escape_debug().to_string(), true)
+        }
+        Err(_) => (bytes[..bytes.len().min(max)].escape_ascii().to_string(), false),
+    };
+    let mut out = format!("\"{body}{}\"", if long { "…" } else { "" });
+    if !utf8 {
+        out.push_str(" (not UTF-8)");
+    }
+    if long {
+        out.push_str(&format!(" · key {} B", bytes.len()));
+    }
+    out
+}
+
 pub fn human_size(n: u64) -> String {
     const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
@@ -181,6 +207,21 @@ mod tests {
         assert_eq!(crc32c(b"123456789"), 0xe306_9283);
         let m = crc_mask(0x1234_5678);
         assert_eq!(crc_unmask(m), 0x1234_5678);
+    }
+    /// Design D2/D5: key escaping rules.
+    #[test]
+    fn key_escaping() {
+        assert_eq!(escape_key(b"key-006", 64), "\"key-006\"");
+        assert_eq!(escape_key(b"", 64), "\"\"");
+        assert_eq!(escape_key(b"a\"b\\c\nd\te", 64), "\"a\\\"b\\\\c\\nd\\te\"");
+        assert_eq!(escape_key("ü€".as_bytes(), 64), "\"ü€\"", "valid UTF-8 stays readable");
+        assert_eq!(escape_key(&[b'k', 0xff, 0x00, b'"', b'\\'], 64), "\"k\\xff\\x00\\\"\\\\\" (not UTF-8)");
+        assert_eq!(escape_key(&[0xAB], 64), "\"\\xab\" (not UTF-8)", "lowercase hex");
+        let long = vec![b'x'; 100];
+        assert_eq!(escape_key(&long, 64), format!("\"{}…\" · key 100 B", "x".repeat(64)));
+        // A cut inside a multi-byte character backs off to the char boundary.
+        let s = format!("{}é", "a".repeat(63));
+        assert_eq!(escape_key(s.as_bytes(), 64), format!("\"{}…\" · key 65 B", "a".repeat(63)));
     }
     #[test]
     fn varints() {

@@ -1,7 +1,8 @@
 [package]
 name = "rocksvision"
-version = "0.1.1"
-edition = "2021"
+version = "0.1.2"
+edition = "2024"
+rust-version = "1.95"
 description = "Read-only inspector for RocksDB 10.4.2 WAL, SST, CURRENT and MANIFEST files"
 license = "Apache-2.0"
 publish = false

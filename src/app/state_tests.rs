@@ -313,8 +313,12 @@ fn zoom_ceiling_from_layout() {
     assert!((app.prefs().zoom() - 1.5).abs() < 1e-4, "zoom stops at the ceiling: {}", app.prefs().zoom());
     assert!(!app.can_zoom_in());
     assert!(app.prefs().notice().contains("layout limit (150%)"), "{}", app.prefs().notice());
-    // Window shrinks: the zoom is lowered with a notice; data length never enters the fit.
-    app.apply(Action::LayoutFit(ZoomFit { at_zoom: 1.5, avail_w: 600.0, avail_h: 600.0, need_w: 900.0, need_h: 350.0 }));
+    // Window shrinks: the zoom is lowered with a notice (after two consecutive over-fit frames,
+    // 0015 C3); data length never enters the fit.
+    let small = ZoomFit { at_zoom: 1.5, avail_w: 600.0, avail_h: 600.0, need_w: 900.0, need_h: 350.0 };
+    app.apply(Action::LayoutFit(small));
+    assert!((app.prefs().zoom() - 1.5).abs() < 1e-4 && app.prefs().zoom_fit_pending(), "one transient frame does not lower the zoom");
+    app.apply(Action::LayoutFit(small));
     assert!((app.prefs().zoom_ceiling() - 1.0).abs() < 1e-4 && (app.prefs().zoom() - 1.0).abs() < 1e-4, "{} {}", app.prefs().zoom_ceiling(), app.prefs().zoom());
     assert!(app.prefs().notice().contains("reduced to 100%"), "{}", app.prefs().notice());
     // Never below 1.0 and never above the absolute cap.
@@ -322,6 +326,35 @@ fn zoom_ceiling_from_layout() {
     assert_eq!(app.prefs().zoom_ceiling(), 1.0);
     app.apply(Action::LayoutFit(ZoomFit { at_zoom: 1.0, avail_w: 9000.0, avail_h: 9000.0, need_w: 900.0, need_h: 350.0 }));
     assert!((app.prefs().zoom_ceiling() - 2.0).abs() < 1e-4);
+}
+
+/// 0015 C3 GUI-3: A+ enabled ⇔ Zoom In changes the zoom, at every step; a fit measured a
+/// hair below the new zoom right after a step (rounding) does not snap it back; the ceiling
+/// of a 900×700-like window (raw 1.205) is reached and kept.
+#[test]
+fn zoom_in_and_its_enabled_state_agree() {
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    let fit = |z: f32, scale: f32| ZoomFit { at_zoom: z, avail_w: 900.0 / z, avail_h: 675.0 * scale / z, need_w: 742.6, need_h: 560.0 };
+    app.apply(Action::LayoutFit(fit(1.0, 1.0)));
+    for _ in 0..5 {
+        let (can, before) = (app.can_zoom_in(), app.prefs().zoom());
+        app.apply(Action::ZoomIn);
+        assert_eq!(can, (app.prefs().zoom() - before).abs() > 1e-4, "A+ enabled {can} but Zoom In {before} → {}", app.prefs().zoom());
+        let z = app.prefs().zoom();
+        app.apply(Action::LayoutFit(fit(z, 1.0)));
+        app.apply(Action::LayoutFit(fit(z, 1.0)));
+    }
+    assert!((app.prefs().zoom() - 1.2).abs() < 1e-4, "{}", app.prefs().zoom());
+    assert!(!app.can_zoom_in());
+    // Measured 0.5 % low at 120 % (rounding): the ceiling reads 110 %, the zoom stays.
+    app.apply(Action::LayoutFit(fit(1.2, 0.995)));
+    app.apply(Action::LayoutFit(fit(1.2, 0.995)));
+    assert!((app.prefs().zoom() - 1.2).abs() < 1e-4, "snapped back to {}", app.prefs().zoom());
+    assert!(!app.can_zoom_in());
+    app.apply(Action::ZoomIn);
+    assert!((app.prefs().zoom() - 1.2).abs() < 1e-4);
 }
 
 #[test]
@@ -693,16 +726,68 @@ fn hex_click_and_row_select_agree_without_loops() {
     assert_eq!(app.selection().raw_note(), Some("Raw range [0x11,0x15): not a single field"));
 }
 
-/// A pending (async) selection is applied only if nothing was selected since the request.
+/// A pending (async) view and its selection are applied only if nothing was selected since the
+/// request (0015 residual 1: the stale view no longer replaces the table either).
 #[test]
 fn pending_selection_never_overrides_a_newer_choice() {
     let mut app = open_ready("examples/files/wal-plain/000004.log");
     app.apply(Action::HexClick(0x11)); // root view: locate request
     app.apply(Action::SelectSpan(Span::file(2, 1))); // newer user choice before the reply
     let e = app.selection().epoch();
+    pump(&mut app, "locate answered", |a| a.session().pending_view().is_none());
+    assert_eq!(app.session().view_kind(), Some(&NodeKind::Root), "the stale locate replaced the view");
+    assert_eq!((app.selection().span(), app.selection().epoch()), (Some(Span::file(2, 1)), e), "the newer selection stays");
+}
+
+/// 0015 residual 1 (reviewer note 4 of 0011): a Locate / Navigate / Back result that arrives
+/// after a newer selection, navigation or file change never replaces the newer view or
+/// selection; a result nobody overtook still applies. Replies are applied only by `poll()`, so
+/// an action issued before polling lands exactly between request and reply (controlled delay).
+#[test]
+fn stale_view_results_are_discarded() {
+    // (a) Locate overtaken by a row click in the current table.
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::HexClick(0x11));
+    assert!(app.session().pending_view().is_some(), "locate request in flight");
+    app.apply(Action::SelectRow(0));
+    let snap = app.selection().snapshot();
+    pump(&mut app, "locate answered", |a| a.session().pending_view().is_none());
+    settle(&mut app);
+    assert_eq!(app.session().view_kind(), Some(&NodeKind::Root), "stale locate replaced the view");
+    assert_eq!(app.selection().snapshot(), snap, "stale locate replaced the selection");
+    assert_eq!(app.busy_label(), None, "no spinner left for the discarded view");
+    // Navigate and Back overtaken by a row click: discarded the same way.
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    app.apply(Action::SelectRow(1));
+    pump(&mut app, "navigate answered", |a| a.session().pending_view().is_none());
+    assert_eq!((app.session().view_kind(), app.selection().row()), (Some(&NodeKind::Root), Some(1)));
+    // A tree click overtaken by a row click: the view stays and the tree follows it again.
+    app.apply(Action::SelectNode(app.session().roots()[0]));
+    assert!(app.session().sel_node().is_some());
+    app.apply(Action::SelectRow(2));
+    pump(&mut app, "tree view answered", |a| a.session().pending_view().is_none());
+    assert_eq!((app.session().view_kind(), app.session().sel_node(), app.selection().row()), (Some(&NodeKind::Root), None, Some(2)));
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
     view_is(&mut app, &NodeKind::LogRecord(0));
-    assert_eq!(app.selection().row(), None, "the located field did not replace the newer selection");
-    assert!(app.selection().epoch() > e, "the view change cleared it (new table)");
+    app.apply(Action::Back);
+    app.apply(Action::SelectRow(0));
+    pump(&mut app, "back answered", |a| a.session().pending_view().is_none());
+    assert_eq!((app.session().view_kind(), app.selection().row()), (Some(&NodeKind::LogRecord(0)), Some(0)));
+    // (b) Locate overtaken by a file change: the old generation's reply is dropped.
+    app.apply(Action::SelectRoot);
+    view_is(&mut app, &NodeKind::Root);
+    app.apply(Action::HexClick(0x11));
+    let other = fixture("examples/files/wal-fragmented/000004.log");
+    app.apply(Action::OpenFile(other.clone()));
+    pump(&mut app, "other file", |a| a.session().view().is_some() && a.session().pending_view().is_none() && a.session().hex().page().is_some());
+    settle(&mut app);
+    assert_eq!((app.session().file(), app.session().view_kind()), (Some(other.as_path()), Some(&NodeKind::Root)));
+    assert_eq!(app.selection().row(), None, "no located field of the previous file");
+    // (c) A fresh result (nothing selected since the request) still applies.
+    app.apply(Action::HexClick(0x11));
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    assert!(app.selection().row().is_some(), "fresh locate selects its field");
+    assert_eq!(app.selection().anchor(), Some(Span::file(0x11, 1)));
 }
 
 /// `]` / `[`: one field per press in span order; Shift: one sibling structure per press.
@@ -775,4 +860,201 @@ fn navigate_selects_structure_and_back_restores_selection() {
     app.apply(Action::SelectNode(next));
     view_is(&mut app, &k);
     assert_eq!(app.selection().snapshot(), tree_click, "tree click and structure step select the same");
+}
+
+// ---------------- task 0008 / handoff 0015: byte-less navigation and check status -----------
+
+fn row_named(app: &App, name: &str) -> usize {
+    app.session().view().unwrap().rows.iter().position(|r| r.field.name == name).unwrap_or_else(|| panic!("row {name}"))
+}
+
+/// C2 (reviewer 1): SelectRoot replaces an in-flight Locate's pending selection, so the stale
+/// click is not applied to the newer Root view.
+#[test]
+fn select_root_drops_pending_locate_selection() {
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    app.apply(Action::SelectRoot);
+    view_is(&mut app, &NodeKind::Root);
+    // Root view: a byte click starts a Locate; SelectRoot follows before any reply.
+    app.apply(Action::HexClick(0x11));
+    let e = app.selection().epoch();
+    app.apply(Action::SelectRoot);
+    pump(&mut app, "views answered", |a| a.session().pending_view().is_none());
+    settle(&mut app);
+    assert_eq!(app.session().view_kind(), Some(&NodeKind::Root));
+    assert!(app.selection().anchor().is_none() && app.selection().epoch() > e, "stale click applied to Root: {:?}", app.selection().raw_note());
+}
+
+/// C2 (reviewer 2): a dropped (overtaken) Back reply puts its history entry back, and a dropped
+/// Navigate reply removes the source entry it pushed — the next Back never skips a level.
+#[test]
+fn overtaken_back_or_navigate_keeps_history_intact() {
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    assert!(app.session().can_go_back());
+    // Back overtaken by a row click: the entry for Root must still be there.
+    app.apply(Action::Back);
+    app.apply(Action::SelectRow(0));
+    pump(&mut app, "back answered", |a| a.session().pending_view().is_none());
+    assert_eq!(app.session().view_kind(), Some(&NodeKind::LogRecord(0)));
+    assert!(app.session().can_go_back(), "the popped history entry was lost");
+    app.apply(Action::Back);
+    view_is(&mut app, &NodeKind::Root);
+    assert!(!app.session().can_go_back());
+    // Navigate overtaken by a row click: no stale source entry stays on the stack.
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    app.apply(Action::SelectRow(1));
+    pump(&mut app, "navigate answered", |a| a.session().pending_view().is_none());
+    assert_eq!(app.session().view_kind(), Some(&NodeKind::Root));
+    assert!(!app.session().can_go_back(), "a dropped navigation left its source entry");
+}
+
+/// Residual 3 (design B1–B7): a link to a record whose selected row has no bytes moves the byte
+/// view to the record's FIRST fragment header (file), the Go-to text follows, nothing is
+/// selected or filled; Back restores selection, byte view and Go-to text without an extra
+/// history entry; a file change resets Go-to.
+#[test]
+fn byteless_row_reveals_enclosing_structure() {
+    let mut app = open_ready("tests/fixtures/wal-fragmented/000004.log");
+    // The fragment's "record" row (Implicit) links to the logical record.
+    app.apply(Action::Navigate { target: NodeKind::LogFragment(0x5eec), span: None });
+    view_is(&mut app, &NodeKind::LogFragment(0x5eec));
+    let link = row_named(&app, "record");
+    app.apply(Action::SelectRow(link));
+    assert_eq!(app.selection().shown(), Some(Span::file(0x5eec, 1)), "fragment's first byte shown");
+    app.apply(Action::FollowRow(link));
+    view_is(&mut app, &NodeKind::LogRecord(0x5eec));
+    // Move the byte view elsewhere first, then select the Implicit "reassembly" row.
+    app.apply(Action::SetGoto("0x10".into()));
+    app.apply(Action::GotoOffset);
+    assert_eq!(app.session().hex().scroll_to, Some(0x10));
+    let re = row_named(&app, "reassembly");
+    assert!(app.session().view().unwrap().rows[re].field.span.is_none());
+    app.apply(Action::SelectRow(re));
+    assert_eq!((app.session().hex().space(), app.session().hex().scroll_to), (Space::File, Some(0x5eec)), "FIRST header offset revealed in the file");
+    assert_eq!(app.session().goto(), "0x5eec", "Go-to text follows");
+    assert_eq!((app.selection().span(), app.selection().spans().count(), app.selection().anchor()), (None, 0, None), "no fabricated span");
+    assert_eq!(app.selection().shown(), Some(Span::file(0x5eec, 1)));
+    assert_eq!(provenance::byteless_status("reassembly", &app.selection().shown().unwrap()), "selection: reassembly · no bytes · showing file 0x5eec");
+    assert!(provenance::byteless_where(app.session().view(), &Span::file(0x5eec, 1)).ends_with("enclosing Logical record @0x5eec: file 0x5eec."));
+    // Back: everything restored; the reveal added no history entry.
+    let before = (app.selection().snapshot(), app.session().hex().space(), app.session().goto().to_string());
+    let f1 = app.session().view().unwrap().rows.iter().position(|r| r.field.name.starts_with("fragment 1")).unwrap();
+    let target = app.session().view().unwrap().rows[f1].field.link.clone().unwrap();
+    app.apply(Action::FollowRow(f1));
+    view_is(&mut app, &target);
+    assert_ne!(app.session().goto(), "0x5eec", "navigation moved the byte view and Go-to");
+    app.apply(Action::Back);
+    view_is(&mut app, &NodeKind::LogRecord(0x5eec));
+    assert_eq!((app.selection().snapshot(), app.session().hex().space(), app.session().goto().to_string()), before, "Back restores selection, space and Go-to");
+    app.apply(Action::Back);
+    view_is(&mut app, &NodeKind::LogFragment(0x5eec));
+    assert_eq!(app.selection().row(), Some(link), "the reveal itself added no history entry");
+    // A file change resets Go-to to the placeholder.
+    app.apply(Action::OpenFile(fixture("tests/fixtures/wal-basic/000004.log")));
+    assert_eq!(app.session().goto(), "");
+}
+
+/// 0015 C3 UI-6: a parent group counts blocks, not sub-groups: after its sub-group #0–#63 is
+/// listed (64 blocks checked) the parent reads "64 of 4096 checked", no glyph.
+#[test]
+fn parent_group_coverage_counts_blocks() {
+    let mut app = App::idle_for_tests();
+    let group = |first: u64, count: u64| NodeKind::SstLayoutGroup { first, count };
+    app.doc.push_test_node(TreeNode { label: "Data blocks #0–#4095 · [0x0,0x3a0f00) · 4096 blocks".into(), kind: group(0, 4096), status: Status::Unknown, leaf: false, depth: 0, children: None, expanded: true, loading: true, diag: None, contains: None, role: ChildRole::Structure, checked: Some((0, 4096)) });
+    let kids: Vec<Child> = (0..64u64).map(|i| Child::new(format!("Data blocks #{}–#{} · [..) · 64 blocks", i * 64, i * 64 + 63), group(i * 64, 64)).status(if i == 0 { Status::Present } else { Status::Unknown }).checked(if i == 0 { (64, 64) } else { (0, 64) })).collect();
+    app.doc.children_arrived(0, kids, None);
+    let p = &app.session().nodes()[0];
+    assert_eq!(p.checked, Some((64, 4096)));
+    assert_eq!(p.full_label(), "Data blocks #0–#4095 · 64 of 4096 checked · [0x0,0x3a0f00) · 4096 blocks");
+    assert!(p.unchecked(), "partly checked and clean: no glyph");
+}
+
+/// 0015 C3 (B3 drift): the Go-to text follows whatever the byte pane moves to — paging, a
+/// space switch, a view that resets the pane to the file start.
+#[test]
+fn goto_text_follows_the_byte_pane() {
+    let mut app = open_ready("tests/fixtures/wal-fragmented/000004.log");
+    app.apply(Action::HexPage(0x10000));
+    assert_eq!((app.session().hex().page_base(), app.session().goto()), (0x10000, "0x10000"));
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0x5eec), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0x5eec));
+    assert_eq!(app.session().goto(), "0x5eec", "navigation shows the record start");
+    app.apply(Action::HexShowSpace(Space::Record(0x5eec)));
+    assert_eq!((app.session().hex().space(), app.session().goto()), (Space::Record(0x5eec), "0x0"));
+    // Root does not describe the record space: the pane returns to file 0x0, Go-to follows.
+    app.apply(Action::SelectRoot);
+    view_is(&mut app, &NodeKind::Root);
+    assert_eq!((app.session().hex().space(), app.session().goto()), (Space::File, "0x0"));
+}
+
+/// B2: in a derived space (BLK+) the byte view stays there and shows +0x0; without an honest
+/// enclosing range (WAL root "file" row) the byte view and Go-to stay unchanged (B6).
+#[test]
+fn byteless_row_keeps_derived_space_or_stays() {
+    let mut app = open_ready("examples/files/sst-zstd/sst-zstd.sst");
+    let blk = app.session().nodes().iter().find_map(|n| match n.kind {
+        NodeKind::SstBlock { off, size, kind: BlockKind::Data } => Some((off, size)),
+        _ => None,
+    });
+    let (off, size) = blk.unwrap_or((0, 99));
+    let entry = NodeKind::SstEntry { off, size, kind: BlockKind::Data, idx: 0 };
+    app.apply(Action::Navigate { target: entry.clone(), span: None });
+    view_is(&mut app, &entry);
+    app.apply(Action::HexShowSpace(Space::Block(off)));
+    pump(&mut app, "decompressed page", |a| a.session().hex().page().is_some());
+    app.apply(Action::SetGoto("0x20".into()));
+    app.apply(Action::GotoOffset);
+    let key = row_named(&app, "key (reconstructed)");
+    app.apply(Action::SelectRow(key));
+    assert_eq!((app.session().hex().space(), app.session().hex().scroll_to, app.session().goto()), (Space::Block(off), Some(0), "0x0"), "BLK+ stays in BLK+ at +0x0");
+    assert_eq!((app.selection().span(), app.selection().shown()), (None, Some(Span::new(Space::Block(off), 0, 1))));
+    // WAL root "file" row: no enclosing range — nothing moves.
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::SetGoto("0x10".into()));
+    app.apply(Action::GotoOffset);
+    let file = row_named(&app, "file");
+    app.apply(Action::SelectRow(file));
+    assert_eq!((app.session().hex().scroll_to, app.session().goto(), app.selection().shown()), (Some(0x10), "0x10", None));
+}
+
+/// F3: row keys scroll the table minimally; a jump (navigation, Back) centers the selected row.
+#[test]
+fn row_scroll_alignment_follows_the_kind_of_move() {
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    let _ = app.take_scroll_request();
+    app.apply(Action::MoveRow(RowMove::Down));
+    let r = app.selection().row().unwrap();
+    assert_eq!(app.take_scroll_request().row, Some((r, false)), "keys: minimal scroll");
+    app.apply(Action::StepField(true));
+    assert!(matches!(app.take_scroll_request().row, Some((_, false))));
+    let count = app.session().view().unwrap().rows.iter().position(|x| x.field.kind == FieldKind::Count).unwrap();
+    app.apply(Action::SelectRow(count));
+    app.apply(Action::Navigate { target: NodeKind::Root, span: None });
+    view_is(&mut app, &NodeKind::Root);
+    app.apply(Action::Back);
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    assert_eq!(app.take_scroll_request().row, Some((count, true)), "Back: centered");
+}
+
+/// Residual 2 / A8: opening a Not checked layout row is its check; Back shows the updated row.
+#[test]
+fn opening_unchecked_row_checks_it_and_back_shows_it() {
+    let mut app = open_ready("tests/fixtures/sst-none/data.sst");
+    let layout = app.session().nodes().iter().position(|n| n.kind == NodeKind::SstLayout).expect("layout table node");
+    app.apply(Action::SelectNode(layout));
+    view_is(&mut app, &NodeKind::SstLayout);
+    let cell = |a: &App| a.session().view().unwrap().rows[0].cells.last().cloned().unwrap();
+    assert_eq!(cell(&app), NOT_CHECKED);
+    app.apply(Action::FollowRow(0));
+    let b0 = NodeKind::SstBlock { off: 0, size: 4057, kind: BlockKind::Data };
+    view_is(&mut app, &b0);
+    app.apply(Action::Back);
+    view_is(&mut app, &NodeKind::SstLayout);
+    assert_eq!(cell(&app), "✔ Present");
 }

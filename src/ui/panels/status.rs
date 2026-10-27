@@ -25,6 +25,9 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
             Some(s) => format!("selection: structure {name} · {}", provenance::status_text(doc.view(), &s)),
             None => format!("selection: structure {name}"),
         }
+    } else if let (Some(at), Some(f)) = (st.selection().shown(), st.selected_field()) {
+        // A field without bytes: what the byte view shows instead (design B5).
+        provenance::byteless_status(&f.name, &at)
     } else {
         st.selection().span().map(|s| format!("selection: {}", provenance::status_text(doc.view(), &s))).unwrap_or_default()
     };

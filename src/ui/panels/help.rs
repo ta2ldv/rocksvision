@@ -12,6 +12,7 @@ use eframe::egui::{self, RichText};
 const PANELS: &str = "Navigation (left): files and the structure tree. Records (center top): fields of the selected structure. Bytes (center bottom): the bytes behind your selection. Explanation (right): what the selection means and how it was decoded. Hide or show panels with the edge arrows, the View menu or";
 const OPENING: &str = "Open Folder… reads a whole RocksDB directory (CURRENT, then MANIFEST, then SST/WAL), so names and levels come from the database. Open File… inspects one file alone; anything that needs the other files is shown as unknown, never guessed.";
 const SEARCH: &str = "The search box finds text in the current table's decoded cells and in this file's stored bytes (not decompressed). Tick Hex bytes to search byte values such as 4d 41 4e. Enter: next match, Shift+Enter: previous.";
+const CHECKS: &str = "\"Checked\" means a block's checksum and trailer were verified. A block is checked when you open it. Listing up to 64 blocks in the tree reads and checks those blocks. Blocks not checked yet say \"Not checked\" and claim no status.";
 const LEVELS: &str = "LSM levels = which SST files sit at which level (MANIFEST); two-level index = index layout inside one SST.";
 const EXAMPLES: &str = "The repository's examples/ folder has ready databases under data/ (use Open Folder) and single files under files/ (use Open File). examples/README.md says what each one shows.";
 const KEYBOARD: &str = "All shortcuts: Help › Keyboard Shortcuts.";
@@ -39,6 +40,7 @@ pub fn show(ctx: &egui::Context, st: &AppState, tok: &Tokens) -> Vec<Action> {
             for s in LEGEND {
                 ui.add(egui::Label::new(RichText::new(format!("{} {}", s.symbol(), status_meaning(s))).color(tok.status(s))).wrap());
             }
+            para(ui, "Checked and not checked", CHECKS);
             let zoom = format!(
                 "{}\nZoom: {}, {}, {}.",
                 tip(RESET_VIEW_TIP, MenuCmd::ResetView),

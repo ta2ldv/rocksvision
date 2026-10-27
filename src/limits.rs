@@ -74,6 +74,9 @@ pub const PATH_RECORD_PAGES: usize = 64;
 pub const LAYOUT_HANDLES: usize = 200_000;
 /// Data blocks per layout group in the tree (and groups per parent group).
 pub const LAYOUT_GROUP: u64 = 64;
+/// Bytes one tree listing may read to check the blocks it lists (on the decode worker; 0015
+/// C3). Blocks beyond the budget are listed "not checked" (cache only) until opened.
+pub const LIST_CHECK_BYTES: u64 = 16 << 20;
 /// Block trailers whose compression type byte is read for the root summary.
 pub const COMPRESSION_SAMPLE: usize = 4096;
 

@@ -122,11 +122,28 @@ pub fn btn_sized(ui: &mut egui::Ui, tok: &Tokens, text: &str) -> egui::Response 
     r
 }
 
-/// Unwrappable value (hex, keys): monospace, horizontal scroll instead of widening the panel.
-pub fn long_value(ui: &mut egui::Ui, id: &str, v: &str) {
-    egui::ScrollArea::horizontal().id_salt(id).auto_shrink([false, true]).show(ui, |ui| {
-        ui.add(egui::Label::new(RichText::new(v).monospace()).extend());
-    });
+/// A monospace value broken into lines that fit the available width (`layout::wrap_value`):
+/// the text to show and whether it was cut after `VALUE_MAX_LINES` lines.
+pub fn fit_value(ui: &egui::Ui, v: &str) -> (String, bool) {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    let cw = ui.fonts_mut(|f| f.glyph_width(&font, '0')).max(1.0);
+    // One column of slack: non-ASCII glyphs ("·", "…") may be a little wider.
+    let cols = ((ui.available_width() / cw).floor() as usize).saturating_sub(1);
+    let (lines, cut) = super::layout::wrap_value(v, cols, super::layout::VALUE_MAX_LINES);
+    (lines.join("\n"), cut)
+}
+
+/// Full text of a value for its tooltip (bounded).
+pub fn value_tip(v: &str) -> String {
+    let cap = super::layout::VALUE_TIP_CHARS;
+    if v.chars().count() > cap { format!("{}…", v.chars().take(cap).collect::<String>()) } else { v.to_string() }
+}
+
+/// Value (hex, keys, paths): monospace, wrapped to the panel width — never a horizontal
+/// scrollbar (design C1–C3); at most four lines ending in "…", the full value on hover.
+pub fn long_value(ui: &mut egui::Ui, tok: &Tokens, v: &str) {
+    let (text, _) = fit_value(ui, v);
+    ui.add(egui::Label::new(RichText::new(text).monospace().color(tok.p.text)).extend()).on_hover_text(value_tip(v));
 }
 
 /// Statuses in legend order (Explanation legend and Help share it).

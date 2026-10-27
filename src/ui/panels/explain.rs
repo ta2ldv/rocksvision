@@ -3,7 +3,7 @@
 //! when no row is selected, the byte interpretations of the selection, or the status legend.
 //! Unsupported and Unknown are stated separately and never under Diagnosis.
 
-use super::{btn, chip, chip_word, long_value, status_meaning, strong, title_line, LEGEND};
+use super::{btn, chip, chip_word, fit_value, long_value, status_meaning, strong, title_line, value_tip, LEGEND};
 use crate::app::diagnosis::{self, DiagLine, Diagnosis, Finding, NodeFailure, SUMMARY_LINES};
 use crate::app::hex::interpretations;
 use crate::app::provenance;
@@ -20,8 +20,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens) -> Vec<Action> {
     if title_line(ui, tok, "Explanation", "▶", &menu::tip("Hide Explanation", MenuCmd::TogglePanel(Panel::Explanation))) {
         acts.push(Action::TogglePanel(Panel::Explanation));
     }
-    // Prose wraps to the panel width and scrolls vertically; only unwrappable values and
-    // interpretation tokens scroll horizontally, in their own row.
+    // Everything wraps to the panel width and scrolls vertically only: prose at words, values
+    // at the designed break points (0015 C1–C3, `layout::wrap_value`).
     egui::ScrollArea::vertical().id_salt("explain").auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(ui.available_width());
         let whole = st.selection().is_structure() && st.selection().anchor().is_none() && (st.selection().span().is_none() || st.selection().span() == st.session().view().and_then(|v| v.extent));
@@ -52,29 +52,45 @@ fn where_section(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, span: Option<Sp
                 ui.add(egui::Label::new(RichText::new(l).monospace()).wrap());
             }
         }
-        None => {
-            ui.add(egui::Label::new("No bytes in the file (derived, inferred, default or metadata value)").wrap());
-        }
+        None => match st.selection().shown() {
+            // The byte view shows the enclosing structure's first byte (design B4).
+            Some(at) => {
+                ui.add(egui::Label::new(provenance::byteless_where(st.session().view(), &at)).wrap());
+            }
+            None => {
+                ui.add(egui::Label::new("No bytes in the file (derived, inferred, default or metadata value)").wrap());
+            }
+        },
     }
 }
 
 /// Secondary, collapsed by default (its open state is kept for the session): the alternate
-/// notations of the decoded number ("0x7 / 0b111") and the byte interpretations of the span.
-fn other_interpretations(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: Option<&Span>, number: Option<u64>, open: bool) {
-    if s.is_none() && number.is_none() {
+/// notations of the decoded number ("0x7 / 0b111"), the presenter's extra rows (e.g. internal
+/// and user key bytes, design D4) and the byte interpretations of the span.
+fn other_interpretations(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: Option<&Span>, number: Option<u64>, extra: &[(&str, String)], open: bool) {
+    if s.is_none() && number.is_none() && extra.is_empty() {
         return;
     }
     ui.add_space(6.0);
     egui::CollapsingHeader::new(RichText::new("Other byte interpretations").color(tok.p.heading)).id_salt(("other_interp", open)).default_open(open).show(ui, |ui| {
         if let Some(n) = number {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("decoded value  ").color(tok.p.text_muted));
-                ui.add(egui::Label::new(RichText::new(format!("{n} / 0x{n:x} / 0b{n:b}")).monospace().color(tok.p.text)).extend());
-            });
+            interp_row(ui, tok, "decoded value", &format!("{n} / 0x{n:x} / 0b{n:b}"));
+        }
+        for (label, v) in extra {
+            interp_row(ui, tok, label, v);
         }
         if let Some(s) = s {
             interp(ui, st, tok, s);
         }
+    });
+}
+
+/// One interpretation row: muted label, then the value wrapped in the remaining width (no
+/// horizontal scrolling, design C1).
+fn interp_row(ui: &mut egui::Ui, tok: &Tokens, label: &str, v: &str) {
+    ui.horizontal_top(|ui| {
+        ui.label(RichText::new(format!("{label}  ")).color(tok.p.text_muted));
+        long_value(ui, tok, v);
     });
 }
 
@@ -167,15 +183,16 @@ fn selection_range(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: &Span, act
             acts.push(Action::HexShowSpace(sp.space));
         }
     }
-    other_interpretations(ui, st, tok, Some(s), None, !structure);
+    other_interpretations(ui, st, tok, Some(s), None, &[], !structure);
 }
 
 fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field, acts: &mut Vec<Action>) {
     // Title + status.
     ui.horizontal_wrapped(|ui| {
+        // Not checked: no chip (no status is claimed, design A9).
         if f.untrusted {
             chip_word(ui, tok, f.status, diagnosis::UNTRUSTED_WORD, diagnosis::UNTRUSTED_MEANING);
-        } else {
+        } else if f.not_checked.is_none() {
             chip(ui, tok, f.status);
         }
         ui.heading(&f.name);
@@ -187,24 +204,36 @@ fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field
         ui.add(egui::Label::new(&f.explain).wrap());
     }
     // The decoded value once; its alternate notations sit in "Other byte interpretations".
-    long_value(ui, "v_value", &f.value);
+    long_value(ui, tok, &f.value);
     if !f.encoding.is_empty() {
         ui.add(egui::Label::new(RichText::new(format!("Encoding: {}", f.encoding)).color(tok.p.text_muted)).wrap());
     }
     if !f.raw.is_empty() {
-        long_value(ui, "v_raw", &f.raw);
+        long_value(ui, tok, &f.raw);
     }
     // Where: every address space, File first.
     where_section(ui, st, tok, f.span);
-    // Diagnosis (or the separate Unsupported / Unknown statement).
-    if let Some(fd) = diagnosis::finding(f.status, f.diag.as_deref(), &f.name) {
+    // Diagnosis (or the separate Unsupported / Unknown statement); nothing for bytes that were
+    // simply not checked.
+    if let Some(fd) = diagnosis::finding(f.status, f.diag.as_deref(), &f.name).filter(|_| f.not_checked.is_none()) {
         ui.add_space(4.0);
         finding(ui, tok, &fd, "field", acts);
     }
     // Derivation: what the status means and where the link leads.
     section(ui, tok, "Derivation");
-    let meaning = if f.untrusted { diagnosis::UNTRUSTED_MEANING } else { status_meaning(f.status) };
-    ui.add(egui::Label::new(format!("{} {meaning}", f.status.symbol())).wrap());
+    match &f.not_checked {
+        Some(d) => {
+            ui.add(egui::Label::new(RichText::new(d).color(tok.p.text_muted)).wrap());
+        }
+        None => {
+            let meaning = match f.status {
+                _ if f.untrusted => diagnosis::UNTRUSTED_MEANING,
+                _ if f.check_note.is_some() => f.check_note.unwrap_or_default(),
+                s => status_meaning(s),
+            };
+            ui.add(egui::Label::new(format!("{} {meaning}", f.status.symbol())).wrap());
+        }
+    }
     if f.link.is_some() || f.open_path.is_some() {
         ui.add_space(6.0);
         let label = if f.open_path.is_some() { "Open referenced file ›" } else { "Go to target ›" };
@@ -214,7 +243,7 @@ fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field
     }
     // Typed decoded value only; the display string is never parsed back.
     let number = f.decoded.as_ref().and_then(|d| d.as_u64());
-    other_interpretations(ui, st, tok, f.span.as_ref(), number, false);
+    other_interpretations(ui, st, tok, f.span.as_ref(), number, &f.interp, false);
 }
 
 /// Node-level explanation when no row is selected: title, status and a summary of the
@@ -300,11 +329,10 @@ fn statement(ui: &mut egui::Ui, tok: &Tokens, s: Status, word: &str, text: &str)
 }
 
 /// "✖ Diagnosis" / "✂ Diagnosis" heading and the label/value lines; the Bytes line is a link
-/// that selects the span in its own offset space. Values (hex, numbers, enum names, spans) are
-/// single unbroken monospace labels; prose wraps at word boundaries only. Below
-/// `layout::DIAG_SIDE_MIN`, or when the widest value does not fit beside the labels, each label
-/// sits on its own line above its full-width value. A token wider than the panel scrolls
-/// horizontally in its own row; no token is ever split.
+/// that selects the span in its own offset space. Prose wraps at word boundaries; monospace
+/// values (hex, numbers, enum names, spans) wrap at the designed break points (0015 C2) — no
+/// horizontal scrolling. Below `layout::DIAG_SIDE_MIN`, or when the widest value does not fit
+/// beside the labels, each label (wrapping itself, C4/C5) sits above its full-width value.
 fn diagnosis_ui(ui: &mut egui::Ui, tok: &Tokens, d: &Diagnosis, id: &str, acts: &mut Vec<Action>) {
     ui.label(RichText::new(format!("{} Diagnosis", d.status.symbol())).strong().color(tok.status(d.status)));
     let body = egui::TextStyle::Body.resolve(ui.style());
@@ -312,8 +340,7 @@ fn diagnosis_ui(ui: &mut egui::Ui, tok: &Tokens, d: &Diagnosis, id: &str, acts: 
     let w = |ui: &egui::Ui, s: &str, f: &egui::FontId| ui.fonts_mut(|x| x.layout_no_wrap(s.to_string(), f.clone(), tok.p.text).size().x);
     let label_w = d.lines.iter().map(|l| w(ui, l.label, &body)).fold(0.0, f32::max) + 8.0;
     // Unbreakable width of each line: the whole value, or the longest word of prose.
-    let need: Vec<f32> = d.lines.iter().map(|l| if l.prose { l.text.split_whitespace().map(|t| w(ui, t, &body)).fold(0.0, f32::max) } else { w(ui, &l.text, &mono) }).collect();
-    let widest = need.iter().copied().fold(0.0, f32::max);
+    let widest = d.lines.iter().map(|l| if l.prose { l.text.split_whitespace().map(|t| w(ui, t, &body)).fold(0.0, f32::max) } else { w(ui, &l.text, &mono) }).fold(0.0, f32::max);
     let side = layout::diag_side_by_side(ui.available_width(), label_w, widest);
     for (i, l) in d.lines.iter().enumerate() {
         ui.push_id((id, i), |ui| {
@@ -321,11 +348,13 @@ fn diagnosis_ui(ui: &mut egui::Ui, tok: &Tokens, d: &Diagnosis, id: &str, acts: 
             if side {
                 ui.horizontal_top(|ui| {
                     ui.add_sized([label_w, ui.text_style_height(&egui::TextStyle::Body)], egui::Label::new(label));
-                    diag_value(ui, tok, l, need[i], acts);
+                    diag_value(ui, tok, l, acts);
                 });
             } else {
-                ui.add(egui::Label::new(label).extend());
-                diag_value(ui, tok, l, need[i], acts);
+                // Stacked: the label wraps too, so it is never cut ("Record completeness (no
+                // LAST fragment)" fits in two lines at the default width).
+                ui.add(egui::Label::new(label).wrap());
+                diag_value(ui, tok, l, acts);
                 ui.add_space(2.0);
             }
         });
@@ -333,32 +362,21 @@ fn diagnosis_ui(ui: &mut egui::Ui, tok: &Tokens, d: &Diagnosis, id: &str, acts: 
     ui.add_space(4.0);
 }
 
-/// One Diagnosis value in the remaining width (see `diagnosis_ui`); `need` is its unbreakable width.
-fn diag_value(ui: &mut egui::Ui, tok: &Tokens, l: &DiagLine, need: f32, acts: &mut Vec<Action>) {
-    let draw = |ui: &mut egui::Ui| {
-        let mut t = if l.prose { RichText::new(&l.text) } else { RichText::new(&l.text).monospace() };
-        if l.link.is_some() {
-            t = t.color(tok.p.accent_text).underline();
-        }
-        let mut lab = if l.prose { egui::Label::new(t).wrap() } else { egui::Label::new(t).extend() };
-        if l.link.is_some() {
-            lab = lab.sense(egui::Sense::click());
-        }
-        ui.add(lab)
-    };
-    let r = if need > ui.available_width() {
-        egui::ScrollArea::horizontal()
-            .id_salt("value")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                // Prose wraps at its longest word, never inside it.
-                ui.set_max_width(need);
-                draw(ui)
-            })
-            .inner
-    } else {
-        draw(ui)
-    };
+/// One Diagnosis value in the remaining width (see `diagnosis_ui`): prose wraps at words,
+/// monospace values at the designed break points (`fit_value`), full value on hover.
+fn diag_value(ui: &mut egui::Ui, tok: &Tokens, l: &DiagLine, acts: &mut Vec<Action>) {
+    let mut t = if l.prose { RichText::new(&l.text) } else { RichText::new(fit_value(ui, &l.text).0).monospace() };
+    if l.link.is_some() {
+        t = t.color(tok.p.accent_text).underline();
+    }
+    let mut lab = if l.prose { egui::Label::new(t).wrap() } else { egui::Label::new(t).extend() };
+    if l.link.is_some() {
+        lab = lab.sense(egui::Sense::click());
+    }
+    let mut r = ui.add(lab);
+    if !l.prose && l.link.is_none() {
+        r = r.on_hover_text(value_tip(&l.text));
+    }
     if let Some(span) = l.link {
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Select these bytes in their own offset space").clicked() {
             acts.push(Action::SelectSpan(span));
@@ -387,30 +405,15 @@ fn empty(ui: &mut egui::Ui, tok: &Tokens) {
     }
 }
 
-/// Interpretations: every token is one unbroken label; rows wrap only at the " / " separators.
-/// A token wider than the panel puts its row into a horizontal scroll area of its own.
+/// Interpretations: one row per reading, tokens joined by " / " and wrapped to the panel width
+/// (break at the separators first; no horizontal scrolling, design C1/C2).
 fn interp(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: &Span) {
     let sp = Span { len: s.len.clamp(1, LIMITS.interp_bytes), ..*s };
     let Some(b) = st.session().hex().bytes_in(&sp) else {
         ui.label(RichText::new("(bytes not in the loaded hex page)").color(tok.p.text_muted));
         return;
     };
-    let mono = egui::TextStyle::Monospace.resolve(ui.style());
-    for (i, row) in interpretations(&b).into_iter().enumerate() {
-        let widest = row.tokens.iter().map(|t| ui.fonts_mut(|f| f.layout_no_wrap(t.clone(), mono.clone(), tok.p.text).size().x)).fold(0.0, f32::max);
-        let draw = |ui: &mut egui::Ui| {
-            ui.label(RichText::new(format!("{}  ", row.label)).color(tok.p.text_muted));
-            for (j, t) in row.tokens.iter().enumerate() {
-                if j > 0 {
-                    ui.add(egui::Label::new(RichText::new(" / ").monospace().color(tok.p.text_muted)).extend());
-                }
-                ui.add(egui::Label::new(RichText::new(t).monospace().color(tok.p.text)).extend());
-            }
-        };
-        if widest > ui.available_width() * 0.8 {
-            egui::ScrollArea::horizontal().id_salt(("interp", i)).auto_shrink([false, true]).show(ui, |ui| ui.horizontal(draw));
-        } else {
-            ui.horizontal_wrapped(draw);
-        }
+    for row in interpretations(&b) {
+        interp_row(ui, tok, &row.label, &row.tokens.join(" / "));
     }
 }

@@ -6,6 +6,10 @@
 use super::prefs::{Prefs, DEFAULT_THEME};
 use std::time::{Duration, Instant};
 
+/// How far the measured fit may fall below the current zoom before it is lowered (measurement
+/// rounding between zoom levels; ≤ 2 % of the window, inside the layout margins).
+pub const ZOOM_FIT_SLACK: f32 = 0.02;
+
 /// Default records share of the center column (records above, bytes below).
 pub const CENTER_SPLIT_DEFAULT: f32 = 0.42;
 
@@ -50,10 +54,13 @@ impl ZoomPolicy {
     /// Largest zoom (on the step grid, never below 1.0) at which the minimum layout fits:
     /// floor_to_step(min(zoom·avail_w/need_w, zoom·avail_h/need_h, max)).
     pub fn ceiling(&self, fit: ZoomFit) -> f32 {
+        ((self.raw_ceiling(fit) / self.step + 1e-3).floor() * self.step).max(1.0)
+    }
+    /// The unrounded ratio behind `ceiling`.
+    pub fn raw_ceiling(&self, fit: ZoomFit) -> f32 {
         let zoom = fit.at_zoom;
         let ratio = |avail: f32, need: f32| if need > 0.0 && avail > 0.0 && zoom > 0.0 { zoom * avail / need } else { self.max };
-        let raw = ratio(fit.avail_w, fit.need_w).min(ratio(fit.avail_h, fit.need_h)).min(self.max);
-        ((raw / self.step + 1e-3).floor() * self.step).max(1.0)
+        ratio(fit.avail_w, fit.need_w).min(ratio(fit.avail_h, fit.need_h)).min(self.max)
     }
 }
 
@@ -77,6 +84,10 @@ pub struct ViewPreferences {
     zoom_policy: ZoomPolicy,
     /// Current layout-aware zoom ceiling (recomputed from the UI's `ZoomFit` each frame).
     zoom_ceiling: f32,
+    /// Consecutive frames in which the zoom was clearly above the measured fit (0015 C3: a
+    /// reduction needs two, so one transient frame — resize step, re-measure after a zoom
+    /// change — cannot snap the zoom back).
+    over_frames: u8,
     /// Records share of the center column (bytes below); session-only.
     center_split: f32,
     /// Transient status-bar notice (zoom limit messages, Reset View confirmation).
@@ -102,6 +113,7 @@ impl ViewPreferences {
             zoom: 1.0,
             zoom_policy: ZoomPolicy::DEFAULT,
             zoom_ceiling: ZoomPolicy::DEFAULT.max,
+            over_frames: 0,
             center_split: CENTER_SPLIT_DEFAULT,
             notice: String::new(),
             notice_until: None,
@@ -231,13 +243,23 @@ impl ViewPreferences {
         self.zoom = self.zoom_policy.clamp(if z.is_finite() { z } else { 1.0 });
     }
     /// Recomputes the ceiling from this frame's layout measurements; lowers the zoom if the
-    /// window no longer fits it (resize, theme/font change, panel toggles).
+    /// window no longer fits it (resize, theme/font change, panel toggles). Zoom In/A+ use the
+    /// same ceiling (`can_zoom_in` ⇔ `zoom_in` changes the zoom). A reduction needs the zoom to
+    /// be clearly over the fit (`ZOOM_FIT_SLACK`) in two consecutive frames: measurement
+    /// rounding right after a zoom step or one transient resize frame cannot flip it back.
     pub(super) fn fit(&mut self, fit: ZoomFit) {
         self.zoom_ceiling = self.zoom_policy.ceiling(fit);
-        if self.zoom > self.zoom_ceiling + 1e-3 {
+        let over = self.zoom > self.zoom_ceiling + 1e-3 && self.zoom_policy.raw_ceiling(fit) < self.zoom - ZOOM_FIT_SLACK;
+        self.over_frames = if over { self.over_frames.saturating_add(1) } else { 0 };
+        if self.over_frames >= 2 {
+            self.over_frames = 0;
             self.zoom = self.zoom_ceiling;
             self.set_notice(format!("Zoom reduced to {:.0}% to fit window", self.zoom * 100.0));
         }
+    }
+    /// A reduction is pending (one over-fit frame seen): the UI repaints once more to confirm.
+    pub fn zoom_fit_pending(&self) -> bool {
+        self.over_frames > 0
     }
     pub(super) fn set_center_split(&mut self, r: f32) {
         self.center_split = r.clamp(0.0, 1.0);

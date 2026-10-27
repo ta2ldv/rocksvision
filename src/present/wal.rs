@@ -443,19 +443,27 @@ impl LogInspector {
         }
         // First-use summary: the first records (bounded scan), each linking to its record view.
         let (recs, scanned, more) = self.record_summaries(cancel);
-        let what = if self.mode() == LogMode::Wal { "WriteBatch" } else { "VersionEdit" };
         let total = if more { format!("≥{}", recs.len() + 1) } else { recs.len().to_string() };
         let coverage = if recs.is_empty() { format!("No records found · scanned {} of {len} B", range(0, scanned)) } else { format!("Records 1–{} of {total} · scanned {} of {len} B", recs.len(), range(0, scanned)) };
         v.notes.push(coverage.into());
-        v.notes.push(format!("Rows below the file facts: one {what} (logical record) per row, linking to its reassembled view. Physical blocks lists the raw fragments; Logical records lists every record.").into());
-        v.rows.extend(recs);
-        if more {
+        let more_row = more.then(|| {
             let fld = Field::new("more records", None, format!("records after 0x{scanned:x} are listed in Logical records ›")).kind(K::StructureRef).status(Status::Implicit).link(NodeKind::LogRecords { start: 0, page: 0 }).explain("The root lists a bounded first page; the Logical records view pages through all records.");
-            v.rows.push(super::common::field_row(fld));
-        }
+            super::common::field_row(fld)
+        });
         if self.mode() == LogMode::Manifest {
+            // MANIFEST first screen (0015 design E1/E3): Observed levels, the VersionEdits and
+            // "more records" first; the file facts follow the records.
+            v.notes.push("One VersionEdit (logical record) per row; double-click opens its reassembled view. File facts follow the records.".into());
             let fld = Field::new("Observed levels ›", None, "live SST files per column family and level after replaying every VersionEdit").kind(K::StructureRef).status(Status::Implicit).link(NodeKind::ManifestLevels).explain("Derived view: the final observed LSM shape, not compaction history.");
+            let facts = std::mem::take(&mut v.rows);
             v.rows.push(super::common::field_row(fld));
+            v.rows.extend(recs);
+            v.rows.extend(more_row);
+            v.rows.extend(facts);
+        } else {
+            v.notes.push("Rows below the file facts: one WriteBatch (logical record) per row, linking to its reassembled view. Physical blocks lists the raw fragments; Logical records lists every record.".into());
+            v.rows.extend(recs);
+            v.rows.extend(more_row);
         }
         // Not printed by the dump; the UI summarises it ("1 incomplete record") and offers the Diagnosis.
         v.diagnostics = self.eof_truncation();

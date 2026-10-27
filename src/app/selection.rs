@@ -53,8 +53,12 @@ pub struct SelectionState {
     /// Where a navigation came from ("entry 2 of Index block @0x…"), for the structure card's
     /// "Referenced from" back-link.
     via: Option<String>,
-    /// One-shot request for the records table to scroll this row into view.
-    scroll_row: Option<usize>,
+    /// One-shot request for the records table to scroll this row into view, and whether to
+    /// center it (navigation, Back, search, byte click) or scroll minimally (row keys, clicks).
+    scroll_row: Option<(usize, bool)>,
+    /// A field without bytes of its own: the first byte of the enclosing structure the byte
+    /// view shows (design B2). Never a selected range — nothing is filled or outlined.
+    shown: Option<Span>,
 }
 
 /// Everything a selection is (no epoch, no one-shot requests): saved on the history so Back
@@ -68,6 +72,7 @@ pub struct SelSnapshot {
     pub origin: SelOrigin,
     pub raw_note: Option<String>,
     pub via: Option<String>,
+    pub shown: Option<Span>,
 }
 
 impl SelectionState {
@@ -111,10 +116,14 @@ impl SelectionState {
     pub fn via(&self) -> Option<&str> {
         self.via.as_deref()
     }
+    /// For a field without bytes: the enclosing structure's first byte the byte view shows.
+    pub fn shown(&self) -> Option<Span> {
+        self.shown
+    }
 
     /// The selection as data (for the history).
     pub fn snapshot(&self) -> SelSnapshot {
-        SelSnapshot { target: self.target.clone(), span: self.span, extra: self.extra.clone(), anchor: self.anchor, origin: self.origin, raw_note: self.raw_note.clone(), via: self.via.clone() }
+        SelSnapshot { target: self.target.clone(), span: self.span, extra: self.extra.clone(), anchor: self.anchor, origin: self.origin, raw_note: self.raw_note.clone(), via: self.via.clone(), shown: self.shown }
     }
 
     /// Restores a saved selection (Back): a new epoch, and the table scrolls to its row.
@@ -122,7 +131,8 @@ impl SelectionState {
         self.set(s.target, s.span, s.extra, s.origin, s.raw_note);
         self.anchor = s.anchor;
         self.via = s.via;
-        self.scroll_row = Some(self.row().unwrap_or(0));
+        self.shown = s.shown;
+        self.scroll_row = Some((self.row().unwrap_or(0), true));
     }
 
     fn set(&mut self, target: SelTarget, span: Option<Span>, extra: Vec<Span>, origin: SelOrigin, note: Option<String>) {
@@ -132,7 +142,16 @@ impl SelectionState {
         self.origin = origin;
         self.raw_note = note;
         self.via = None;
+        self.shown = None;
         self.epoch += 1;
+    }
+
+    /// Records where the byte view shows a byte-less field (part of the same selection: no
+    /// new epoch, no span).
+    pub(super) fn set_shown(&mut self, at: Option<Span>) {
+        if self.span.is_none() {
+            self.shown = at;
+        }
     }
 
     /// Selects table row `row` with its span and exact file ranges (and asks the table to
@@ -140,7 +159,9 @@ impl SelectionState {
     pub(super) fn select_field(&mut self, row: usize, span: Option<Span>, extra: Vec<Span>, origin: SelOrigin, anchor: Option<Span>) {
         self.set(SelTarget::Field(row), span, extra, origin, None);
         self.anchor = anchor;
-        self.scroll_row = Some(row);
+        // Row keys and clicks scroll minimally; a jump (navigation, search, byte, diagnosis)
+        // centers the row (design F3).
+        self.scroll_row = Some((row, !matches!(origin, SelOrigin::Row | SelOrigin::Keyboard)));
     }
 
     /// Replaces the byte range, keeping the row (byte-search hit).
@@ -161,7 +182,7 @@ impl SelectionState {
         self.set(SelTarget::Structure, span, Vec::new(), origin, Some(note));
         self.anchor = None;
         self.via = via;
-        self.scroll_row = Some(0);
+        self.scroll_row = Some((0, false));
     }
 
     /// Raw byte range without a row (Shift+click, go to offset).
@@ -189,10 +210,10 @@ impl SelectionState {
 
     /// Scroll the selected row into view again (Reset View).
     pub(super) fn rescroll(&mut self) {
-        self.scroll_row = self.row();
+        self.scroll_row = self.row().map(|r| (r, false));
     }
 
-    pub(super) fn take_scroll_row(&mut self) -> Option<usize> {
+    pub(super) fn take_scroll_row(&mut self) -> Option<(usize, bool)> {
         self.scroll_row.take()
     }
 }

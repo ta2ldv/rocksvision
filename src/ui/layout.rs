@@ -21,7 +21,8 @@ pub struct LayoutDefaults {
     pub center_margin: [f32; 2],
     /// Width a side panel's resize separator takes (line + grab tolerance), per panel.
     pub separator: f32,
-    /// Records minimum in table row heights (title line, header, one row).
+    /// Records table body rows that stay visible at the minimum height / zoom ceiling, below
+    /// the header (0015 F2; see `records_min_h`).
     pub records_min_rows: f32,
     /// Byte rows that must stay visible at the minimum height / zoom ceiling.
     pub bytes_min_rows: f32,
@@ -141,8 +142,15 @@ pub fn column_width(role: ColumnRole) -> f32 {
 /// Columns hidden first when a table does not fit its panel, in this order (all columns of
 /// the role at once): Raw hex, then Encoding, then Len.
 pub const HIDE_PRIORITY: [ColumnRole; 3] = [ColumnRole::RawHex, ColumnRole::Encoding, ColumnRole::Len];
-/// Width of an icon-only Status column (glyph; the word is in the tooltip).
-pub const STATUS_ICON_WIDTH: f32 = 30.0;
+/// Padding added to the widest status word for the Status column (cell margins + slack).
+pub const STATUS_CELL_PAD: f32 = 10.0;
+
+/// Width of the Status column: its role width, widened so the widest status word ("Not
+/// checked", "✔ Present", "✂ Truncated", "⛔ Resource limit" …, measured in the current font)
+/// is never cut (0015 C2 GUI-1). Logical points: the same at every zoom.
+pub fn status_column_width(widest_word: f32) -> f32 {
+    column_width(ColumnRole::Status).max(widest_word + STATUS_CELL_PAD)
+}
 
 /// Which columns of a table are shown at `avail` points.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,29 +158,21 @@ pub struct ColumnPlan {
     pub shown: Vec<bool>,
     /// Columns hidden for lack of width ("+N columns").
     pub hidden: usize,
-    /// Status shows its glyph only.
-    pub status_icon: bool,
 }
 
 /// Plans the visible columns: while the fixed columns plus the fill minimum and spacing do not
-/// fit `avail`, hide by `HIDE_PRIORITY`; then make Status icon-only. Never hides Offset, Field,
-/// Status or the fill column; `show_all` keeps every column (the table scrolls). Pure.
+/// fit `avail`, hide by `HIDE_PRIORITY`. Never hides Offset, Field, Status or the fill column;
+/// Status keeps its full word width (no icon-only mode, 0015 C2): if the rest still does not
+/// fit, the table scrolls horizontally. `show_all` keeps every column. Pure.
 pub fn plan_columns(roles: &[ColumnRole], avail: f32, show_all: bool, width: &dyn Fn(ColumnRole) -> f32, spacing: f32) -> ColumnPlan {
     let mut shown = vec![true; roles.len()];
     let fill = roles.iter().position(|r| r.fills());
-    let need = |shown: &[bool], icon: bool| -> f32 {
-        roles
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| shown[*i])
-            .map(|(i, r)| if Some(i) == fill { LAYOUT.remainder_min } else if *r == ColumnRole::Status && icon { STATUS_ICON_WIDTH } else { width(*r) } + spacing)
-            .sum()
-    };
+    let need = |shown: &[bool]| -> f32 { roles.iter().enumerate().filter(|(i, _)| shown[*i]).map(|(i, r)| if Some(i) == fill { LAYOUT.remainder_min } else { width(*r) } + spacing).sum() };
     if show_all {
-        return ColumnPlan { shown, hidden: 0, status_icon: false };
+        return ColumnPlan { shown, hidden: 0 };
     }
     for role in HIDE_PRIORITY {
-        if need(&shown, false) <= avail {
+        if need(&shown) <= avail {
             break;
         }
         for (i, r) in roles.iter().enumerate() {
@@ -181,9 +181,8 @@ pub fn plan_columns(roles: &[ColumnRole], avail: f32, show_all: bool, width: &dy
             }
         }
     }
-    let status_icon = need(&shown, false) > avail;
     let hidden = shown.iter().filter(|s| !**s).count();
-    ColumnPlan { shown, hidden, status_icon }
+    ColumnPlan { shown, hidden }
 }
 
 /// Splits the center height `h` (handle excluded) into (records, bytes) heights by `ratio`
@@ -203,6 +202,15 @@ pub fn split_heights(h: f32, ratio: f32, rec_min: f32, hex_min: f32) -> (f32, f3
 /// item spacing to the header and every row) plus a horizontal scroll bar.
 pub fn table_need_h(header_h: f32, row_h: f32, spacing_y: f32, hbar: f32, rows: f32) -> f32 {
     header_h + spacing_y + rows * (row_h + spacing_y) + hbar
+}
+
+/// Minimum height of the records panel (0015 F2): view title row, two location lines, the notes
+/// collapsed to one line, separator + column toggle, then the table header and
+/// `records_min_rows` body rows (+ horizontal bar), inside the center margins. `small_line` is
+/// one small text line including item spacing; `title_row` one control row.
+pub fn records_min_h(title_row: f32, small_line: f32, header_h: f32, row_h: f32, spacing_y: f32, hbar: f32) -> f32 {
+    let post = 6.0 + spacing_y + title_row;
+    2.0 * LAYOUT.center_margin[1] + title_row + 3.0 * small_line + post + table_need_h(header_h, row_h, spacing_y, hbar, LAYOUT.records_min_rows)
 }
 
 /// Records / bytes split for the center: the records get their full overhead (title, location,
@@ -383,6 +391,73 @@ pub fn status_widths(avail: f32, sel: f32, msg: f32, file: f32, hint: f32, min: 
     (m, f, 0.0)
 }
 
+/// A tree label whose never-cut head (design A5: what, members, coverage, with its glyph) is
+/// wider than the row wraps instead of truncating; otherwise only the tail truncates.
+pub fn tree_label_wraps(head_w: f32, avail: f32) -> bool {
+    head_w > avail
+}
+
+// ------------------------------------------------------------------ Explanation values (0015 C)
+
+/// Lines an Explanation value may take before it ends in "…" (full text in the tooltip).
+pub const VALUE_MAX_LINES: usize = 4;
+/// Characters of a value's full text shown in its tooltip.
+pub const VALUE_TIP_CHARS: usize = 4096;
+
+/// Breaks a monospace value into lines of at most `cols` characters, never scrolling sideways
+/// (design C1–C3). Break points in order: a space (" · " included); after "/" (", " is a
+/// space); between hex byte pairs (after "0x", at even positions — a byte is never split);
+/// anywhere as a last resort. At most `max_lines` lines; when cut, the last one ends in "…".
+/// Returns the lines and whether the value was cut. Pure (monospace: one glyph = one column).
+pub fn wrap_value(text: &str, cols: usize, max_lines: usize) -> (Vec<String>, bool) {
+    let cols = cols.max(4);
+    let mut lines: Vec<String> = Vec::new();
+    for para in text.split('\n') {
+        let mut rest: Vec<char> = para.chars().collect();
+        loop {
+            if rest.len() <= cols {
+                lines.push(rest.iter().collect());
+                break;
+            }
+            let (line_end, next) = value_break(&rest, cols);
+            lines.push(rest[..line_end].iter().collect::<String>().trim_end().to_string());
+            rest.drain(..next);
+        }
+    }
+    if lines.len() <= max_lines.max(1) {
+        return (lines, false);
+    }
+    lines.truncate(max_lines.max(1));
+    if let Some(last) = lines.last_mut() {
+        let keep: String = last.chars().take(cols - 1).collect();
+        *last = format!("{}…", keep.trim_end());
+    }
+    (lines, true)
+}
+
+/// Where to break `rest` (longer than `cols`): (end of this line, start of the next).
+fn value_break(rest: &[char], cols: usize) -> (usize, usize) {
+    // 1) the last space within the line (the space itself is dropped).
+    if let Some(i) = (1..=cols).rev().find(|&i| rest[i] == ' ') {
+        return (i, i + 1);
+    }
+    // 2) after a "/".
+    if let Some(i) = (0..cols).rev().find(|&i| rest[i] == '/') {
+        return (i + 1, i + 1);
+    }
+    // 3) a hex run ("0x…" or a continuation of hex digits): an even number of digits.
+    let hex = |c: &char| c.is_ascii_hexdigit();
+    let base = if rest.len() > 2 && rest[0] == '0' && rest[1] == 'x' && hex(&rest[2]) { 2 } else { 0 };
+    if rest[base..cols].iter().all(hex) {
+        let i = base + (cols - base) / 2 * 2;
+        if i > base {
+            return (i, i);
+        }
+    }
+    // 4) anywhere.
+    (cols, cols)
+}
+
 // ------------------------------------------------------------------ zoom ceiling (spec §8)
 
 /// Measurements (logical points, zoom-independent) of the parts the minimum layout consists of.
@@ -399,7 +474,7 @@ pub struct Measured {
     pub toolbar_row_h: f32,
     pub toolbar_pad_h: f32,
     pub status_h: f32,
-    /// Records minimum: title line + table header + one row (+ one note line).
+    /// Records minimum (`records_min_h`): overhead with collapsed notes + header + 3 rows.
     pub records_min_h: f32,
     /// Hex header groups A/B/C, one header line, the ruler, one byte row, area padding.
     pub hex_groups: [f32; 3],
@@ -460,7 +535,8 @@ mod tests {
     use crate::app::ZoomFit;
 
     /// 900 px / 110 %: the fields table hides Raw hex, then Encoding, then Len (in that order),
-    /// never Offset/Field/Status/Decoded; Status turns icon-only last; "show all" keeps all.
+    /// never Offset/Field/Status/Decoded; Status keeps its word width (no icon-only mode since
+    /// 0015 C2; the table scrolls instead); "show all" keeps all.
     #[test]
     fn column_hide_priority() {
         use ColumnRole as R;
@@ -468,7 +544,7 @@ mod tests {
         let w = |r: ColumnRole| column_width(r);
         let full: f32 = roles.iter().map(|r| if r.fills() { LAYOUT.remainder_min } else { w(*r) } + 4.0).sum();
         let p = plan_columns(&roles, full + 1.0, false, &w, 4.0);
-        assert_eq!((p.hidden, p.status_icon), (0, false));
+        assert_eq!(p.hidden, 0);
         let p = plan_columns(&roles, full - 1.0, false, &w, 4.0);
         assert_eq!(p.shown, vec![true, true, true, true, true, false, true], "Raw hex goes first");
         let p = plan_columns(&roles, full - w(R::RawHex) - 5.0, false, &w, 4.0);
@@ -476,9 +552,33 @@ mod tests {
         let p = plan_columns(&roles, full - w(R::RawHex) - w(R::Encoding) - 9.0, false, &w, 4.0);
         assert_eq!((p.shown.clone(), p.hidden), (vec![true, true, false, true, false, false, true], 3), "then Len");
         let p = plan_columns(&roles, 300.0, false, &w, 4.0);
-        assert!(p.status_icon && p.shown[0] && p.shown[1] && p.shown[3] && p.shown[6], "{p:?}");
+        assert!(p.shown[0] && p.shown[1] && p.shown[3] && p.shown[6], "{p:?}");
         let p = plan_columns(&roles, 300.0, true, &w, 4.0);
-        assert_eq!((p.hidden, p.status_icon), (0, false), "+N columns shows everything");
+        assert_eq!(p.hidden, 0, "+N columns shows everything");
+    }
+
+    /// 0015 C2 GUI-1: the Status column fits its widest word in every theme's font (header
+    /// "Status" too); points are logical, so the width holds at 900×560 and at any zoom (the
+    /// table scrolls horizontally rather than cutting Status).
+    #[test]
+    fn status_column_fits_every_status_word() {
+        use crate::ui::{panels, theme};
+        use eframe::egui;
+        for t in theme::THEMES {
+            let ctx = egui::Context::default();
+            let tok = theme::apply_theme(&ctx, t, &mut Vec::new());
+            crate::ui::test_frame(&ctx, Default::default(), |ui| {
+                let widest = panels::records::widest_status_word(ui);
+                let w = status_column_width(widest);
+                for word in panels::records::status_words() {
+                    let ww = ui.fonts_mut(|f| f.layout_no_wrap(word.clone(), egui::TextStyle::Body.resolve(ui.style()), egui::Color32::WHITE).size().x);
+                    assert!(ww + STATUS_CELL_PAD <= w + 0.01, "{}: {word:?} {ww} in {w}", t.id);
+                }
+                let header = ui.fonts_mut(|f| f.layout_no_wrap("Status".into(), tok.header_font(), egui::Color32::WHITE).size().x);
+                assert!(header + STATUS_CELL_PAD <= w, "{}: header", t.id);
+                eprintln!("{}: Status column {w:.0} pt (widest word {widest:.0} pt)", t.id);
+            });
+        }
     }
 
     /// Fix C2: a ~300 pt Explanation (1400 px, 100 %) stacks; a wide panel keeps two columns
@@ -518,7 +618,7 @@ mod tests {
         use eframe::egui::{self, FontId};
         let m = measured();
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        crate::ui::test_frame(&ctx, Default::default(), |_| {});
         let h_of = |f: FontId| ctx.fonts_mut(|x| x.row_height(&f));
         let sp = egui::Spacing::default();
         let sp_y = sp.item_spacing.y;
@@ -540,6 +640,144 @@ mod tests {
             let body_rows = ((rec - over - header_h - sp_y - sp.scroll.allocated_width()) / (row_h + sp_y)).floor();
             assert!(body_rows >= 4.0, "zoom {z}: {body_rows} rows (records {rec}, bytes {hex}, collapsed {collapsed})");
             assert!(hex >= hex_min - 0.01, "zoom {z}: bytes keep their minimum");
+        }
+    }
+
+    /// 0015 C1–C3: values wrap (no horizontal scrolling) at spaces, after "/", between hex byte
+    /// pairs, anywhere last; at most four lines, the fourth ending in "…".
+    #[test]
+    fn explanation_values_wrap_at_the_designed_break_points() {
+        assert_eq!(wrap_value("short", 20, 4), (vec!["short".to_string()], false));
+        // Spaces and " · " first.
+        let (l, cut) = wrap_value("\"key-006\" · seq 7 · Value (Put)", 14, 4);
+        assert_eq!((l, cut), (vec!["\"key-006\" ·".to_string(), "seq 7 · Value".into(), "(Put)".into()], false));
+        // After "/".
+        let (l, _) = wrap_value("/Users/me/rocks/db/000004.log", 12, 4);
+        assert_eq!(l, vec!["/Users/me/".to_string(), "rocks/db/".into(), "000004.log".into()]);
+        // Hex: after 0x at even positions, never inside a byte.
+        let (l, _) = wrap_value("0x6b65792d3030360107000000000000", 9, 4);
+        assert_eq!(l, vec!["0x6b6579".to_string(), "2d303036".into(), "01070000".into(), "00000000".into()]);
+        for (n, line) in l.iter().enumerate() {
+            let digits = if n == 0 { line.len() - 2 } else { line.len() };
+            assert_eq!(digits % 2, 0, "byte split in {line:?}");
+        }
+        assert_eq!(l.concat(), "0x6b65792d3030360107000000000000");
+        // Anywhere as a last resort; four lines max with "…" and the cut flag.
+        let (l, cut) = wrap_value(&"q".repeat(50), 10, 4);
+        assert_eq!(l.len(), 4);
+        assert!(cut && l[3].ends_with('…') && l[3].chars().count() <= 10);
+        assert!(l.iter().all(|x| x.chars().count() <= 10));
+    }
+
+    /// 0015 F4: the zoom ceiling as the shell computes it (`App::measured(ui, true)`): default
+    /// theme applied, worst-case hex header groups, the reserved path-error line, 16 offset
+    /// digits. Toolbar group widths are `measured()`'s label estimates (the shell measures them
+    /// live), so the printed values are to be cross-checked in the running app.
+    #[test]
+    fn shell_like_zoom_ceilings() {
+        use crate::ui::{panels, theme};
+        use eframe::egui;
+        let est = measured();
+        let ctx = egui::Context::default();
+        let tok = theme::apply_theme(&ctx, theme::theme_by_id(crate::app::prefs::DEFAULT_THEME), &mut Vec::new());
+        let mut m = None;
+        crate::ui::test_frame(&ctx, Default::default(), |ui| {
+            let line = ui.text_style_height(&egui::TextStyle::Body);
+            let hex_row = panels::hex::row_height(ui);
+            let sp_y = ui.spacing().item_spacing.y;
+            m = Some(Measured {
+                nav_min: LAYOUT.left_min,
+                explain_min: LAYOUT.right_min,
+                strip: tok.header_height(ui),
+                hex: panels::hex::metrics(ui, u64::MAX),
+                toolbar_groups: est.toolbar_groups.clone(),
+                toolbar_gap: ui.spacing().item_spacing.x,
+                toolbar_row_h: est.toolbar_row_h,
+                toolbar_pad_h: 2.0 * 4.0 + 1.0 + line + 2.0 + sp_y,
+                status_h: est.status_h,
+                records_min_h: records_min_h(est.toolbar_row_h, ui.text_style_height(&egui::TextStyle::Small) + sp_y, tok.header_height(ui), tok.row_height(ui), sp_y, ui.spacing().scroll.allocated_width()),
+                hex_groups: panels::hex::ceiling_groups(ui),
+                hex_gap: ui.spacing().item_spacing.x,
+                hex_line_h: panels::hex::HexMemory::default().line_h,
+                hex_ruler_h: hex_row,
+                hex_row_h: hex_row,
+                hex_pad_h: 2.0 * LAYOUT.center_margin[1] + ui.spacing().scroll.allocated_width(),
+            });
+        });
+        let m = m.unwrap();
+        let (nw, nh) = m.need(true, true);
+        for (w, h) in [(900.0, 560.0), (900.0, 700.0), (1400.0, 900.0)] {
+            let c = ZoomPolicy::DEFAULT.ceiling(ZoomFit { at_zoom: 1.0, avail_w: w, avail_h: h, need_w: nw, need_h: nh });
+            assert!(m.fits(w / c, h / c, true, true));
+            eprintln!("shell-like {w}x{h}: ceiling {:.0}% (need {nw:.0}x{nh:.0})", c * 100.0);
+        }
+    }
+
+    /// 0015 A5: the head of a group label (glyph, what, members, coverage) at the default
+    /// Navigation width: measured here; the tree wraps instead of cutting when it does not fit.
+    #[test]
+    fn tree_group_head_width_at_default_left_panel() {
+        use crate::ui::theme;
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let _ = theme::apply_theme(&ctx, theme::theme_by_id(crate::app::prefs::DEFAULT_THEME), &mut Vec::new());
+        let mut out = Vec::new();
+        crate::ui::test_frame(&ctx, Default::default(), |ui| {
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let w = |s: &str| ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x);
+            // Row: frame margin 8 each side, indent 4 + depth·14, "+" button, item spacing, button padding.
+            let plus = w("+") + 2.0 * ui.spacing().button_padding.x;
+            let avail = |depth: f32| LAYOUT.left_default - 2.0 * 8.0 - ui.spacing().scroll.allocated_width() - 4.0 - depth * LAYOUT.tree_indent - plus - ui.spacing().item_spacing.x - 2.0 * ui.spacing().button_padding.x;
+            for (depth, head) in [(0.0, "Data blocks #0–#4095 · not checked"), (0.0, "✖ Data blocks #20480–#24575 · 4095 of 4096 checked"), (1.0, "Data blocks #4096–#4159 · 63 of 64 checked")] {
+                out.push((head, w(head), avail(depth)));
+            }
+        });
+        for (head, need, avail) in &out {
+            eprintln!("A5 head {head:?}: {need:.0} pt, available {avail:.0} pt at left {}", LAYOUT.left_default);
+            // Never cut: a head wider than the row wraps the label; otherwise only the tail
+            // truncates. (Widening the default to 290 pt would add 30 pt: still short for the
+            // common head, so the default stays 260.)
+            assert_eq!(tree_label_wraps(*need, *avail), need > avail);
+            assert!(!tree_label_wraps(*need, need + 1.0));
+        }
+        assert!(out[0].1 > out[0].2 + 30.0, "re-check the 260 → 290 fallback: the common head now fits a wider default");
+    }
+
+    /// 0015 F2: at the minimum window 900×560 — at 100 % and at its zoom ceiling — the notes
+    /// collapse, the records table keeps its header + ≥ 3 body rows and the byte pane ≥ 3 byte
+    /// rows (it shrinks first, down to its floor).
+    #[test]
+    fn minimum_height_keeps_three_table_rows_and_three_byte_rows() {
+        use eframe::egui::{self, FontId};
+        let m = measured();
+        let ctx = egui::Context::default();
+        crate::ui::test_frame(&ctx, Default::default(), |_| {});
+        let h_of = |f: FontId| ctx.fonts_mut(|x| x.row_height(&f));
+        let sp = egui::Spacing::default();
+        let sp_y = sp.item_spacing.y;
+        let row_h = h_of(FontId::proportional(14.5)).max(h_of(FontId::monospace(13.5))) + LAYOUT.row_pad;
+        let header_h = h_of(FontId::proportional(15.5)) + LAYOUT.header_pad;
+        let small = h_of(FontId::proportional(12.0)) + sp_y;
+        let margins = 2.0 * LAYOUT.center_margin[1];
+        let post = 6.0 + sp_y + m.toolbar_row_h;
+        // Root view overhead (SST root: two notes; WAL root: two notes + 3-line wrap).
+        let over_full = margins + m.toolbar_row_h + 2.0 * small + 3.0 * small + post;
+        let over_collapsed = margins + m.toolbar_row_h + 2.0 * small + small + post;
+        let need = table_need_h(header_h, row_h, sp_y, sp.scroll.allocated_width(), 4.0);
+        let (nw, nh) = m.need(true, true);
+        let ceiling = ZoomPolicy::DEFAULT.ceiling(ZoomFit { at_zoom: 1.0, avail_w: 900.0, avail_h: 560.0, need_w: nw, need_h: nh });
+        for z in [1.0f32, ceiling] {
+            let (w, h) = (LAYOUT.window_min[0] / z, LAYOUT.window_min[1] / z);
+            let center_h = h - m.toolbar_h(w) - m.status_h - LAYOUT.split_handle;
+            // Byte header wrapped at the center width the side panels (at their minimum) leave.
+            let hex_min = m.bytes_h((w - m.panels_w(true, true) + center_min(&m.hex)).max(center_min(&m.hex)));
+            let hex_floor = hex_min + (LAYOUT.hex_floor_rows - LAYOUT.bytes_min_rows) * m.hex_row_h;
+            let (rec, hex, collapsed) = records_plan(center_h, 0.42, m.records_min_h, hex_min, hex_floor, over_full, need);
+            let over = if collapsed { over_collapsed } else { over_full };
+            let body_rows = ((rec - over - header_h - sp_y - sp.scroll.allocated_width()) / (row_h + sp_y)).floor();
+            eprintln!("900x560 at {:.0}%: records {rec:.0} ({body_rows} rows, notes collapsed {collapsed}), bytes {hex:.0} (min {hex_min:.0})", z * 100.0);
+            assert!(body_rows >= 3.0, "zoom {z}: {body_rows} table rows");
+            assert!(hex >= hex_min - 0.01, "zoom {z}: bytes below three rows");
         }
     }
 
@@ -635,7 +873,7 @@ mod tests {
     fn measured() -> Measured {
         use eframe::egui::{self, FontId};
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        crate::ui::test_frame(&ctx, Default::default(), |_| {});
         let tw = |s: &str, size: f32| ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), FontId::proportional(size), egui::Color32::WHITE).size().x);
         let cw = ctx.fonts_mut(|f| f.glyph_width(&FontId::monospace(13.5), '0'));
         let line = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(14.5)));
@@ -657,8 +895,9 @@ mod tests {
             group(&[btn("◀ page"), tw("page 1/1 · 0x0..0x10000 of 65536 bytes", 14.5), btn("page ▶")]),
             group(&[LAYOUT.goto_width, btn("Go to")]),
         ];
-        let rh = line + LAYOUT.row_pad;
         let ctl = sp.interact_size.y.max(line + 2.0 * sp.button_padding.y) + sp.item_spacing.y;
+        let small_line = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(12.0))) + sp.item_spacing.y;
+        let header_h = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(15.5))) + LAYOUT.header_pad;
         Measured {
             nav_min: LAYOUT.left_min,
             explain_min: LAYOUT.right_min,
@@ -669,7 +908,7 @@ mod tests {
             toolbar_row_h: ctl,
             toolbar_pad_h: 8.0,
             status_h: line + LAYOUT.status_pad + 8.0,
-            records_min_h: LAYOUT.records_min_rows * rh + line,
+            records_min_h: records_min_h(ctl, small_line, header_h, line.max(mono_line) + LAYOUT.row_pad, sp.item_spacing.y, sp.scroll.allocated_width()),
             hex_groups,
             hex_gap: gap,
             hex_line_h: ctl,
@@ -717,15 +956,21 @@ mod tests {
         let m = measured();
         let p = ZoomPolicy::DEFAULT;
         let (nw, nh) = m.need(true, true);
-        for (w, h) in [(900.0, 560.0), (900.0, 900.0), (1400.0, 900.0)] {
+        for (w, h) in [(900.0, 560.0), (900.0, 700.0), (900.0, 900.0), (1400.0, 900.0)] {
             let c = p.ceiling(ZoomFit { at_zoom: 1.0, avail_w: w, avail_h: h, need_w: nw, need_h: nh });
             // Logical window at the ceiling.
             let (lw, lh) = (w / c, h / c);
             assert!(m.fits(lw, lh, true, true), "{w}×{h}: ceiling {c} does not fit ({lw}×{lh}, need {nw}×{nh})");
             eprintln!("{w}x{h}: ceiling {:.0}%", c * 100.0);
         }
-        // Former rule: need_h = (2+1+3+6)·rh + 6 + 40, need_w = 180 + max(row(8), 300) + 200 + 48.
-        let rh = m.records_min_h / 4.0;
+        // Former rule: need_h = (2+1+3+6)·rh + 6 + 40, need_w = 180 + max(row(8), 300) + 200 + 48
+        // (rh as the former `records_min_h / 4` = (3 row heights + 1 line) / 4).
+        let line = {
+            let ctx = eframe::egui::Context::default();
+            crate::ui::test_frame(&ctx, Default::default(), |_| {});
+            ctx.fonts_mut(|f| f.row_height(&eframe::egui::FontId::proportional(14.5)))
+        };
+        let rh = (3.0 * (line + LAYOUT.row_pad) + line) / 4.0;
         let old_w = LAYOUT.left_min + m.hex.width(8).max(300.0) + LAYOUT.right_min + 48.0;
         let old_h = 12.0 * rh + 6.0 + 40.0;
         let old = p.ceiling(ZoomFit { at_zoom: 1.0, avail_w: 1400.0, avail_h: 900.0, need_w: old_w, need_h: old_h });

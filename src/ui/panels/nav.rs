@@ -3,7 +3,7 @@
 use super::{strong, table_style, title_line};
 use crate::app::{Action, AppState, Panel};
 use crate::model::{ChildRole, NodeKind};
-use crate::ui::layout::LAYOUT;
+use crate::ui::layout::{tree_label_wraps, LAYOUT};
 use crate::ui::menu::{self, MenuCmd};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
@@ -92,7 +92,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                 // One glyph per node: the worse of its own status and a problem inside it (the
                 // label carries the text suffix, e.g. "· 1 incomplete record").
                 let shown = n.shown_status();
-                // A group none of whose members was checked claims no status (no glyph).
+                // A group that is not checked as a whole claims no status (no glyph, design A3).
                 let unchecked = n.unchecked();
                 let col = if is_sel {
                     tok.p.sel_fg
@@ -102,15 +102,27 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                     tok.status(shown)
                 };
                 let full = n.full_label();
-                let mut text = RichText::new(if unchecked { full.clone() } else { format!("{} {full}", shown.symbol()) }).color(col);
+                let shown_text = if unchecked { full.clone() } else { format!("{} {full}", shown.symbol()) };
+                // A group's head (what, members and coverage) is never cut (design A5): only the
+                // tail truncates; when even the head does not fit, the head alone is shown and
+                // wraps (range and block count stay in the tooltip).
+                let head = if n.head_len() > 0 { shown_text.len() - full.len() + n.head_len() } else { 0 };
+                let wrap = head > 0 && {
+                    let body = egui::TextStyle::Button.resolve(ui.style());
+                    let w = ui.fonts_mut(|f| f.layout_no_wrap(shown_text[..head].to_string(), body, col).size().x);
+                    tree_label_wraps(w, ui.available_width() - 2.0 * ui.spacing().button_padding.x)
+                };
+                let mut text = RichText::new(if wrap { &shown_text[..head] } else { shown_text.as_str() }).color(col);
                 if n.role == ChildRole::Reference {
                     text = text.italics();
                 }
-                let r = ui.add(egui::Button::selectable(is_sel, text).wrap_mode(egui::TextWrapMode::Truncate));
-                let tip = match (n.role, n.contains) {
-                    _ if unchecked => "Not checked: no member of this group was checked yet (expand it to check its blocks)".to_string(),
-                    (ChildRole::Reference, _) => format!("{} · link: click to go to this structure at its place in file order", n.status.label()),
-                    (_, Some(c)) if c != n.status => format!("{} · contains {} {} element(s)", n.status.label(), c.symbol(), c.label()),
+                let r = ui.add(egui::Button::selectable(is_sel, text).wrap_mode(if wrap { egui::TextWrapMode::Wrap } else { egui::TextWrapMode::Truncate }));
+                let tip = match (n.role, n.contains, n.checked) {
+                    (_, _, Some((0, _))) if unchecked && n.leaf => "Not checked: listed beyond this listing's check budget; it is checked when opened".to_string(),
+                    (_, _, Some((0, _))) if unchecked => "Not checked: no member of this group was checked yet (expand it to check its blocks)".to_string(),
+                    (_, _, Some((x, y))) if unchecked => format!("Not checked as a whole: {x} of {y} members checked, none with a problem; the others are checked when expanded or opened"),
+                    (ChildRole::Reference, _, _) => format!("{} · link: click to go to this structure at its place in file order", n.status.label()),
+                    (_, Some(c), _) if c != n.status => format!("{} · contains {} {} element(s)", n.status.label(), c.symbol(), c.label()),
                     _ => n.status.label().to_string(),
                 };
                 let r = r.on_hover_text(format!("{full}\n{tip}"));

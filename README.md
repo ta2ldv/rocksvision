@@ -119,7 +119,7 @@ Select a row to highlight its bytes; click a byte to select the field that holds
 
 Search checks decoded cells of the current table and stored file bytes, not every decoded table or decompressed block. **Hex bytes** accepts a pattern such as `4d 41 4e`. In the search field, **Enter** advances and **Shift+Enter** goes back.
 
-Use **View** for themes, panel visibility and zoom. **Reset View** restores the internal layout and 100% zoom; it does not resize the window. **Help → RocksVision Help** explains the interface and **Keyboard Shortcuts** lists the keys. macOS uses native menus; other platforms have an in-window menu.
+Use **View** for themes, panel visibility and zoom. Text size (A− / A+) goes up to the largest zoom at which the whole layout still fits: 160 % at 1400×900 and 100 % at 900×560 (measured in the running app, default theme), 120 % at 900×700 by the layout measurement (to be confirmed in the running app). A+ is disabled at that ceiling; a larger window raises it. "Checked" means a block's checksum and trailer were verified: opening a block checks it, and listing up to 64 blocks in the tree reads and checks those blocks; the others say "Not checked". **Reset View** restores the internal layout and 100% zoom; it does not resize the window. **Help → RocksVision Help** explains the interface and **Keyboard Shortcuts** lists the keys. macOS uses native menus; other platforms have an in-window menu.
 
 ## Build
 
@@ -136,11 +136,11 @@ Scripts check prerequisites, bootstrap missing tools where supported, and build 
 
 Open the macOS `.app` in Finder, run the Windows `.exe`, or launch `./dist/ubuntu-x64/rocksvision` from an Ubuntu desktop session. Each script also produces a ZIP/tar.gz package, build information and SHA-256 checksums under `dist/`. Linux desktop/runtime requirements and setup details are in the [build guide](docs/BUILD.md).
 
-**Verification status:** macOS ARM has been built and exercised. macOS Intel, Ubuntu and Windows scripts have been reviewed but have **not yet been validated by building and running on those targets**.
+**Verification status:** for v0.1.1, CI built, packaged and tested all four platforms (macOS ARM, macOS Intel, Ubuntu, Windows); the packaged macOS ARM app was checked in its GUI, and the user ran the macOS ARM, macOS Intel and Windows builds. Ubuntu GUI launch is not yet tested. Version 0.1.2 awaits its CI run.
 
 ## Status and limitations
 
-Version **0.1.0** is an early inspection tool. Format coverage is not universal; unsupported features and unavailable context must be distinguished from absent or corrupt data. Checks do not guarantee detection of every damaged file.
+Version **0.1.2** is an early inspection tool. Format coverage is not universal; unsupported features and unavailable context must be distinguished from absent or corrupt data. Checks do not guarantee detection of every damaged file.
 
 Known follow-ups include narrow-window paging controls, Matrix toolbar clipping, and propagation of incomplete WAL-fragment diagnostics to the root summary. macOS packages are ad-hoc signed, not notarized. See the [build guide](docs/BUILD.md) for platform-specific limitations.
 

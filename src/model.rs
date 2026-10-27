@@ -540,6 +540,12 @@ pub struct Field {
     /// Decoded from bytes whose enclosing checksum failed (status is then Invalid; the UI says
     /// "Untrusted"). Not Unknown: Unknown means missing context (spec §12.6).
     pub untrusted: bool,
+    /// Bytes in range but not checked (no status claimed; `status` is then Unknown): the
+    /// Derivation sentence saying where the handle places them and when they are checked.
+    pub not_checked: Option<String>,
+    /// Derivation of a status that comes from a block check (`CHECKSUM_VERIFIED` only when a
+    /// checksum was actually compared, else e.g. `NO_CHECKSUM`); None = the generic meaning.
+    pub check_note: Option<&'static str>,
     pub explain: String,
     /// Navigation target (e.g. block handle → target block).
     pub link: Option<NodeKind>,
@@ -549,6 +555,9 @@ pub struct Field {
     pub value_bytes: Option<ValueBytes>,
     /// Exact key bytes of an entry row ("Copy key").
     pub key_bytes: Option<ValueBytes>,
+    /// Extra "Other byte interpretations" rows supplied by the presenter (label, value), e.g.
+    /// the internal and user key bytes of an entry.
+    pub interp: Vec<(&'static str, String)>,
 }
 
 impl Field {
@@ -564,11 +573,14 @@ impl Field {
             encoding: String::new(),
             status: if span.is_some() { Status::Present } else { Status::Implicit },
             untrusted: false,
+            not_checked: None,
+            check_note: None,
             explain: String::new(),
             link: None,
             open_path: None,
             value_bytes: None,
             key_bytes: None,
+            interp: Vec::new(),
         }
     }
     pub fn enc(mut self, e: impl Into<String>) -> Self {
@@ -615,6 +627,19 @@ impl Field {
         self.diag = d.map(Box::new);
         self
     }
+    /// Marks the field as not checked (see `not_checked`): status Unknown, no status claimed.
+    pub fn not_checked(mut self, derivation: Option<String>) -> Self {
+        if derivation.is_some() {
+            self.status = Status::Unknown;
+        }
+        self.not_checked = derivation;
+        self
+    }
+    /// Derivation of a status from a block check (see `check_note`).
+    pub fn check_note(mut self, note: Option<&'static str>) -> Self {
+        self.check_note = note;
+        self
+    }
 }
 
 impl From<Fact> for Field {
@@ -630,11 +655,14 @@ impl From<Fact> for Field {
             encoding: f.encoding,
             status: f.status,
             untrusted: false,
+            not_checked: None,
+            check_note: None,
             explain: String::new(),
             link: None,
             open_path: None,
             value_bytes: f.bytes,
             key_bytes: None,
+            interp: Vec::new(),
         }
     }
 }
@@ -839,17 +867,59 @@ pub struct Child {
     pub contains: Option<Status>,
     pub role: ChildRole,
     /// A group whose status comes from its members: (members checked, members). `(0, n)` =
-    /// nothing checked yet (no glyph, "· not checked"); `status` is then the worst checked
-    /// member, Present only when all n were checked and Present.
+    /// nothing checked yet (no glyph, "· not checked"); otherwise `status` is the worst checked
+    /// member (Present when the checked ones are clean; the glyph rule is `group_glyph`).
     pub checked: Option<(u64, u64)>,
 }
 
-/// Label suffix of a group's check coverage: " · not checked" / " · 3 of 64 checked".
-pub fn check_suffix(c: Option<(u64, u64)>) -> String {
+/// Status word of bytes that are in range but were not checked (no glyph, no status claimed).
+/// "Checked" means only "checksum and trailer verified" (design A1).
+pub const NOT_CHECKED: &str = "Not checked";
+/// Derivation of a Present block whose stored checksum was compared and matched (design A2).
+pub const CHECKSUM_VERIFIED: &str = "Present: checksum verified.";
+/// Derivation of a Present block of a kNoChecksum file: read, nothing to compare.
+pub const NO_CHECKSUM: &str = "Present: block read; file has no checksum (kNoChecksum).";
+/// Derivation of a Present block whose checksum was not compared (unknown checksum type).
+pub const CHECKSUM_NOT_COMPARED: &str = "Present: block read; checksum not compared.";
+
+/// A group's check coverage: "not checked" / "3 of 64 checked" (None: not a group).
+pub fn coverage_text(c: Option<(u64, u64)>) -> Option<String> {
+    match c? {
+        (0, _) => Some("not checked".into()),
+        (x, y) => Some(format!("{x} of {y} checked")),
+    }
+}
+
+/// Group label with its coverage after the head (`{what} #a–#z · {coverage} · {range} · {n}
+/// blocks`), so the coverage is never behind a long range. Labels without " · " get it appended.
+pub fn with_coverage(label: &str, c: Option<(u64, u64)>) -> String {
+    match (coverage_text(c), label.split_once(" · ")) {
+        (None, _) => label.to_string(),
+        (Some(cov), Some((head, tail))) => format!("{head} · {cov} · {tail}"),
+        (Some(cov), None) => format!("{label} · {cov}"),
+    }
+}
+
+/// Severity order of statuses (higher is worse): the one ranking for worst-of aggregation (tree
+/// groups, cache coverage) and the single tree glyph.
+pub fn rank(s: Status) -> u8 {
+    match s {
+        Status::Present | Status::Implicit | Status::NotPresent => 0,
+        Status::Unknown | Status::Unsupported | Status::Limited => 1,
+        Status::Truncated => 2,
+        Status::Invalid => 3,
+    }
+}
+
+/// The glyph a group shows (design A3): a checked member's problem (Invalid / Truncated /
+/// resource limit) always; otherwise only when every member was checked (✔ "y of y checked");
+/// none while members are unchecked. Non-groups always show their status.
+pub fn group_glyph(status: Status, c: Option<(u64, u64)>) -> Option<Status> {
     match c {
-        None => String::new(),
-        Some((0, _)) => " · not checked".into(),
-        Some((x, y)) => format!(" · {x} of {y} checked"),
+        None => Some(status),
+        _ if status.is_problem() => Some(status),
+        Some((x, y)) if x > 0 && x >= y => Some(status),
+        Some(_) => None,
     }
 }
 

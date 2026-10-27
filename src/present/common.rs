@@ -137,10 +137,8 @@ impl Location {
 
 pub fn field_row(f: Field) -> Row {
     let (o, l) = span_cells(&f.span);
-    Row {
-        cells: vec![f.name.clone(), o, l, f.value.clone(), f.encoding.clone(), f.raw.clone(), st_cell(f.status)],
-        field: f,
-    }
+    let st = if f.not_checked.is_some() { NOT_CHECKED.to_string() } else { st_cell(f.status) };
+    Row { cells: vec![f.name.clone(), o, l, f.value.clone(), f.encoding.clone(), f.raw.clone(), st], field: f }
 }
 
 pub fn st_cell(s: Status) -> String {

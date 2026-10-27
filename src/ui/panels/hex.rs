@@ -393,8 +393,8 @@ fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: &Sel, owner:
     let mut area = egui::ScrollArea::both().id_salt("hex_scroll").auto_shrink([false, false]);
     if let Some(t) = scroll_to {
         if t >= hex.page_base() {
-            let row = (t - hex.page_base()) / n;
-            area = area.vertical_scroll_offset((row as f32 - 3.0).max(0.0) * row_h);
+            // Row pitch is exactly `row_h` (`rows_area` zeroes the spacing egui adds per row).
+            area = area.vertical_scroll_offset(scroll_offset_for_row((t - hex.page_base()) / n, row_h));
         }
     }
     let page_base = hex.page_base();
@@ -405,8 +405,7 @@ fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: &Sel, owner:
     let origin = ui.input(|i| i.pointer.press_origin());
     let press = origin.or(mem.press);
     mem.press = origin;
-    let out = area.show_rows(ui, row_h, rows, |ui, range| {
-        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+    let out = rows_area(ui, area, row_h, rows, |ui, range| {
         for r in range {
             let row_off = page_base + r as u64 * n;
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(content_w, row_h), Sense::click());
@@ -484,6 +483,25 @@ fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: &Sel, owner:
     ev
 }
 
+/// Scroll offset that shows byte row `row` with three rows of context above it (B3/F3).
+pub fn scroll_offset_for_row(row: u64, row_h: f32) -> f32 {
+    (row as f32 - 3.0).max(0.0) * row_h
+}
+
+/// `ScrollArea::show_rows` with a row pitch of exactly `row_h`: egui 0.36 lays rows at
+/// `row_h + item_spacing.y` of the ui it is called on, so the spacing is zeroed outside (and
+/// inside) the area; a scroll offset of k·row_h then shows row k at the top (0015 C3 GUI-2).
+fn rows_area<R>(ui: &mut egui::Ui, area: egui::ScrollArea, row_h: f32, rows: usize, f: impl FnOnce(&mut egui::Ui, std::ops::Range<usize>) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        area.show_rows(ui, row_h, rows, |ui, range| {
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            f(ui, range)
+        })
+    })
+    .inner
+}
+
 fn centered(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(LAYOUT.status_pad * 4.0);
     ui.vertical_centered(f);
@@ -495,6 +513,38 @@ mod tests {
     use crate::model::{Space, Span};
     use crate::ui::layout::center_min;
     use crate::ui::theme::{apply_theme, THEMES};
+
+    /// 0015 C3 GUI-2: Go to 0x5eec (16 B/row → row 0x5ee) puts that row on screen with three
+    /// rows above; egui's plain `show_rows` (pitch row_h + item spacing) would land short.
+    #[test]
+    fn scroll_to_row_lands_on_the_row() {
+        let ctx = egui::Context::default();
+        let _ = apply_theme(&ctx, &THEMES[0], &mut Vec::new());
+        let target = 0x5eec_u64 / 16;
+        for fixed in [true, false] {
+            let mut seen = 0..0;
+            for _ in 0..2 {
+                let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))), ..Default::default() };
+                crate::ui::test_frame(&ctx, input, |ui| {
+                    let row_h = row_height(ui);
+                    let area = egui::ScrollArea::vertical().id_salt(("t", fixed)).vertical_scroll_offset(scroll_offset_for_row(target, row_h));
+                    let add = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
+                        for _ in range.clone() {
+                            ui.allocate_exact_size(egui::vec2(100.0, row_h), egui::Sense::hover());
+                        }
+                        range
+                    };
+                    seen = if fixed { rows_area(ui, area, row_h, 4096, add).inner } else { area.show_rows(ui, row_h, 4096, add).inner };
+                });
+            }
+            if fixed {
+                assert_eq!(seen.start as u64, target - 3, "three rows of context above the target");
+                assert!(seen.contains(&(target as usize)), "{seen:?}");
+            } else {
+                assert!(!seen.contains(&(target as usize)), "control: plain show_rows reproduces GUI-2 ({seen:?})");
+            }
+        }
+    }
 
     #[test]
     fn paging_text_first_middle_last() {
@@ -530,7 +580,7 @@ mod tests {
                     for base in bases {
                         for wide_room in [false, true] {
                             let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0 * z, 900.0 * z))), ..Default::default() };
-                            let _ = ctx.run_ui(input, |ui| {
+                            crate::ui::test_frame(&ctx, input, |ui| {
                                 let m = metrics(ui, size);
                                 // The hex area inside the center margins at 4 bytes per row.
                                 let avail = if wide_room { 1000.0 } else { center_min(&m) - 2.0 * LAYOUT.center_margin[0] };

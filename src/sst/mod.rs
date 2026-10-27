@@ -66,7 +66,8 @@ pub struct SstInspector {
     known: std::collections::HashMap<u64, (Handle, BlockKind)>,
     /// Integrity status of blocks already checked (bounded): group nodes report coverage
     /// from it without reading any block.
-    checked: std::collections::HashMap<(u64, u64), Status>,
+    /// Value: (status, checksum actually compared).
+    checked: std::collections::HashMap<(u64, u64), (Status, bool)>,
 }
 
 /// table_properties.cc / meta_blocks.cc: properties written with PutVarint64.
@@ -180,6 +181,8 @@ impl SstInspector {
         let mut s = SstInspector { r, path, footer, footer_diag, meta: Err("footer not decoded".into()), props: None, prop_spans: BTreeMap::new(), layout: None, cache: BlockCache::new(BLOCK_CACHE_ITEMS, BLOCK_CACHE_BYTES), dict: None, known: std::collections::HashMap::new(), checked: std::collections::HashMap::new() };
         if let Ok(f) = s.footer.clone() {
             let b = s.block(f.metaindex, BlockKind::Metaindex);
+            // Read (and so checksum-verified) at open: recorded as checked (cache hit, no read).
+            s.block_check(f.metaindex);
             s.meta = match (&b.error, block::layout(&b.data)) {
                 (Some((_, e)), _) => Err(e.clone()),
                 (None, Err(e)) => Err(e.to_string()),
@@ -197,6 +200,7 @@ impl SstInspector {
             };
             if let Some(h) = s.props_handle() {
                 let b = s.block(h, BlockKind::Properties);
+                s.block_check(h);
                 if let Ok(lay) = block::layout(&b.data) {
                     let (es, _) = block::entries(&b.data, &lay, None);
                     s.props = Some(es.iter().map(|e| (String::from_utf8_lossy(&e.key).into_owned(), b.data[e.value_off..e.value_off + e.value_len].to_vec())).collect());
@@ -363,30 +367,53 @@ impl SstInspector {
     }
 
     /// `block_status` plus the problem as data (None when the block verified). The result is
-    /// remembered (bounded) for group coverage (`checked_status`).
+    /// remembered (bounded) for group coverage (`checked_status`), with whether a checksum was
+    /// actually compared (`checksum_verified`).
     pub fn block_check(&mut self, h: Handle) -> (Status, Option<Diagnostic>) {
-        let r = self.block_check_uncached(h);
+        let (st, d, verified) = self.block_check_uncached(h);
         if self.checked.len() >= KNOWN_BLOCK_HANDLES {
             self.checked.clear();
         }
-        self.checked.insert((h.offset, h.size), r.0);
-        r
+        self.checked.insert((h.offset, h.size), (st, verified));
+        (st, d)
     }
 
     /// Status of block `h` if it was already checked (never reads).
     pub fn checked_status(&self, h: Handle) -> Option<Status> {
-        self.checked.get(&(h.offset, h.size)).copied()
+        self.checked.get(&(h.offset, h.size)).map(|c| c.0)
     }
 
-    fn block_check_uncached(&mut self, h: Handle) -> (Status, Option<Diagnostic>) {
+    /// The check of block `h` compared its stored checksum (and it matched when the status is
+    /// Present). False for kNoChecksum files, an unknown checksum type or an unchecked block.
+    pub fn checksum_verified(&self, h: Handle) -> bool {
+        self.checked.get(&(h.offset, h.size)).is_some_and(|c| c.1)
+    }
+
+    /// (status, problem, checksum compared).
+    fn block_check_uncached(&mut self, h: Handle) -> (Status, Option<Diagnostic>, bool) {
         if let Some(b) = self.cache.get(h.offset).filter(|b| b.handle == h) {
             let d = b.diags.first().cloned();
             return match &b.error {
-                Some((st, _)) => (*st, d),
-                None if b.checksum_status == Status::Invalid => (Status::Invalid, d),
-                None => (Status::Present, None),
+                Some((st, _)) => (*st, d, false),
+                None => match b.checksum_status {
+                    Status::Invalid => (Status::Invalid, d, true),
+                    Status::Present => (Status::Present, None, true),
+                    // kNoChecksum: present, nothing compared.
+                    Status::NotPresent => (Status::Present, None, false),
+                    // Unknown checksum type: as the uncached path says.
+                    s => (s, None, false),
+                },
             };
         }
+        let (st, d) = self.read_and_check(h);
+        // Compared = a checksum type the file uses was computed and compared (match or mismatch).
+        let ct = self.footer.as_ref().map(|f| f.checksum_type).unwrap_or(0);
+        let compared = ct != 0 && (st == Status::Present || d.as_ref().is_some_and(|d| d.check == footer::checksum_check(ct)));
+        (st, d, compared)
+    }
+
+    /// Reads block `h` with its trailer and compares the checksum (no decompression).
+    fn read_and_check(&self, h: Handle) -> (Status, Option<Diagnostic>) {
         let Ok(f) = &self.footer else { return (Status::Unknown, None) };
         let (ct, base) = (f.checksum_type, f.base_context);
         let span = Some(Span::file(h.offset, h.size.saturating_add(BLOCK_TRAILER)));
