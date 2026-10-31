@@ -19,6 +19,11 @@ want=${3:-}
   echo "usage: check-tag-commit.sh <owner/repo> <tag> <40-hex commit sha>" >&2
   exit 2
 }
+# The tag goes into API paths: letters, digits, '.', '_' and '-' only (no '/', '?', '#', spaces).
+[[ $tag =~ ^[A-Za-z0-9._-]+$ ]] || {
+  echo "usage: check-tag-commit.sh <owner/repo> <tag> <40-hex commit sha> (tag: [A-Za-z0-9._-]+, got '$tag')" >&2
+  exit 2
+}
 [ -n "${GH_TOKEN:-}" ] || {
   echo "error: GH_TOKEN is not set" >&2
   exit 2

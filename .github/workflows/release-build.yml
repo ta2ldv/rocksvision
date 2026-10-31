@@ -127,6 +127,8 @@ jobs:
             esac
           fi
           echo "proceed=$proceed" >>"$GITHUB_OUTPUT"
+      # Lightweight and annotated tags: GET git/ref/tags/<tag>; an annotated tag object is peeled
+      # once via git/tags/<sha> (commits/tags/<tag> answers 422 for annotated tags, run 41229922521).
       - name: Tag still points to this commit (tag mode, fail-closed)
         if: github.ref_type == 'tag' && steps.mode.outputs.proceed == 'true'
         env:

@@ -184,7 +184,7 @@ Gating (every job: actor and triggering actor `ta2ldv`; tag deletions are skippe
 | Check (script) | Outcome |
 |---|---|
 | tag strict `vMAJOR.MINOR.PATCH`, equal to Cargo.toml at the tagged commit (`validate-tag.sh`) | exit 0 continue; 1 (not strict, e.g. `v0.1.02`, or != Cargo.toml) validate FAILS; 10 (older than 0.1.1, e.g. `v0.1.0`) NEUTRAL SKIP: validate passes with a notice, nothing else runs |
-| tag on GitHub still points to the built commit (`check-tag-commit.sh`) | 0 continue; 1 moved/missing; 3 API error |
+| tag on GitHub still points to the built commit (`check-tag-commit.sh`; lightweight or annotated: `git/ref/tags/<tag>`, an annotated tag object is peeled once via `git/tags/<sha>`) | 0 continue; 1 moved, missing (404) or not pointing to a commit; 3 API/network error (fail-closed) |
 | release state (`check-release-ready.sh`) | 0 published release, `"immutable": false`, no same-name asset: upload-only; 10 no release: create; 1 draft, immutable true/unverifiable, or an asset name exists; 3 API/network error (fail-closed) |
 
 `contents: write` exists only in the release job, which runs only in `ta2ldv/rocksvision` and only

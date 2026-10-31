@@ -50,6 +50,7 @@ case $url in
     t=${url##*/git/ref/tags/}
     if [ -f "$s/http_commit" ]; then reply "$(cat "$s/http_commit")" '{"message":"error"}'
     elif [ -f "$s/ref_badjson" ]; then reply 200 "{\"ref\":\"refs/tags/$t\"}"
+    elif [ -f "$s/ref_other" ]; then reply 200 "{\"ref\":\"refs/tags/other\",\"object\":{\"type\":\"commit\",\"sha\":\"$(cat "$s/commit_sha")\"}}"
     elif [ -f "$s/commit_sha" ] && [ -f "$s/tag_annotated" ]; then
       reply 200 "{\"ref\":\"refs/tags/$t\",\"object\":{\"type\":\"tag\",\"sha\":\"$(cat "$s/tag_annotated")\"}}"
     elif [ -f "$s/commit_sha" ]; then
@@ -158,6 +159,7 @@ s_annot_moved() { s_annot; echo "$other" >"$FAKE_STATE/commit_sha"; }
 s_annot_tree() { s_annot; echo tree >"$FAKE_STATE/tagobj_type"; }
 s_annot_500() { s_annot; echo 500 >"$FAKE_STATE/http_tagobj"; }
 s_ref_bad() { s_present; : >"$FAKE_STATE/ref_badjson"; }
+s_ref_other() { s_present; : >"$FAKE_STATE/ref_other"; }
 s_absent_annot() { s_absent; echo "$tagobj" >"$FAKE_STATE/tag_annotated"; }
 s_all() { s_present; for a in "${names[@]}"; do jq --arg n "$a" '. + [{name: $n, state: "uploaded"}]' "$FAKE_STATE/assets.json" >"$FAKE_STATE/x" && mv "$FAKE_STATE/x" "$FAKE_STATE/assets.json"; done; }
 s_absent_drop() { s_absent; : >"$FAKE_STATE/gh_drop_one"; }
@@ -198,6 +200,13 @@ case_ T6 1 "annotated tag -> tag object -> other commit" s_annot_moved $T repo/x
 case_ T7 1 "annotated tag object points to a tree" s_annot_tree $T repo/x "$tag" "$sha"
 case_ T8 3 "tag object read HTTP 500 -> fail closed" s_annot_500 $T repo/x "$tag" "$sha"
 case_ T9 3 "ref answer without object -> fail closed" s_ref_bad $T repo/x "$tag" "$sha"
+case_ T10 3 "ref request transport failure -> fail closed" s_net $T repo/x "$tag" "$sha"
+case_ T11 3 "ref answer for another ref -> fail closed" s_ref_other $T repo/x "$tag" "$sha"
+case_ T12 2 "invalid tag name (path characters) -> usage" s_present $T repo/x "$tag/../x" "$sha"
+[ -s "$base/state-T12/curl.log" ] && {
+  echo "FAIL T12: a request was made for an invalid tag name"
+  fails=$((fails + 1))
+}
 grep -q "/git/tags/$tagobj\$" "$base/state-T5/curl.log" && ! grep -q '/commits/' "$base/state-T5/curl.log" || {
   echo "FAIL T5: expected GET git/ref/tags then git/tags/<tag object>, no commits/ endpoint"
   fails=$((fails + 1))
