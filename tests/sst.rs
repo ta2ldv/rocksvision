@@ -4,7 +4,7 @@ use common::*;
 use rocksvision::inspect;
 use rocksvision::model::{BlockKind, NodeKind, Space, Status};
 use rocksvision::sst::footer;
-use rocksvision::sst::{compress, SstInspector};
+use rocksvision::sst::{SstInspector, compress};
 
 fn open_sst(rel: &str) -> SstInspector {
     SstInspector::open(rd(rel))
@@ -38,10 +38,10 @@ fn scan_data(s: &mut SstInspector, name: &str, expect_ctype: Option<u8>) -> Scan
         assert!(b.error.is_none(), "{name}: block @{} error {:?}", h.offset, b.error);
         assert_eq!(b.checksum_status, Status::Present, "{name}: block @{} checksum", h.offset);
         assert_eq!(b.stored_checksum.wrapping_sub(b.modifier), b.computed_checksum.unwrap());
-        if let Some(c) = expect_ctype {
-            if b.ctype != 0 {
-                assert_eq!(b.ctype, c, "{name}: ctype");
-            }
+        if let Some(c) = expect_ctype
+            && b.ctype != 0
+        {
+            assert_eq!(b.ctype, c, "{name}: ctype");
         }
         if b.compressed {
             sc.compressed_blocks += 1;

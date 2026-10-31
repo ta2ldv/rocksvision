@@ -2,15 +2,15 @@
 //! `LIMITS.max_io_inflight` at once (further requests fail fast with `REFUSED`). File-system
 //! access goes through the injectable `IoBackend`, so tests can delay or block reads.
 
-use super::{hex_copy_text, CopyJob, IoRequest, Outcome, Response, Tagged};
+use super::{CopyJob, IoRequest, Outcome, Response, Tagged, hex_copy_text};
 use crate::discover::{self, DirEntry};
 use crate::io::RangeReader;
 use crate::limits::LIMITS;
 use crate::model::Space;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
 

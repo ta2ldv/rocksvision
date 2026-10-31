@@ -120,11 +120,18 @@ fn empty_wal_is_empty_not_an_error() {
 
 fn check_empty(i: &mut inspect::Inspector) {
     let root = i.children(&NodeKind::Root, &never);
-    assert_eq!(root.iter().map(|c| (c.label.as_str(), c.leaf, c.status)).collect::<Vec<_>>(), vec![("Physical blocks (0)", true, Status::NotPresent), ("Logical records: none, file is empty", true, Status::NotPresent)]);
+    assert_eq!(
+        root.iter().map(|c| (c.label.as_str(), c.leaf, c.status)).collect::<Vec<_>>(),
+        vec![("Physical blocks (0)", true, Status::NotPresent), ("Logical records: none, file is empty", true, Status::NotPresent)]
+    );
     let v = i.view(&NodeKind::Root, &never);
     assert!(v.notes.iter().any(|n| n.text == "Empty file (0 bytes): no records. This is not an error."), "{:?}", v.notes);
     assert!(v.diagnostics.is_empty());
-    assert!(v.rows.iter().all(|r| !matches!(r.field.status, Status::Truncated | Status::Unknown | Status::Invalid)), "{:?}", v.rows.iter().map(|r| (&r.field.name, r.field.status)).collect::<Vec<_>>());
+    assert!(
+        v.rows.iter().all(|r| !matches!(r.field.status, Status::Truncated | Status::Unknown | Status::Invalid)),
+        "{:?}",
+        v.rows.iter().map(|r| (&r.field.name, r.field.status)).collect::<Vec<_>>()
+    );
     for k in [NodeKind::LogBlocks { first: 0, count: 0 }, NodeKind::LogRecords { start: 0, page: 0 }] {
         let v = i.view(&k, &never);
         assert!(v.rows.is_empty() && v.status.is_none(), "{k:?}");

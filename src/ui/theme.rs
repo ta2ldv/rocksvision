@@ -9,9 +9,9 @@ use crate::model::Status;
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 
 /// Shims for code written against the former combined module.
-pub use super::layout::{LayoutDefaults, LAYOUT};
+pub use super::layout::{LAYOUT, LayoutDefaults};
 pub use crate::app::prefs::DEFAULT_THEME;
-pub use crate::limits::{Limits, LIMITS};
+pub use crate::limits::{LIMITS, Limits};
 
 // ---------------------------------------------------------------- theme data
 
@@ -233,7 +233,17 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_missing: c(0x857B71),
         },
         typography: TYPE_UI,
-        widgets: WidgetStyle { rounding: 3, border_width: 1.0, bevel: Bevel::Flat, bevel_light: c(0x51473F), bevel_dark: c(0x1E1D1D), button_bg: c(0x3E3731), scroll_bar_width: 10.0, header_rule: false, separator: sep(1.0, 0x51473F) },
+        widgets: WidgetStyle {
+            rounding: 3,
+            border_width: 1.0,
+            bevel: Bevel::Flat,
+            bevel_light: c(0x51473F),
+            bevel_dark: c(0x1E1D1D),
+            button_bg: c(0x3E3731),
+            scroll_bar_width: 10.0,
+            header_rule: false,
+            separator: sep(1.0, 0x51473F),
+        },
         decoration: Decoration::None,
     },
     ThemeDefinition {
@@ -284,7 +294,17 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_missing: c(0x3E8F2A),
         },
         typography: TYPE_MONO_UI,
-        widgets: WidgetStyle { rounding: 0, border_width: 1.0, bevel: Bevel::Flat, bevel_light: c(0x3E8F2A), bevel_dark: c(0x000000), button_bg: c(0x071007), scroll_bar_width: 10.0, header_rule: false, separator: sep(1.0, 0x1E4A14) },
+        widgets: WidgetStyle {
+            rounding: 0,
+            border_width: 1.0,
+            bevel: Bevel::Flat,
+            bevel_light: c(0x3E8F2A),
+            bevel_dark: c(0x000000),
+            button_bg: c(0x071007),
+            scroll_bar_width: 10.0,
+            header_rule: false,
+            separator: sep(1.0, 0x1E4A14),
+        },
         decoration: Decoration::None,
     },
     ThemeDefinition {
@@ -344,7 +364,17 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_missing: c(0x8FA8D4),
         },
         typography: TYPE_UI,
-        widgets: WidgetStyle { rounding: 0, border_width: 2.0, bevel: Bevel::Raised, bevel_light: c(0xFFFFFF), bevel_dark: c(0x0B1F4A), button_bg: c(0x2454A4), scroll_bar_width: 6.0, header_rule: false, separator: sep(1.0, 0x0B1F4A) },
+        widgets: WidgetStyle {
+            rounding: 0,
+            border_width: 2.0,
+            bevel: Bevel::Raised,
+            bevel_light: c(0xFFFFFF),
+            bevel_dark: c(0x0B1F4A),
+            button_bg: c(0x2454A4),
+            scroll_bar_width: 6.0,
+            header_rule: false,
+            separator: sep(1.0, 0x0B1F4A),
+        },
         decoration: Decoration::None,
     },
     ThemeDefinition {
@@ -404,7 +434,17 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_missing: c(0x4F5A5D),
         },
         typography: TYPE_UI,
-        widgets: WidgetStyle { rounding: 0, border_width: 1.0, bevel: Bevel::Raised, bevel_light: c(0xFFFFFF), bevel_dark: c(0x4F5A5D), button_bg: c(0xC8CCCB), scroll_bar_width: 10.0, header_rule: true, separator: sep(1.0, 0x9AA1A0) },
+        widgets: WidgetStyle {
+            rounding: 0,
+            border_width: 1.0,
+            bevel: Bevel::Raised,
+            bevel_light: c(0xFFFFFF),
+            bevel_dark: c(0x4F5A5D),
+            button_bg: c(0xC8CCCB),
+            scroll_bar_width: 10.0,
+            header_rule: true,
+            separator: sep(1.0, 0x9AA1A0),
+        },
         decoration: Decoration::None,
     },
     ThemeDefinition {
@@ -455,7 +495,17 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_missing: c(0x527A83),
         },
         typography: TYPE_UI,
-        widgets: WidgetStyle { rounding: 0, border_width: 1.0, bevel: Bevel::Raised, bevel_light: c(0xC5E3E6), bevel_dark: c(0x1E3238), button_bg: c(0x101A1E), scroll_bar_width: 10.0, header_rule: false, separator: sep(1.0, 0x527A83) },
+        widgets: WidgetStyle {
+            rounding: 0,
+            border_width: 1.0,
+            bevel: Bevel::Raised,
+            bevel_light: c(0xC5E3E6),
+            bevel_dark: c(0x1E3238),
+            button_bg: c(0x101A1E),
+            scroll_bar_width: 10.0,
+            header_rule: false,
+            separator: sep(1.0, 0x527A83),
+        },
         decoration: Decoration::None,
     },
     ThemeDefinition {
@@ -506,18 +556,29 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_missing: c(0x8A7458),
         },
         typography: TYPE_UI,
-        widgets: WidgetStyle { rounding: 2, border_width: 1.0, bevel: Bevel::Raised, bevel_light: c(0x8A6644), bevel_dark: c(0x17120D), button_bg: c(0x42301F), scroll_bar_width: 10.0, header_rule: false, separator: sep(2.0, 0xA8854F) },
+        widgets: WidgetStyle {
+            rounding: 2,
+            border_width: 1.0,
+            bevel: Bevel::Raised,
+            bevel_light: c(0x8A6644),
+            bevel_dark: c(0x17120D),
+            button_bg: c(0x42301F),
+            scroll_bar_width: 10.0,
+            header_rule: false,
+            separator: sep(2.0, 0xA8854F),
+        },
         decoration: Decoration::WoodGrain,
     },
 ];
 
 /// Every non-ASCII glyph used in UI text (status symbols, links, paging, toolbar). Each must
 /// render in the bundled proportional and monospace fonts (tested); e.g. U+2192 "→" does not.
-pub const UI_GLYPHS: &str = "✔○≈⚠✖✂⛔⏹›◀▶−–·…Δ📂📄⌘";
+pub const UI_GLYPHS: &str = "✔○≈⚠✖✂⛔⏹›◀▶−–·…Δ📂📄⌘◽";
 
-/// Looks up a theme by stable id; unknown ids fall back to Autistic.
+/// Looks up a theme by stable id; unknown ids fall back to `DEFAULT_THEME` (XCopy). The
+/// default is registered (tested); `THEMES[0]` is only a guard that never panics.
 pub fn theme_by_id(id: &str) -> &'static ThemeDefinition {
-    THEMES.iter().find(|t| t.id == id).unwrap_or(&THEMES[0])
+    THEMES.iter().find(|t| t.id == id).or_else(|| THEMES.iter().find(|t| t.id == DEFAULT_THEME)).unwrap_or(&THEMES[0])
 }
 
 // ---------------------------------------------------------------- resolved tokens
@@ -731,10 +792,10 @@ pub fn grain_image(base: Color32) -> egui::ColorImage {
     let raw: Vec<f32> = (0..n).map(|_| rnd()).collect();
     let rows: Vec<f32> = (0..n).map(|y| (raw[(y + n - 1) % n] + 2.0 * raw[y] + raw[(y + 1) % n]) / 4.0).collect();
     let mut px = Vec::with_capacity(n * n);
-    for y in 0..n {
+    for (y, &row) in rows.iter().enumerate() {
         for x in 0..n {
             let wave = ((x as f32 / n as f32) * std::f32::consts::TAU * 2.0 + y as f32 * 0.21).sin() * 0.25;
-            let d = ((rows[y] - 0.5) * 2.0 + wave).clamp(-1.0, 1.0) * 8.0;
+            let d = ((row - 0.5) * 2.0 + wave).clamp(-1.0, 1.0) * 8.0;
             let ch = |v: u8| (v as f32 + d).clamp(0.0, 255.0) as u8;
             px.push(Color32::from_rgb(ch(base.r()), ch(base.g()), ch(base.b())));
         }
@@ -746,11 +807,7 @@ pub fn grain_image(base: Color32) -> egui::ColorImage {
 
 fn lin(c: u8) -> f64 {
     let s = c as f64 / 255.0;
-    if s <= 0.04045 {
-        s / 12.92
-    } else {
-        ((s + 0.055) / 1.055).powf(2.4)
-    }
+    if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
 }
 
 /// WCAG relative luminance.
@@ -780,11 +837,26 @@ mod tests {
                     fails.push(format!("{}: {what} {:?} on {:?} = {r:.2} < {min}", t.id, fg, bg));
                 }
             };
-            let text_surfaces = [("canvas", p.canvas), ("panel", p.panel), ("explain", p.explain), ("toolbar", p.toolbar), ("input", p.input), ("menu", p.menu), ("data", p.data), ("stripe_a", p.stripe_a), ("stripe_b", p.stripe_b), ("hover", p.hover_bg), ("lsm", p.lsm_bg), ("button", t.widgets.button_bg)];
+            let text_surfaces = [
+                ("canvas", p.canvas),
+                ("panel", p.panel),
+                ("explain", p.explain),
+                ("toolbar", p.toolbar),
+                ("input", p.input),
+                ("menu", p.menu),
+                ("data", p.data),
+                ("stripe_a", p.stripe_a),
+                ("stripe_b", p.stripe_b),
+                ("hover", p.hover_bg),
+                ("lsm", p.lsm_bg),
+                ("button", t.widgets.button_bg),
+            ];
             for (n, bg) in text_surfaces {
                 chk(&format!("text/{n}"), p.text, bg, 4.5);
             }
-            for (n, bg) in [("canvas", p.canvas), ("panel", p.panel), ("explain", p.explain), ("toolbar", p.toolbar), ("data", p.data), ("stripe_a", p.stripe_a), ("stripe_b", p.stripe_b), ("menu", p.menu)] {
+            for (n, bg) in
+                [("canvas", p.canvas), ("panel", p.panel), ("explain", p.explain), ("toolbar", p.toolbar), ("data", p.data), ("stripe_a", p.stripe_a), ("stripe_b", p.stripe_b), ("menu", p.menu)]
+            {
                 chk(&format!("muted/{n}"), p.text_muted, bg, 4.5);
             }
             for (n, bg) in [("panel", p.panel), ("explain", p.explain), ("data", p.data), ("stripe_a", p.stripe_a), ("stripe_b", p.stripe_b)] {
@@ -831,6 +903,7 @@ mod tests {
             let missing: String = UI_GLYPHS.chars().filter(|&c| uv(c) == tofu).collect();
             assert!(missing.is_empty(), "{:?} lacks glyphs {missing:?}", fam.family);
         }
+        assert!(UI_GLYPHS.contains(crate::app::hex::UNPRINTABLE), "the UTF-8 preview glyph is render-tested");
         // Probe sanity: U+2192 is known to render as the replacement box in the proportional font.
         let uvp = |c: char| ctx.fonts_mut(|f| f.layout_no_wrap(c.to_string(), FontId::proportional(14.0), Color32::WHITE).rows[0].row.glyphs[0].uv_rect);
         assert_eq!(uvp('→'), uvp('◻'));
@@ -956,9 +1029,18 @@ mod tests {
     fn registry_ids_and_fallback() {
         let ids: Vec<&str> = THEMES.iter().map(|t| t.id).collect();
         assert_eq!(ids, ["autistic", "matrix", "amiga-workbench", "amiga-tool-style", "xcopy", "wooden"]);
-        assert_eq!(theme_by_id("no-such-theme").id, "autistic");
+        assert_eq!(theme_by_id("no-such-theme").id, "xcopy");
+        assert_eq!(theme_by_id("no-such-theme").name, "XCopy");
         assert_eq!(theme_by_id("").id, DEFAULT_THEME);
+        assert_eq!(theme_by_id("matrix").id, "matrix", "a valid id is never replaced by the default");
         assert_eq!(theme_by_id("wooden").decoration, Decoration::WoodGrain);
+    }
+
+    /// 0017 A: the default theme id is registered, so the fallback never reaches the guard.
+    #[test]
+    fn default_theme_is_registered() {
+        assert_eq!(THEMES.iter().filter(|t| t.id == DEFAULT_THEME).count(), 1);
+        assert_eq!(theme_by_id(DEFAULT_THEME).name, "XCopy");
     }
 
     #[test]

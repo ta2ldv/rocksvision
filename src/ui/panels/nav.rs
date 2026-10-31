@@ -3,7 +3,7 @@
 use super::{strong, table_style, title_line};
 use crate::app::{Action, AppState, Panel};
 use crate::model::{ChildRole, NodeKind};
-use crate::ui::layout::{tree_label_wraps, LAYOUT};
+use crate::ui::layout::{LAYOUT, tree_label_wraps};
 use crate::ui::menu::{self, MenuCmd};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
@@ -42,7 +42,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                     tok.p.text_muted
                 };
                 let r = ui.add(egui::Button::selectable(cur, RichText::new(txt).color(col)).wrap_mode(egui::TextWrapMode::Extend));
-                let r = r.on_hover_text(format!("{} · {} · {} bytes{}", e.kind.label(), if e.kind.decodable() { "decoded" } else { "not decoded" }, e.size, if e.is_symlink { " · symlink (not followed)" } else { "" }));
+                let r = r.on_hover_text(format!(
+                    "{} · {} · {} bytes{}",
+                    e.kind.label(),
+                    if e.kind.decodable() { "decoded" } else { "not decoded" },
+                    e.size,
+                    if e.is_symlink { " · symlink (not followed)" } else { "" }
+                ));
                 if r.clicked() && !e.is_symlink {
                     acts.push(Action::OpenFile(e.path.clone()));
                 }
@@ -63,7 +69,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
         if doc.file().is_some() {
             let sel = doc.sel_node().is_none() && doc.view_kind() == Some(&NodeKind::Root);
             let t = RichText::new(format!("{} file (root)", doc.file_label())).strong();
-            if ui.add(egui::Button::selectable(sel, if sel { t.color(tok.p.sel_fg) } else { t.color(tok.p.heading) }).wrap_mode(egui::TextWrapMode::Truncate)).on_hover_text(format!("{} file (root)", doc.file_label())).clicked() {
+            if ui
+                .add(egui::Button::selectable(sel, if sel { t.color(tok.p.sel_fg) } else { t.color(tok.p.heading) }).wrap_mode(egui::TextWrapMode::Truncate))
+                .on_hover_text(format!("{} file (root)", doc.file_label()))
+                .clicked()
+            {
                 acts.push(Action::SelectRoot);
             }
         }
@@ -140,11 +150,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                     ui.spinner();
                 }
             });
-            if n.expanded {
-                if let Some(ch) = &n.children {
-                    for c in ch.iter().rev() {
-                        stack.push(*c);
-                    }
+            if n.expanded
+                && let Some(ch) = &n.children
+            {
+                for c in ch.iter().rev() {
+                    stack.push(*c);
                 }
             }
         }

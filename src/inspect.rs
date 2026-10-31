@@ -3,8 +3,8 @@
 //! (opening, sibling lookups such as the MANIFEST named by CURRENT, existence probes) happens
 //! here; parsers and presenters only see `&dyn RangeRead` and plain values.
 
-use crate::discover::{sniff, FileKind};
-use crate::io::{read_vec, RangeRead, RangeReader, MAX_READ};
+use crate::discover::{FileKind, sniff};
+use crate::io::{MAX_READ, RangeRead, RangeReader, read_vec};
 use crate::limits::CURRENT_READ;
 use crate::manifest;
 use crate::model::*;
@@ -102,10 +102,13 @@ impl Inspector {
                     };
                 }
                 let raw = read_vec(&**r, 0, CURRENT_READ.min(r.len())).unwrap_or_default();
-                current_view(&raw, target.map(|p| {
-                    let ex = exists(&p);
-                    (p, ex)
-                }))
+                current_view(
+                    &raw,
+                    target.map(|p| {
+                        let ex = exists(&p);
+                        (p, ex)
+                    }),
+                )
             }
             Inspector::Text { r, kind, .. } => text_view(&**r, *kind),
         }
@@ -126,7 +129,7 @@ impl Inspector {
     /// The structure that holds byte `off` of `space` and what to select in its view: (node,
     /// "select the narrowest field at this offset", structure span when no field applies).
     /// File bytes only; derived spaces are resolved by the view that shows them.
-    pub fn locate(&mut self, space: Space, off: u64, cancel: &dyn Fn() -> bool) -> Option<(NodeKind, Option<(Space, u64)>, Option<Span>)> {
+    pub fn locate(&mut self, space: Space, off: u64, cancel: &dyn Fn() -> bool) -> Option<Located> {
         match (self, space) {
             (Inspector::Log(l), Space::File) => l.locate(off),
             (Inspector::Sst(s), Space::File) => s.locate(off, cancel),

@@ -9,8 +9,10 @@ use rocksvision::wal::log::{self, FragRole, PhysKind};
 use rocksvision::wal::{LogInspector, LogMode};
 
 type ExpOp = (u64, u8, Option<u32>, &'static [u8], Option<&'static [u8]>);
+/// (batch sequence, tag, cf, key, value, op sequence) of one decoded op.
+type FlatOp = (u64, u8, Option<u32>, Vec<u8>, Option<Vec<u8>>, Option<u64>);
 
-fn flat_ops(r: &RangeReader) -> Vec<(u64, u8, Option<u32>, Vec<u8>, Option<Vec<u8>>, Option<u64>)> {
+fn flat_ops(r: &RangeReader) -> Vec<FlatOp> {
     let mut v = Vec::new();
     for l in all_logical(r) {
         assert_eq!(l.status, Status::Present, "record @{} {}", l.start, l.note);

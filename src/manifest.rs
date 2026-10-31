@@ -5,12 +5,12 @@
 //! Output is typed (`Edit`, `Levels`) plus one `Fact` per encoded element; explanations are
 //! added by `present::manifest`.
 
-pub use crate::format::ikey::{ikey_preview, split_ikey};
 use crate::format::ikey::user_key;
+pub use crate::format::ikey::{ikey_preview, split_ikey};
 use crate::format::log;
 use crate::io::RangeRead;
-pub use crate::limits::{MAX_EDIT_FIELDS, MAX_LIVE_FILES};
 use crate::limits::{MANIFEST_RECORD_KEEP, MAX_EDIT_TAGS, MAX_MANIFEST_PROBLEMS as MAX_PROBLEMS, OVERLAP_MAX_FILES};
+pub use crate::limits::{MAX_EDIT_FIELDS, MAX_LIVE_FILES};
 use crate::model::{CheckKind, DecodedValue as DV, Diagnostic, Fact, FieldKind as K, Space, Span, Status, Trust};
 use crate::util::{bytes_preview, varint32, varint64};
 use std::collections::BTreeMap;
@@ -126,11 +126,7 @@ impl D<'_> {
     }
     /// Last field, only while nothing has been dropped (so edits never hit the wrong field).
     fn last(&mut self) -> Option<&mut Fact> {
-        if self.dropped == 0 {
-            self.f.last_mut()
-        } else {
-            None
-        }
+        if self.dropped == 0 { self.f.last_mut() } else { None }
     }
     fn span(&self, s: usize, n: usize) -> Option<Span> {
         Some(Span::new(self.sp, s as u64, n as u64))
@@ -232,12 +228,12 @@ fn decode_edit_capped(d: &[u8], sp: Space, max: usize) -> Edit {
                         let known = custom_tag_name(ct) != "Unknown";
                         let v = x.slice_kind(&format!("  {}", custom_tag_name(ct)), false, if known { K::Other } else { K::UnknownCustomField })?;
                         if let Some(l) = x.last() {
-                            if matches!(ct, 3 | 4 | 5 | 6 | 13 | 14 | 15) {
-                                if let Some((n, _)) = varint64(&v, 0) {
-                                    l.value = n.to_string();
-                                    l.decoded = Some(DV::VarInt(n));
-                                    l.encoding = "len-prefixed varint64".into();
-                                }
+                            if matches!(ct, 3 | 4 | 5 | 6 | 13 | 14 | 15)
+                                && let Some((n, _)) = varint64(&v, 0)
+                            {
+                                l.value = n.to_string();
+                                l.decoded = Some(DV::VarInt(n));
+                                l.encoding = "len-prefixed varint64".into();
                             }
                             if !known {
                                 // Bit 6 set = must-understand.
@@ -249,7 +245,11 @@ fn decode_edit_capped(d: &[u8], sp: Space, max: usize) -> Edit {
                                 } else {
                                     "RocksDB 10.4.2 db/version_edit.cc DecodeNewFile4From (lines 424–431): an unknown custom tag without the must-understand bit is skipped."
                                 };
-                                l.diag = Some(Box::new(Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Partial, "RocksVision lists the field undecoded and continues", note).values(None, Some(DV::U32(ct))).engine(eng)));
+                                l.diag = Some(Box::new(
+                                    Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Partial, "RocksVision lists the field undecoded and continues", note)
+                                        .values(None, Some(DV::U32(ct)))
+                                        .engine(eng),
+                                ));
                             }
                         }
                     }
@@ -296,18 +296,30 @@ fn decode_edit_capped(d: &[u8], sp: Space, max: usize) -> Edit {
                     l.status = Status::Unknown;
                     // Verified: RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom lines 771–781.
                     l.diag = Some(Box::new(
-                        Diagnostic::new(CheckKind::UnknownType, l.span, Trust::Trusted, "RocksVision skips the length-prefixed field and continues", format!("unknown tag {t} with the safe-ignore bit"))
-                            .values(None, Some(DV::U32(t)))
-                            .engine("RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom (lines 771–781): an unknown tag with kTagSafeIgnoreMask set is skipped by its length prefix."),
+                        Diagnostic::new(
+                            CheckKind::UnknownType,
+                            l.span,
+                            Trust::Trusted,
+                            "RocksVision skips the length-prefixed field and continues",
+                            format!("unknown tag {t} with the safe-ignore bit"),
+                        )
+                        .values(None, Some(DV::U32(t)))
+                        .engine("RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom (lines 771–781): an unknown tag with kTagSafeIgnoreMask set is skipped by its length prefix."),
                     ));
                 }
             }),
             _ => {
                 let rest = &d[x.pos..];
                 // Unknown tag without the safe-ignore bit: RocksDB fails with Corruption.
-                let diag = Diagnostic::new(CheckKind::UnknownType, x.span(x.pos, rest.len()), Trust::Untrusted, "RocksVision stops decoding this edit; the rest cannot be framed", format!("unknown tag {tag} without the safe-ignore bit"))
-                    .values(None, Some(DV::U32(tag)))
-                    .engine("RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom (lines 782–784): an unknown tag without kTagSafeIgnoreMask sets the error \"unknown tag\".");
+                let diag = Diagnostic::new(
+                    CheckKind::UnknownType,
+                    x.span(x.pos, rest.len()),
+                    Trust::Untrusted,
+                    "RocksVision stops decoding this edit; the rest cannot be framed",
+                    format!("unknown tag {tag} without the safe-ignore bit"),
+                )
+                .values(None, Some(DV::U32(tag)))
+                .engine("RocksDB 10.4.2 db/version_edit.cc VersionEdit::DecodeFrom (lines 782–784): an unknown tag without kTagSafeIgnoreMask sets the error \"unknown tag\".");
                 x.push(Fact::new("undecodable remainder", x.span(x.pos, rest.len()), bytes_preview(rest, 48)).kind(K::Remainder).raw(rest).status(Status::Unknown).diag(diag.clone()));
                 x.pos = d.len();
                 e.status = Some(Status::Unknown);
@@ -395,7 +407,6 @@ pub struct Levels {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-
 fn push_problem(lv: &mut Levels, p: String) {
     if lv.problems.len() < MAX_PROBLEMS {
         lv.problems.push(p);
@@ -480,14 +491,12 @@ pub fn observed_levels(r: &dyn RangeRead, cancel: &dyn Fn() -> bool) -> Levels {
     lv
 }
 
+/// Per level: the (smallest, largest) user key of each live file.
+type LevelKeyRanges = BTreeMap<u32, Vec<(Vec<u8>, Vec<u8>)>>;
+
 /// User-key range overlap, assuming the bytewise comparator.
 fn compute_overlaps(levels: &mut BTreeMap<u32, Vec<LiveFile>>) {
-    let ranges: BTreeMap<u32, Vec<(Vec<u8>, Vec<u8>)>> = levels
-        .iter()
-        .map(|(l, fs)| {
-            (*l, fs.iter().map(|f| (ukey(&f.f.smallest).to_vec(), ukey(&f.f.largest).to_vec())).collect())
-        })
-        .collect();
+    let ranges: LevelKeyRanges = levels.iter().map(|(l, fs)| (*l, fs.iter().map(|f| (ukey(&f.f.smallest).to_vec(), ukey(&f.f.largest).to_vec())).collect())).collect();
     for (l, fs) in levels.iter_mut() {
         if fs.len() > OVERLAP_MAX_FILES {
             continue;
@@ -498,10 +507,10 @@ fn compute_overlaps(levels: &mut BTreeMap<u32, Vec<LiveFile>>) {
         for (i, f) in fs.iter_mut().enumerate() {
             let (a, b) = (ukey(&f.f.smallest), ukey(&f.f.largest));
             f.overlap_same = same.iter().enumerate().filter(|(j, (s, e))| *j != i && s.as_slice() <= b && a <= e.as_slice()).count() as u32;
-            if let Some(n) = next {
-                if n.len() <= OVERLAP_MAX_FILES {
-                    f.overlap_next = n.iter().filter(|(s, e)| s.as_slice() <= b && a <= e.as_slice()).count() as u32;
-                }
+            if let Some(n) = next
+                && n.len() <= OVERLAP_MAX_FILES
+            {
+                f.overlap_next = n.iter().filter(|(s, e)| s.as_slice() <= b && a <= e.as_slice()).count() as u32;
             }
         }
     }

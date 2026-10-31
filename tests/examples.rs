@@ -4,7 +4,7 @@
 //! an otherwise EMPTY temp dir before opening (no CURRENT, MANIFEST or siblings).
 mod common;
 use common::*;
-use rocksvision::dump::{dump, DumpOpts};
+use rocksvision::dump::{DumpOpts, dump};
 use rocksvision::inspect;
 use rocksvision::model::{NodeKind, Status};
 use std::collections::BTreeSet;
@@ -164,8 +164,24 @@ fn bloom_and_index_scenarios_show_their_structure() {
 }
 
 const DATA: [&str; 18] = [
-    "basic-db", "bloom-full", "bloom-partitioned", "bloom-absent", "index-binary", "index-partitioned", "index-hash", "codec-none", "codec-snappy",
-    "codec-zlib", "codec-bzip2", "codec-lz4", "codec-lz4hc", "codec-zstd", "multilevel-db", "wal-basic", "wal-fragmented", "wal-recycled",
+    "basic-db",
+    "bloom-full",
+    "bloom-partitioned",
+    "bloom-absent",
+    "index-binary",
+    "index-partitioned",
+    "index-hash",
+    "codec-none",
+    "codec-snappy",
+    "codec-zlib",
+    "codec-bzip2",
+    "codec-lz4",
+    "codec-lz4hc",
+    "codec-zstd",
+    "multilevel-db",
+    "wal-basic",
+    "wal-fragmented",
+    "wal-recycled",
 ];
 
 #[test]
@@ -259,12 +275,7 @@ fn sha256sums_lists_every_example_file_once() {
 /// on every OS (Windows' `read_dir` yields `\`-separated paths; the checksum file is written with '/').
 /// Component text is kept verbatim (case, dots, nesting), so different paths stay different.
 fn portable_rel(p: &Path, base: &Path) -> String {
-    p.strip_prefix(base)
-        .unwrap_or_else(|_| panic!("{} is not under {}", p.display(), base.display()))
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    p.strip_prefix(base).unwrap_or_else(|_| panic!("{} is not under {}", p.display(), base.display())).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
 }
 
 #[test]
@@ -285,5 +296,5 @@ fn portable_rel_joins_components_with_slash_and_keeps_distinct_paths() {
     assert_eq!(portable_rel(&base.join("files").join("sst.v2").join("x.sst"), base), "files/sst.v2/x.sst");
     // the real checksum list is '/'-separated and never contains a backslash
     let sums = std::fs::read_to_string(ex("SHA256SUMS")).unwrap();
-    assert!(sums.lines().all(|l| !l.contains('\\') && l.split_once("  ").map_or(false, |(_, p)| p.contains('/'))));
+    assert!(sums.lines().all(|l| !l.contains('\\') && l.split_once("  ").is_some_and(|(_, p)| p.contains('/'))));
 }

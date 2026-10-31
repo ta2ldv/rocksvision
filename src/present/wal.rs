@@ -6,16 +6,19 @@
 //! for a MANIFEST, "Observed levels (derived view)". A fragment's status is about its own bytes
 //! only; whether a record is complete is the record's `Reassembly`.
 
-use super::common::{bytes_dec_hex, error_view, explained, of_fields, range, size_row, st_cell, st_word_cell, Location};
+use super::common::{Location, bytes_dec_hex, error_view, explained, of_fields, range, size_row, st_cell, st_word_cell};
 use crate::format::codec::compression_name;
-use crate::format::log::{self, FragRole, Logical, OpenTail, Phys, PhysKind, Reassembly, BLOCK_SIZE};
-use crate::limits::{LIST_KEEP_COMPRESSED, LIST_KEEP_MANIFEST, LIST_KEEP_WAL, LOG_BLOCKS_PER_GROUP as BLOCKS_PER_GROUP, MAX_OPS_LISTED, MAX_RECORD_BYTES, OPEN_TAIL_BLOCKS, PATH_RECORD_PAGES, RECORDS_PER_PAGE, ROOT_RECORDS};
+use crate::format::log::{self, BLOCK_SIZE, FragRole, Logical, OpenTail, Phys, PhysKind, Reassembly};
+use crate::limits::{
+    LIST_KEEP_COMPRESSED, LIST_KEEP_MANIFEST, LIST_KEEP_WAL, LOG_BLOCKS_PER_GROUP as BLOCKS_PER_GROUP, MAX_OPS_LISTED, MAX_RECORD_BYTES, OPEN_TAIL_BLOCKS, PATH_RECORD_PAGES, RECORDS_PER_PAGE,
+    ROOT_RECORDS,
+};
 use crate::manifest;
 use crate::model::*;
 use crate::model::{DecodedValue as DV, FieldKind as K};
 use crate::util::bytes_preview;
 use crate::wal::batch::{self, tag_name};
-use crate::wal::{meta_facts, stale, LogInspector, LogMode};
+use crate::wal::{LogInspector, LogMode, meta_facts, stale};
 
 const CRC_GUESS: &str = " CRC MISMATCH: log_reader.cc drops the rest of this block here; RocksVision locates the following items by trusting this record's length field, which is a guess.";
 
@@ -105,7 +108,14 @@ fn phys_label(p: &Phys) -> String {
         PhysKind::BlockTrailer => format!("0x{:x} Padding {}", p.offset, range(p.offset, p.end)),
         PhysKind::ZeroFill => format!("0x{:x} Zero fill {}", p.offset, range(p.offset, p.end)),
         PhysKind::BadLength => format!("0x{:x} Bad length ({}) {}", p.offset, log::type_name(p.rtype), range(p.offset, p.end)),
-        PhysKind::Truncated if p.header_len > 0 => format!("0x{:x} {} cut by end of file · header {} · payload {} of {} B", p.offset, log::type_name(p.rtype), range(p.offset, p.payload_off), range(p.payload_off, p.payload_off + p.payload_avail), p.len),
+        PhysKind::Truncated if p.header_len > 0 => format!(
+            "0x{:x} {} cut by end of file · header {} · payload {} of {} B",
+            p.offset,
+            log::type_name(p.rtype),
+            range(p.offset, p.payload_off),
+            range(p.payload_off, p.payload_off + p.payload_avail),
+            p.len
+        ),
         PhysKind::Truncated => format!("0x{:x} Truncated header {}", p.offset, range(p.offset, p.end)),
     }
 }
@@ -252,7 +262,9 @@ impl LogInspector {
                 }
             }
             NodeKind::LogBlock(b) => match self.scan_block(*b) {
-                Ok((items, _)) => items.iter().map(|p| Child::new(phys_label(p), NodeKind::LogFragment(p.offset)).leaf().status(stale(p.status(), p.log_number, self.expected_log())).diag(p.diagnostic())).collect(),
+                Ok((items, _)) => {
+                    items.iter().map(|p| Child::new(phys_label(p), NodeKind::LogFragment(p.offset)).leaf().status(stale(p.status(), p.log_number, self.expected_log())).diag(p.diagnostic())).collect()
+                }
                 Err(e) => vec![Child::new(format!("read error: {e}"), NodeKind::LogBlock(*b)).leaf().status(Status::Invalid)],
             },
             NodeKind::LogRecords { start, page } => {
@@ -371,17 +383,21 @@ impl LogInspector {
 
     /// The structure holding file byte `off` and what to select in its view: the record field
     /// for payload bytes of a record (by file offset), the fragment for header/padding bytes.
-    pub fn locate(&self, off: u64) -> Option<(NodeKind, Option<(Space, u64)>, Option<Span>)> {
+    pub fn locate(&self, off: u64) -> Option<Located> {
         let b = off / BLOCK_SIZE;
         let (items, _) = self.scan_block(b).ok()?;
         let p = items.iter().find(|p| off >= p.offset && off < p.end.max(p.offset + 1))?;
         let in_payload = p.kind == PhysKind::Record && off >= p.payload_off && off < p.payload_off + p.payload_avail;
-        if in_payload || (p.kind == PhysKind::Truncated && p.header_len > 0 && off >= p.payload_off) {
-            if let Ok(Some(start)) = log::record_start_for(self.reader(), p.offset, OPEN_TAIL_BLOCKS) {
-                return Some((NodeKind::LogRecord(start), Some((Space::File, off)), None));
-            }
+        if (in_payload || (p.kind == PhysKind::Truncated && p.header_len > 0 && off >= p.payload_off))
+            && let Ok(Some(start)) = log::record_start_for(self.reader(), p.offset, OPEN_TAIL_BLOCKS)
+        {
+            return Some((NodeKind::LogRecord(start), Some((Space::File, off)), None));
         }
-        let span = if matches!(p.kind, PhysKind::Record | PhysKind::Truncated) && p.header_len > 0 && off < p.payload_off { Span::file(p.offset, p.payload_off - p.offset) } else { Span::file(p.offset, p.end - p.offset) };
+        let span = if matches!(p.kind, PhysKind::Record | PhysKind::Truncated) && p.header_len > 0 && off < p.payload_off {
+            Span::file(p.offset, p.payload_off - p.offset)
+        } else {
+            Span::file(p.offset, p.end - p.offset)
+        };
         Some((NodeKind::LogFragment(p.offset), Some((Space::File, off)), Some(span)))
     }
 
@@ -410,19 +426,33 @@ impl LogInspector {
             Field::new("blocks", None, log::block_count(len).to_string()).kind(K::Count).dv(DV::U64(log::block_count(len))),
         ];
         match self.expected_log() {
-            Some(n) => f.push(Field::new("log number (from file name)", None, n.to_string()).dv(DV::U64(n)).explain("Recyclable headers must carry this number, else the record is from a previous (recycled) use of the file.")),
+            Some(n) => f.push(
+                Field::new("log number (from file name)", None, n.to_string())
+                    .dv(DV::U64(n))
+                    .explain("Recyclable headers must carry this number, else the record is from a previous (recycled) use of the file."),
+            ),
             None => f.push(Field::new("log number (from file name)", None, "not derivable").status(Status::Unknown)),
         }
         if self.mode() == LogMode::Wal {
             let first_ok = matches!(self.first_record(), Some(r) if r.status == Status::Present);
             match self.wal_compression() {
-                None if self.is_empty() => f.push(Field::new("WAL compression", None, "none: the file is empty").kind(K::CompressionType).status(Status::NotPresent).explain("An empty WAL has no SET_COMPRESSION_TYPE record (and no other record).")),
+                None if self.is_empty() => f.push(
+                    Field::new("WAL compression", None, "none: the file is empty")
+                        .kind(K::CompressionType)
+                        .status(Status::NotPresent)
+                        .explain("An empty WAL has no SET_COMPRESSION_TYPE record (and no other record)."),
+                ),
                 None if !first_ok => f.push(
                     Field::new("WAL compression", None, "unknown: first record missing or unreadable")
                         .status(Status::Unknown)
                         .explain("A SET_COMPRESSION_TYPE record would be the first record; it cannot be read, so presence is unknown."),
                 ),
-                Some(0) | None => f.push(Field::new("WAL compression", None, "none").kind(K::CompressionType).status(if self.wal_compression().is_some() { Status::Present } else { Status::NotPresent }).explain("No leading SET_COMPRESSION_TYPE record (or it says kNoCompression): payloads are plain WriteBatches.")),
+                Some(0) | None => f.push(
+                    Field::new("WAL compression", None, "none")
+                        .kind(K::CompressionType)
+                        .status(if self.wal_compression().is_some() { Status::Present } else { Status::NotPresent })
+                        .explain("No leading SET_COMPRESSION_TYPE record (or it says kNoCompression): payloads are plain WriteBatches."),
+                ),
                 Some(c) => f.push(
                     Field::new("WAL compression", Some(Span::file(self.first_record().map(|r| r.payload_off).unwrap_or(7), 4)), compression_name(c as u8))
                         .kind(K::CompressionType)
@@ -444,24 +474,39 @@ impl LogInspector {
         // First-use summary: the first records (bounded scan), each linking to its record view.
         let (recs, scanned, more) = self.record_summaries(cancel);
         let total = if more { format!("≥{}", recs.len() + 1) } else { recs.len().to_string() };
-        let coverage = if recs.is_empty() { format!("No records found · scanned {} of {len} B", range(0, scanned)) } else { format!("Records 1–{} of {total} · scanned {} of {len} B", recs.len(), range(0, scanned)) };
+        let coverage = if recs.is_empty() {
+            format!("No records found · scanned {} of {len} B", range(0, scanned))
+        } else {
+            format!("Records 1–{} of {total} · scanned {} of {len} B", recs.len(), range(0, scanned))
+        };
         v.notes.push(coverage.into());
         let more_row = more.then(|| {
-            let fld = Field::new("more records", None, format!("records after 0x{scanned:x} are listed in Logical records ›")).kind(K::StructureRef).status(Status::Implicit).link(NodeKind::LogRecords { start: 0, page: 0 }).explain("The root lists a bounded first page; the Logical records view pages through all records.");
+            let fld = Field::new("more records", None, format!("records after 0x{scanned:x} are listed in Logical records ›"))
+                .kind(K::StructureRef)
+                .status(Status::Implicit)
+                .link(NodeKind::LogRecords { start: 0, page: 0 })
+                .explain("The root lists a bounded first page; the Logical records view pages through all records.");
             super::common::field_row(fld)
         });
         if self.mode() == LogMode::Manifest {
             // MANIFEST first screen (0015 design E1/E3): Observed levels, the VersionEdits and
             // "more records" first; the file facts follow the records.
             v.notes.push("One VersionEdit (logical record) per row; double-click opens its reassembled view. File facts follow the records.".into());
-            let fld = Field::new("Observed levels ›", None, "live SST files per column family and level after replaying every VersionEdit").kind(K::StructureRef).status(Status::Implicit).link(NodeKind::ManifestLevels).explain("Derived view: the final observed LSM shape, not compaction history.");
+            let fld = Field::new("Observed levels ›", None, "live SST files per column family and level after replaying every VersionEdit")
+                .kind(K::StructureRef)
+                .status(Status::Implicit)
+                .link(NodeKind::ManifestLevels)
+                .explain("Derived view: the final observed LSM shape, not compaction history.");
             let facts = std::mem::take(&mut v.rows);
             v.rows.push(super::common::field_row(fld));
             v.rows.extend(recs);
             v.rows.extend(more_row);
             v.rows.extend(facts);
         } else {
-            v.notes.push("Rows below the file facts: one WriteBatch (logical record) per row, linking to its reassembled view. Physical blocks lists the raw fragments; Logical records lists every record.".into());
+            v.notes.push(
+                "Rows below the file facts: one WriteBatch (logical record) per row, linking to its reassembled view. Physical blocks lists the raw fragments; Logical records lists every record."
+                    .into(),
+            );
             v.rows.extend(recs);
             v.rows.extend(more_row);
         }
@@ -474,7 +519,13 @@ impl LogInspector {
     fn record_summaries(&self, cancel: &dyn Fn() -> bool) -> (Vec<Row>, u64, bool) {
         let wal = self.mode() == LogMode::Wal;
         let compressed = wal && self.wal_compression().unwrap_or(0) != 0;
-        let keep = if compressed { LIST_KEEP_COMPRESSED } else if wal { LIST_KEEP_WAL } else { LIST_KEEP_MANIFEST };
+        let keep = if compressed {
+            LIST_KEEP_COMPRESSED
+        } else if wal {
+            LIST_KEEP_WAL
+        } else {
+            LIST_KEEP_MANIFEST
+        };
         let mut rows = Vec::new();
         let mut off = 0u64;
         let mut n = 0usize;
@@ -495,14 +546,27 @@ impl LogInspector {
             let (name, summary) = if wal {
                 match l.role {
                     FragRole::Full | FragRole::First if l.decompressed_from.is_none() && compressed => (format!("WriteBatch #{n}"), "compressed stream (not decoded in this list)".to_string()),
-                    FragRole::Full | FragRole::First if l.total_len < batch::HEADER as u64 => (format!("WriteBatch #{n}"), format!("{} B reassembled: shorter than the 12-byte WriteBatch header", l.total_len)),
+                    FragRole::Full | FragRole::First if l.total_len < batch::HEADER as u64 => {
+                        (format!("WriteBatch #{n}"), format!("{} B reassembled: shorter than the 12-byte WriteBatch header", l.total_len))
+                    }
                     FragRole::Full | FragRole::First => {
                         let b = batch::decode(&l.data, l.total_len, Space::Record(l.start), 3);
-                        let ops: Vec<String> = b.ops.iter().take(3).map(|o| if o.value.is_some() { format!("{} {}={}", tag_name(o.tag), o.summary_key(), o.summary_value()) } else { format!("{} {}", tag_name(o.tag), o.summary_key()) }).collect();
+                        let ops: Vec<String> = b
+                            .ops
+                            .iter()
+                            .take(3)
+                            .map(|o| if o.value.is_some() { format!("{} {}={}", tag_name(o.tag), o.summary_key(), o.summary_value()) } else { format!("{} {}", tag_name(o.tag), o.summary_key()) })
+                            .collect();
                         let more_ops = b.count.map(|c| c as usize > ops.len()).unwrap_or(false);
                         (
                             format!("WriteBatch #{n}"),
-                            format!("seq {} · {} ops · {}{}", b.seq.map(|s| s.to_string()).unwrap_or("?".into()), b.count.map(|c| c.to_string()).unwrap_or("?".into()), ops.join(", "), if more_ops { ", …" } else { "" }),
+                            format!(
+                                "seq {} · {} ops · {}{}",
+                                b.seq.map(|s| s.to_string()).unwrap_or("?".into()),
+                                b.count.map(|c| c.to_string()).unwrap_or("?".into()),
+                                ops.join(", "),
+                                if more_ops { ", …" } else { "" }
+                            ),
                         )
                     }
                     _ => (format!("record #{n} ({})", log::type_name(l.rtype)), meta_summary(&l)),
@@ -533,7 +597,12 @@ impl LogInspector {
                     _ => (format!("record #{n} ({})", log::type_name(l.rtype)), meta_summary(&l)),
                 }
             };
-            let fld = Field::new(name, Some(Span::file(l.start, l.end - l.start)), summary).kind(K::StructureRef).status(l.status).link(NodeKind::LogRecord(l.start)).explain(if l.note.is_empty() { format!("Logical record {} reassembled from {} fragment(s); double-click to open it.", range(l.start, l.end), l.frag_count) } else { l.note.clone() }).diag(l.diag.clone());
+            let fld = Field::new(name, Some(Span::file(l.start, l.end - l.start)), summary)
+                .kind(K::StructureRef)
+                .status(l.status)
+                .link(NodeKind::LogRecord(l.start))
+                .explain(if l.note.is_empty() { format!("Logical record {} reassembled from {} fragment(s); double-click to open it.", range(l.start, l.end), l.frag_count) } else { l.note.clone() })
+                .diag(l.diag.clone());
             let cells = vec![fld.name.clone(), format!("0x{:x}", l.start), (l.end - l.start).to_string(), fld.value.clone(), header_variant(&l), String::new(), record_status_cell(&l)];
             rows.push(Row { cells, field: fld });
             n += 1;
@@ -569,10 +638,18 @@ impl LogInspector {
                     let (st, _) = block_health(&items);
                     let blen = (self.len() - b * BLOCK_SIZE).min(BLOCK_SIZE);
                     let first_problem = items.iter().find(|p| p.status().is_problem()).and_then(|p| p.diagnostic());
-                    let fld = Field::new(format!("block {b}"), Some(Span::file(b * BLOCK_SIZE, blen)), format!("{recs} records")).kind(K::StructureRef).dv(DV::U64(recs as u64)).status(st).link(NodeKind::LogBlock(b)).diag(first_problem);
+                    let fld = Field::new(format!("block {b}"), Some(Span::file(b * BLOCK_SIZE, blen)), format!("{recs} records"))
+                        .kind(K::StructureRef)
+                        .dv(DV::U64(recs as u64))
+                        .status(st)
+                        .link(NodeKind::LogBlock(b))
+                        .diag(first_problem);
                     rows.push(Row { cells: vec![b.to_string(), format!("0x{:x}", b * BLOCK_SIZE), blen.to_string(), recs.to_string(), types.join(", "), st_cell(st)], field: fld });
                 }
-                Err(e) => rows.push(Row { cells: vec![b.to_string(), String::new(), String::new(), String::new(), format!("{e}"), "✖ Invalid".into()], field: Field::new("block", None, e.to_string()).status(Status::Invalid) }),
+                Err(e) => rows.push(Row {
+                    cells: vec![b.to_string(), String::new(), String::new(), String::new(), format!("{e}"), "✖ Invalid".into()],
+                    field: Field::new("block", None, e.to_string()).status(Status::Invalid),
+                }),
             }
         }
         use ColumnRole as R;
@@ -608,7 +685,12 @@ impl LogInspector {
                     Some(c) => format!("{:08x} / {:08x}", crate::util::crc_unmask(p.stored_crc), c),
                     None => "-".into(),
                 };
-                let fld = Field::new(format!("physical item {i}"), Some(Span::file(p.offset, p.end - p.offset)), ty.clone()).kind(K::StructureRef).status(st).link(NodeKind::LogFragment(p.offset)).explain(phys_explain(p)).diag(p.diagnostic());
+                let fld = Field::new(format!("physical item {i}"), Some(Span::file(p.offset, p.end - p.offset)), ty.clone())
+                    .kind(K::StructureRef)
+                    .status(st)
+                    .link(NodeKind::LogFragment(p.offset))
+                    .explain(phys_explain(p))
+                    .diag(p.diagnostic());
                 Row { cells: vec![i.to_string(), format!("0x{:x}", p.offset), ty, hdr, p.len.to_string(), p.log_number.map(|n| n.to_string()).unwrap_or("-".into()), crc, st_cell(st)], field: fld }
             })
             .collect();
@@ -620,7 +702,16 @@ impl LogInspector {
         let mut v = View {
             title: format!("Block {b} @0x{:x}{suffix}", b * BLOCK_SIZE),
             status: health.is_problem().then_some(health),
-            columns: vec![col(R::Index, "#"), col(R::Offset, "File offset"), col(R::Kind, "Type"), col(R::Header, "Header"), col(R::Len, "Len"), col(R::Seq, "Log #"), col(R::Crc, "CRC stored / computed"), col(R::Status, "Status")],
+            columns: vec![
+                col(R::Index, "#"),
+                col(R::Offset, "File offset"),
+                col(R::Kind, "Type"),
+                col(R::Header, "Header"),
+                col(R::Len, "Len"),
+                col(R::Seq, "Log #"),
+                col(R::Crc, "CRC stored / computed"),
+                col(R::Status, "Status"),
+            ],
             rows,
             notes: vec!["CRC values are unmasked (crc32c::Unmask) for comparison.".into()],
             ..Default::default()
@@ -643,10 +734,19 @@ impl LogInspector {
         let mut f = Vec::new();
         match p.kind {
             PhysKind::BlockTrailer => {
-                f.push(Field::new("block trailer padding", Some(Span::file(off, p.end - off)), format!("{} bytes", p.end - off)).raw(&buf[s..]).enc("zero bytes").explain("Fewer than 7 bytes remained in the 32 KiB block, so the writer padded with zeros (log_writer.cc)."));
+                f.push(
+                    Field::new("block trailer padding", Some(Span::file(off, p.end - off)), format!("{} bytes", p.end - off))
+                        .raw(&buf[s..])
+                        .enc("zero bytes")
+                        .explain("Fewer than 7 bytes remained in the 32 KiB block, so the writer padded with zeros (log_writer.cc)."),
+                );
             }
             PhysKind::ZeroFill => {
-                f.push(Field::new("zero region", Some(Span::file(off, p.end - off)), format!("{} bytes", p.end - off)).enc("zero bytes").explain("Type 0 with length 0: preallocated or zeroed space. log_reader.cc reports kBadRecord / treats as end of data."));
+                f.push(
+                    Field::new("zero region", Some(Span::file(off, p.end - off)), format!("{} bytes", p.end - off))
+                        .enc("zero bytes")
+                        .explain("Type 0 with length 0: preallocated or zeroed space. log_reader.cc reports kBadRecord / treats as end of data."),
+                );
             }
             _ => {
                 let h = &buf[s..];
@@ -676,10 +776,24 @@ impl LogInspector {
                         }),
                 );
                 if h.len() >= 6 {
-                    f.push(Field::new("length", Some(Span::file(off + 4, 2)), p.len.to_string()).kind(K::Length).dv(DV::U16(p.len as u16)).raw(&h[4..6]).enc("fixed16 LE").explain("Payload length of this fragment (excludes header)."));
+                    f.push(
+                        Field::new("length", Some(Span::file(off + 4, 2)), p.len.to_string())
+                            .kind(K::Length)
+                            .dv(DV::U16(p.len as u16))
+                            .raw(&h[4..6])
+                            .enc("fixed16 LE")
+                            .explain("Payload length of this fragment (excludes header)."),
+                    );
                 }
                 if h.len() >= 7 {
-                    f.push(Field::new("type", Some(Span::file(off + 6, 1)), format!("{} {}", p.rtype, log::type_name(p.rtype))).kind(K::RecordType).dv(DV::Enum { name: log::type_name(p.rtype), code: u64::from(p.rtype) }).raw(&h[6..7]).enc("u8").explain("Record type (db/log_format.h). 1-4 legacy fragments, 5-8 recyclable, 9 compression, 10/11 timestamp sizes, 130/131 predecessor WAL info."));
+                    f.push(
+                        Field::new("type", Some(Span::file(off + 6, 1)), format!("{} {}", p.rtype, log::type_name(p.rtype)))
+                            .kind(K::RecordType)
+                            .dv(DV::Enum { name: log::type_name(p.rtype), code: u64::from(p.rtype) })
+                            .raw(&h[6..7])
+                            .enc("u8")
+                            .explain("Record type (db/log_format.h). 1-4 legacy fragments, 5-8 recyclable, 9 compression, 10/11 timestamp sizes, 130/131 predecessor WAL info."),
+                    );
                 }
                 if p.header_len == 11 {
                     let ln = p.log_number.unwrap_or(0);
@@ -688,12 +802,22 @@ impl LogInspector {
                         Some(_) => Status::Unknown,
                         None => Status::Present,
                     };
-                    f.push(Field::new("log number", Some(Span::file(off + 7, 4)), ln.to_string()).dv(DV::U32(ln)).raw(h.get(7..11).unwrap_or(&[])).enc("fixed32 LE").status(st).explain("Recyclable header: low 32 bits of the WAL number. A mismatch means a stale record from a recycled file (kOldRecord)."));
+                    f.push(
+                        Field::new("log number", Some(Span::file(off + 7, 4)), ln.to_string())
+                            .dv(DV::U32(ln))
+                            .raw(h.get(7..11).unwrap_or(&[]))
+                            .enc("fixed32 LE")
+                            .status(st)
+                            .explain("Recyclable header: low 32 bits of the WAL number. A mismatch means a stale record from a recycled file (kOldRecord)."),
+                    );
                 } else {
                     f.push(Field::new("log number", None, "absent in legacy 7-byte header").status(Status::NotPresent));
                 }
                 let pl = p.payload_avail;
-                let mut pf = Field::new("payload", Some(Span::file(p.payload_off, pl)), bytes_preview(&buf[(p.payload_off - base) as usize..(p.payload_off - base + pl) as usize], 64)).kind(K::Payload).enc("bytes").status(if pl < p.len as u64 { Status::Truncated } else { Status::Present });
+                let mut pf = Field::new("payload", Some(Span::file(p.payload_off, pl)), bytes_preview(&buf[(p.payload_off - base) as usize..(p.payload_off - base + pl) as usize], 64))
+                    .kind(K::Payload)
+                    .enc("bytes")
+                    .status(if pl < p.len as u64 { Status::Truncated } else { Status::Present });
                 if matches!(log::role(p.rtype), FragRole::Full | FragRole::First | FragRole::Meta) {
                     pf = pf.link(NodeKind::LogRecord(off)).explain("Starts a logical record; follow the link to the reassembled view.");
                 } else {
@@ -701,14 +825,23 @@ impl LogInspector {
                 }
                 f.push(pf);
                 // Link back to the record this fragment belongs to (bounded backward scan).
-                if p.kind == PhysKind::Record || p.header_len > 0 {
-                    if let Ok(Some(start)) = log::record_start_for(self.reader(), off, OPEN_TAIL_BLOCKS) {
-                        if let Some(l) = self.read_logical(start, 0) {
-                            if let Some(pos) = l.frags.iter().position(|x| x.offset == off) {
-                                f.push(Field::new("record", None, format!("part {} of {} of record @0x{start:x} ›", pos + 1, l.frag_count)).kind(K::StructureRef).status(Status::Implicit).link(NodeKind::LogRecord(start)).explain(format!("This fragment's payload is reassembled offsets [0x{:x}, 0x{:x}) of the logical record {}.", l.frags[pos].logical_off, l.frags[pos].logical_off + l.frags[pos].len, range(l.start, l.end))));
-                            }
-                        }
-                    }
+                if (p.kind == PhysKind::Record || p.header_len > 0)
+                    && let Ok(Some(start)) = log::record_start_for(self.reader(), off, OPEN_TAIL_BLOCKS)
+                    && let Some(l) = self.read_logical(start, 0)
+                    && let Some(pos) = l.frags.iter().position(|x| x.offset == off)
+                {
+                    f.push(
+                        Field::new("record", None, format!("part {} of {} of record @0x{start:x} ›", pos + 1, l.frag_count))
+                            .kind(K::StructureRef)
+                            .status(Status::Implicit)
+                            .link(NodeKind::LogRecord(start))
+                            .explain(format!(
+                                "This fragment's payload is reassembled offsets [0x{:x}, 0x{:x}) of the logical record {}.",
+                                l.frags[pos].logical_off,
+                                l.frags[pos].logical_off + l.frags[pos].len,
+                                range(l.start, l.end)
+                            )),
+                    );
                 }
             }
         }
@@ -731,7 +864,13 @@ impl LogInspector {
                 break;
             }
             let compressed = wal && self.wal_compression().unwrap_or(0) != 0;
-            let keep = if compressed { LIST_KEEP_COMPRESSED } else if wal { LIST_KEEP_WAL } else { LIST_KEEP_MANIFEST };
+            let keep = if compressed {
+                LIST_KEEP_COMPRESSED
+            } else if wal {
+                LIST_KEEP_WAL
+            } else {
+                LIST_KEEP_MANIFEST
+            };
             let Some(mut l) = self.read_logical(off, keep) else { break };
             if l.end <= off {
                 break; // monotonic guard: record ends must advance
@@ -750,7 +889,13 @@ impl LogInspector {
                 "not computable (cut)"
             };
             let re = l.reassembly();
-            let mut fld = Field::new(format!("record {i}"), Some(Span::file(l.start, l.end - l.start)), format!("{} B logical", l.total_len)).kind(K::StructureRef).dv(DV::U64(l.total_len)).status(l.status).link(NodeKind::LogRecord(l.start)).explain(l.note.clone()).diag(l.diag.clone());
+            let mut fld = Field::new(format!("record {i}"), Some(Span::file(l.start, l.end - l.start)), format!("{} B logical", l.total_len))
+                .kind(K::StructureRef)
+                .dv(DV::U64(l.total_len))
+                .status(l.status)
+                .link(NodeKind::LogRecord(l.start))
+                .explain(l.note.clone())
+                .diag(l.diag.clone());
             let cells = if wal {
                 let (kind, seq, cnt, cf, key, val) = if matches!(l.role, FragRole::Full | FragRole::First) {
                     if l.decompressed_from.is_none() && self.wal_compression().unwrap_or(0) != 0 {
@@ -806,9 +951,25 @@ impl LogInspector {
                 col(R::Status, "Status"),
             ]
         } else {
-            vec![col(R::Index, "#"), col(R::Offset, "Offset"), col(R::Header, "Header"), col(R::Len, "Len"), col(R::Count, "Frags"), col(R::Crc, "CRC"), col(R::Header, "Reassembly"), col(R::Summary, "VersionEdit summary"), col(R::Status, "Status")]
+            vec![
+                col(R::Index, "#"),
+                col(R::Offset, "Offset"),
+                col(R::Header, "Header"),
+                col(R::Len, "Len"),
+                col(R::Count, "Frags"),
+                col(R::Crc, "CRC"),
+                col(R::Header, "Reassembly"),
+                col(R::Summary, "VersionEdit summary"),
+                col(R::Status, "Status"),
+            ]
         };
-        let mut v = View { title: format!("Logical records from 0x{start:x}"), columns, rows, notes: vec![format!("Page of up to {RECORDS_PER_PAGE} records; expand \"Next page\" in the tree to continue.").into()], ..Default::default() };
+        let mut v = View {
+            title: format!("Logical records from 0x{start:x}"),
+            columns,
+            rows,
+            notes: vec![format!("Page of up to {RECORDS_PER_PAGE} records; expand \"Next page\" in the tree to continue.").into()],
+            ..Default::default()
+        };
         if self.is_empty() {
             v.notes = vec!["Empty file (0 bytes): no records. This is not an error.".into()];
         }
@@ -826,28 +987,54 @@ impl LogInspector {
         let sp = Space::Record(off);
         let mut batch_diag = None;
         let mut f = vec![
-            Field::new("record type", Some(Span::file(off + 6, 1)), format!("{} {}", l.rtype, log::type_name(l.rtype))).kind(K::RecordType).dv(DV::Enum { name: log::type_name(l.rtype), code: u64::from(l.rtype) }).diag(l.diag.clone()).enc("u8").status(l.status).explain(if l.note.is_empty() { "Type of the first fragment.".to_string() } else { l.note.clone() }),
-            Field::new("reassembled length", None, format!("{} bytes in {} fragment(s)", l.total_len, l.frag_count)).kind(K::Length).dv(DV::U64(l.total_len)).explain("Sum of fragment payload lengths. Logical offsets below are relative to the reassembled record (rec+), not the file."),
-            Field::new("reassembly", None, l.reassembly().text()).status(if l.reassembly() == Reassembly::Complete { Status::Implicit } else { l.status }).diag(l.diag.clone()).explain("Whether every fragment from FIRST to LAST was found (reassembly is not decompression)."),
+            Field::new("record type", Some(Span::file(off + 6, 1)), format!("{} {}", l.rtype, log::type_name(l.rtype)))
+                .kind(K::RecordType)
+                .dv(DV::Enum { name: log::type_name(l.rtype), code: u64::from(l.rtype) })
+                .diag(l.diag.clone())
+                .enc("u8")
+                .status(l.status)
+                .explain(if l.note.is_empty() { "Type of the first fragment.".to_string() } else { l.note.clone() }),
+            Field::new("reassembled length", None, format!("{} bytes in {} fragment(s)", l.total_len, l.frag_count))
+                .kind(K::Length)
+                .dv(DV::U64(l.total_len))
+                .explain("Sum of fragment payload lengths. Logical offsets below are relative to the reassembled record (rec+), not the file."),
+            Field::new("reassembly", None, l.reassembly().text())
+                .status(if l.reassembly() == Reassembly::Complete { Status::Implicit } else { l.status })
+                .diag(l.diag.clone())
+                .explain("Whether every fragment from FIRST to LAST was found (reassembly is not decompression)."),
         ];
-        if let (Some(ln), Some(e)) = (l.log_number, expected) {
-            if u64::from(ln) != e & 0xffff_ffff {
-                f.push(Field::new("stale recycled record", None, format!("log number {ln} ≠ {e}")).status(Status::Unknown).explain("log_reader.cc returns kOldRecord for this; data belongs to an older WAL that reused the file."));
-            }
+        if let (Some(ln), Some(e)) = (l.log_number, expected)
+            && u64::from(ln) != e & 0xffff_ffff
+        {
+            f.push(
+                Field::new("stale recycled record", None, format!("log number {ln} ≠ {e}"))
+                    .status(Status::Unknown)
+                    .explain("log_reader.cc returns kOldRecord for this; data belongs to an older WAL that reused the file."),
+            );
         }
         // Source fragments: each fragment's file range links to its canonical physical item.
         for (i, fr) in l.frags.iter().enumerate() {
             f.push(
-                Field::new(format!("fragment {i} {}", log::type_name(fr.rtype)), Some(Span::file(fr.payload_off, fr.len)), format!("file 0x{:x}+{} -> rec+0x{:x}", fr.payload_off, fr.len, fr.logical_off))
-                    .enc("payload bytes")
-                    .status(match fr.crc_ok {
-                        Some(true) => Status::Present,
-                        Some(false) => Status::Invalid,
-                        None => Status::Truncated,
-                    })
-                    .kind(K::Payload)
-                    .link(NodeKind::LogFragment(fr.offset))
-                    .explain(format!("Source fragment: physical header at file 0x{:x} ({} B header). This payload occupies reassembled offsets [0x{:x}, 0x{:x}).", fr.offset, fr.header_len, fr.logical_off, fr.logical_off + fr.len)),
+                Field::new(
+                    format!("fragment {i} {}", log::type_name(fr.rtype)),
+                    Some(Span::file(fr.payload_off, fr.len)),
+                    format!("file 0x{:x}+{} -> rec+0x{:x}", fr.payload_off, fr.len, fr.logical_off),
+                )
+                .enc("payload bytes")
+                .status(match fr.crc_ok {
+                    Some(true) => Status::Present,
+                    Some(false) => Status::Invalid,
+                    None => Status::Truncated,
+                })
+                .kind(K::Payload)
+                .link(NodeKind::LogFragment(fr.offset))
+                .explain(format!(
+                    "Source fragment: physical header at file 0x{:x} ({} B header). This payload occupies reassembled offsets [0x{:x}, 0x{:x}).",
+                    fr.offset,
+                    fr.header_len,
+                    fr.logical_off,
+                    fr.logical_off + fr.len
+                )),
             );
         }
         if (l.frags.len() as u64) < l.frag_count {
@@ -919,13 +1106,24 @@ impl LogInspector {
         v.spaces.push(SpaceInfo {
             space: sp,
             size: data.len() as u64,
-            title: if l.decompressed_from.is_some() { format!("Decompressed record offsets (derived from compressed record @0x{off:x}, {} B)", l.total_len) } else { format!("Reassembled record offsets (logical, first fragment @0x{off:x}, {} B)", l.total_len) },
+            title: if l.decompressed_from.is_some() {
+                format!("Decompressed record offsets (derived from compressed record @0x{off:x}, {} B)", l.total_len)
+            } else {
+                format!("Reassembled record offsets (logical, first fragment @0x{off:x}, {} B)", l.total_len)
+            },
             map: record_map(l),
         });
         let first = l.frags.first().map(|fr| NodeKind::LogFragment(fr.offset));
         let mut loc = vec![
             WhereLine { text: format!("file {} · stored {} in {} fragment(s)", range(l.start, l.end), bytes_dec_hex(l.end - l.start), l.frag_count), link: None },
-            WhereLine { text: format!("reassembled contents {}{}", bytes_dec_hex(l.total_len), if l.decompressed_from.is_some() { " (decompressed stream; no byte mapping to file offsets)" } else { " (record offsets map to fragment payload bytes)" }), link: None },
+            WhereLine {
+                text: format!(
+                    "reassembled contents {}{}",
+                    bytes_dec_hex(l.total_len),
+                    if l.decompressed_from.is_some() { " (decompressed stream; no byte mapping to file offsets)" } else { " (record offsets map to fragment payload bytes)" }
+                ),
+                link: None,
+            },
         ];
         if let Some(k) = first {
             loc.push(WhereLine { text: format!("first fragment at 0x{:x} ›", l.start), link: Some(Target { node: k, span: None }) });
@@ -1006,11 +1204,7 @@ fn meta_fields(l: &Logical) -> Vec<Field> {
 
 fn phys_explain(p: &Phys) -> String {
     let base = phys_explain_base(p);
-    if p.crc_ok() == Some(false) {
-        format!("{base}{CRC_GUESS}")
-    } else {
-        base
-    }
+    if p.crc_ok() == Some(false) { format!("{base}{CRC_GUESS}") } else { base }
 }
 
 fn phys_explain_base(p: &Phys) -> String {

@@ -4,7 +4,7 @@
 use eframe::egui;
 use rocksvision::discover::DirEntry;
 use rocksvision::jobs::{FsBackend, IoBackend, IoRequest, Outcome, Response, Worker};
-use rocksvision::ui::theme::{theme_by_id, Decoration, ThemeDefinition, DEFAULT_THEME, THEMES};
+use rocksvision::ui::theme::{DEFAULT_THEME, Decoration, THEMES, ThemeDefinition, theme_by_id};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -35,7 +35,8 @@ fn registry_invariants_and_fallback() {
         assert!(t.typography.body > 0.0 && t.typography.mono > 0.0 && t.typography.small > 0.0);
     }
     assert_eq!(THEMES.iter().filter(|t| t.decoration == Decoration::WoodGrain).count(), 1);
-    assert_eq!(THEMES[0].id, DEFAULT_THEME);
+    assert_eq!(THEMES.iter().filter(|t| t.id == DEFAULT_THEME).count(), 1, "default theme registered once");
+    assert_eq!(DEFAULT_THEME, "xcopy");
     for bad in ["", " ", "AUTISTIC", " matrix", "matrix\0", "wooden ", "../x", "unknown-theme", &"x".repeat(10_000)] {
         assert_eq!(theme_by_id(bad).id, DEFAULT_THEME, "{bad:.20?} did not fall back");
     }
@@ -54,7 +55,17 @@ fn contrast_required_pairs_all_six_themes() {
     let mut fails = Vec::new();
     for t in THEMES {
         let p = &t.palette;
-        for (n, bg) in [("canvas", p.canvas), ("panel", p.panel), ("explain", p.explain), ("toolbar", p.toolbar), ("input", p.input), ("menu", p.menu), ("data", p.data), ("stripe_a", p.stripe_a), ("stripe_b", p.stripe_b)] {
+        for (n, bg) in [
+            ("canvas", p.canvas),
+            ("panel", p.panel),
+            ("explain", p.explain),
+            ("toolbar", p.toolbar),
+            ("input", p.input),
+            ("menu", p.menu),
+            ("data", p.data),
+            ("stripe_a", p.stripe_a),
+            ("stripe_b", p.stripe_b),
+        ] {
             check(t, &mut fails, &format!("text/{n}"), p.text, bg, 4.5);
         }
         for (n, bg) in [("panel", p.panel), ("explain", p.explain), ("data", p.data), ("stripe_a", p.stripe_a), ("stripe_b", p.stripe_b)] {

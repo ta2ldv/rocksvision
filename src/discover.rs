@@ -104,20 +104,20 @@ pub fn sniff(path: &Path) -> FileKind {
     }
     let Ok(r) = crate::io::RangeReader::open(path) else { return FileKind::Other };
     let len = r.len();
-    if len >= 48 {
-        if let Ok(t) = r.read_at(len - 8, 8) {
-            let m = crate::util::fixed64(&t, 0).unwrap_or(0);
-            if m == crate::sst::footer::BLOCK_BASED_MAGIC || m == crate::sst::footer::LEGACY_BLOCK_BASED_MAGIC {
-                return FileKind::Sst;
-            }
+    if len >= 48
+        && let Ok(t) = r.read_at(len - 8, 8)
+    {
+        let m = crate::util::fixed64(&t, 0).unwrap_or(0);
+        if m == crate::sst::footer::BLOCK_BASED_MAGIC || m == crate::sst::footer::LEGACY_BLOCK_BASED_MAGIC {
+            return FileKind::Sst;
         }
     }
-    if len >= 7 {
-        if let Ok(h) = r.read_at(0, 7) {
-            let t = h[6];
-            if (1..=11).contains(&t) || t == 130 || t == 131 {
-                return FileKind::Wal;
-            }
+    if len >= 7
+        && let Ok(h) = r.read_at(0, 7)
+    {
+        let t = h[6];
+        if (1..=11).contains(&t) || t == 130 || t == 131 {
+            return FileKind::Wal;
         }
     }
     FileKind::Other

@@ -7,11 +7,11 @@
 //! CRC covers bytes [6 .. header_size+length) i.e. type (+log number) + payload.
 //! A block tail shorter than a header is zero padding.
 
-use crate::io::{read_vec, RangeRead};
-pub use crate::limits::{MAX_FRAG_REFS, MAX_RECORD_BYTES};
+use crate::io::{RangeRead, read_vec};
 use crate::limits::RESYNC_BUDGET;
+pub use crate::limits::{MAX_FRAG_REFS, MAX_RECORD_BYTES};
 use crate::model::{CheckKind, DecodedValue, Diagnostic, Space, Span, Status, Trust};
-use crate::util::{crc32c, crc_unmask, fixed16, fixed32};
+use crate::util::{crc_unmask, crc32c, fixed16, fixed32};
 use std::io;
 
 pub const BLOCK_SIZE: u64 = 32768;
@@ -105,11 +105,7 @@ impl Phys {
     /// observed, when the header was read far enough to know the length (a header cut short
     /// before its length field has neither).
     pub fn declared_vs_available(&self) -> (Option<DecodedValue>, Option<DecodedValue>) {
-        if self.header_len > 0 || self.rtype != 0 {
-            (Some(DecodedValue::U64(u64::from(self.len))), Some(DecodedValue::U64(self.payload_avail)))
-        } else {
-            (None, None)
-        }
+        if self.header_len > 0 || self.rtype != 0 { (Some(DecodedValue::U64(u64::from(self.len))), Some(DecodedValue::U64(self.payload_avail))) } else { (None, None) }
     }
     /// Problem of this physical item as data (None for a verified record / padding).
     pub fn diagnostic(&self) -> Option<Diagnostic> {
@@ -803,15 +799,7 @@ pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logica
 
 fn append(l: &mut Logical, p: &Phys, payload: &[u8], keep: usize) {
     if l.frags.len() < MAX_FRAG_REFS {
-        l.frags.push(FragRef {
-            offset: p.offset,
-            rtype: p.rtype,
-            header_len: p.header_len,
-            payload_off: p.payload_off,
-            len: p.payload_avail,
-            crc_ok: p.crc_ok(),
-            logical_off: l.total_len,
-        });
+        l.frags.push(FragRef { offset: p.offset, rtype: p.rtype, header_len: p.header_len, payload_off: p.payload_off, len: p.payload_avail, crc_ok: p.crc_ok(), logical_off: l.total_len });
     }
     l.frag_count += 1;
     if p.crc_ok() == Some(false) && l.status == Status::Present {
@@ -925,7 +913,16 @@ mod tests {
         let r = MemReader::new(block_fragment(1)[..HEADER_SIZE + 10].to_vec());
         let l = read_logical(&r, 0, 16).unwrap();
         assert_eq!((l.status, l.status_word()), (Status::Truncated, "Truncated"));
-        for re in [Reassembly::Complete, Reassembly::IncompleteNoLast, Reassembly::IncompleteFragmentCut, Reassembly::Orphan(FragRole::Middle), Reassembly::Orphan(FragRole::Last), Reassembly::Interrupted, Reassembly::ReadError, Reassembly::Unframed] {
+        for re in [
+            Reassembly::Complete,
+            Reassembly::IncompleteNoLast,
+            Reassembly::IncompleteFragmentCut,
+            Reassembly::Orphan(FragRole::Middle),
+            Reassembly::Orphan(FragRole::Last),
+            Reassembly::Interrupted,
+            Reassembly::ReadError,
+            Reassembly::Unframed,
+        ] {
             assert_ne!(re.text(), "ok");
         }
     }

@@ -73,8 +73,8 @@ fn crc_table() -> &'static [[u32; 256]; 8] {
 pub fn crc32c_extend(crc: u32, data: &[u8]) -> u32 {
     let t = crc_table();
     let mut c = !crc;
-    let mut chunks = data.chunks_exact(8);
-    for ch in &mut chunks {
+    let (chunks, rest) = data.as_chunks::<8>();
+    for ch in chunks {
         let lo = c ^ u32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]);
         let hi = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]);
         c = t[7][(lo & 0xff) as usize]
@@ -86,7 +86,7 @@ pub fn crc32c_extend(crc: u32, data: &[u8]) -> u32 {
             ^ t[1][((hi >> 16) & 0xff) as usize]
             ^ t[0][(hi >> 24) as usize];
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         c = (c >> 8) ^ t[0][((c ^ u32::from(b)) & 0xff) as usize];
     }
     !c
@@ -118,11 +118,7 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn hex_preview(bytes: &[u8], max: usize) -> String {
-    if bytes.len() <= max {
-        hex(bytes)
-    } else {
-        format!("{} … (+{} B)", hex(&bytes[..max]), bytes.len() - max)
-    }
+    if bytes.len() <= max { hex(bytes) } else { format!("{} … (+{} B)", hex(&bytes[..max]), bytes.len() - max) }
 }
 
 /// Printable preview: UTF-8/ASCII text with escapes for non-printable bytes.
@@ -149,11 +145,7 @@ pub fn bytes_preview(bytes: &[u8], max: usize) -> String {
     if n == 0 {
         return "(empty)".into();
     }
-    if printable * 10 >= n * 8 {
-        format!("\"{}\"", text_preview(bytes, max))
-    } else {
-        format!("0x{}", hex_preview(bytes, max / 2).replace(' ', ""))
-    }
+    if printable * 10 >= n * 8 { format!("\"{}\"", text_preview(bytes, max)) } else { format!("0x{}", hex_preview(bytes, max / 2).replace(' ', "")) }
 }
 
 /// Key bytes as a readable quoted string (design D2): valid UTF-8 → `str::escape_debug`;
@@ -190,11 +182,7 @@ pub fn human_size(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {} ({n} B)", U[i])
-    }
+    if i == 0 { format!("{n} B") } else { format!("{v:.1} {} ({n} B)", U[i]) }
 }
 
 #[cfg(test)]

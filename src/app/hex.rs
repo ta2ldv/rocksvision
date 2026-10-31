@@ -137,6 +137,11 @@ pub struct Interpretation {
     pub tokens: Vec<String>,
 }
 
+/// Shown for each control character or invalid byte in the UTF-8 preview (for ASCII input one cell per byte, like the hex
+/// pane's ASCII column; a valid multi-byte character stays one glyph). Listed in `ui::theme::UI_GLYPHS` (render-tested). U+25FD:
+/// U+25A2 "▢" is not in the bundled proportional font (it rendered as egui's tofu U+25FB).
+pub const UNPRINTABLE: char = '◽';
+
 /// Numeric interpretations of the bytes starting at the selection.
 pub fn interpretations(b: &[u8]) -> Vec<Interpretation> {
     let mut v = Vec::new();
@@ -157,14 +162,24 @@ pub fn interpretations(b: &[u8]) -> Vec<Interpretation> {
         row("u64 LE / BE", vec![u64::from_le_bytes(a).to_string(), u64::from_be_bytes(a).to_string()]);
     }
     if let Some((x, n)) = crate::util::varint64(b, 0) {
-        row("varint64", vec![format!("{x} ({n} bytes)")]);
+        row("varint64", vec![format!("{x} ({n} byte{})", if n == 1 { "" } else { "s" })]);
     }
     if !b.is_empty() {
         let n = b.len().min(LIMITS.interp_bytes as usize);
-        let s = String::from_utf8_lossy(&b[..n]).into_owned();
-        row(&format!("UTF-8 (first {n} B)"), vec![s]);
+        row(&format!("UTF-8 (first {n} B)"), vec![utf8_preview(&b[..n])]);
     }
     v
+}
+
+/// UTF-8 text of `b` with one `UNPRINTABLE` per control character (NUL, tab, CR, LF, DEL, C1)
+/// and per byte of an invalid or truncated sequence; valid printable characters are kept (one glyph per character, so only ASCII input lines up byte for byte with the hex pane).
+fn utf8_preview(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len());
+    for chunk in b.utf8_chunks() {
+        s.extend(chunk.valid().chars().map(|c| if c.is_control() { UNPRINTABLE } else { c }));
+        s.extend(std::iter::repeat_n(UNPRINTABLE, chunk.invalid().len()));
+    }
+    s
 }
 
 #[cfg(test)]
@@ -181,5 +196,39 @@ mod tests {
         let u8row = rows.iter().find(|r| r.label == "u8").unwrap();
         assert_eq!(u8row.tokens, vec!["143", "0x8f", "0b10001111"]);
         assert!(rows.iter().flat_map(|r| &r.tokens).all(|t| !t.contains(" / ")));
+    }
+
+    fn utf8_row(b: &[u8]) -> String {
+        interpretations(b).into_iter().find(|r| r.label.starts_with("UTF-8")).unwrap().tokens.concat()
+    }
+
+    /// 0017 D5 UI-7: every control byte (NUL, tab, CR, LF, 0x01, DEL) and every byte of an
+    /// invalid sequence is its own `UNPRINTABLE` glyph, so ASCII input lines up with the hex
+    /// pane's ASCII column (one cell per byte); valid multi-byte UTF-8 stays one char. D6: a
+    /// 3-byte char cut by the `interp_bytes` limit leaves one glyph per leftover byte.
+    #[test]
+    fn utf8_preview_marks_each_unprintable_byte() {
+        // sst-zstd block #14 entry 0 / entry 1 (GUI finding).
+        let e0 = [0x00, 0x0f, 0x5b, 0x6b, 0x65, 0x79, 0x2d, 0x30, 0x34, 0x32, 0x01, 0x2b, 0, 0, 0, 0, 0, 0, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x2d, 0x30, 0x34, 0x32];
+        assert_eq!(utf8_row(&e0), "◽◽[key-042◽+◽◽◽◽◽◽value-042");
+        let e1 = [0x06, 0x09, 0x5b, 0x33, 0x01, 0x2c, 0, 0, 0, 0, 0, 0];
+        assert_eq!(utf8_row(&e1), "◽◽[3◽,◽◽◽◽◽◽");
+        assert_eq!(utf8_row(b"a\r\nb\x7f"), "a◽◽b◽");
+        assert_eq!(utf8_row(&[0xff, 0xfe, b'x']), "◽◽x", "invalid bytes: one glyph each");
+        assert_eq!(utf8_row("é→".as_bytes()), "é→", "valid UTF-8 is kept");
+        assert_eq!(super::UNPRINTABLE, '◽');
+        // Truncation boundary: "→" (E2 86 92) straddles the cut at byte `interp_bytes` (64).
+        let n = crate::limits::LIMITS.interp_bytes as usize;
+        assert_eq!(n, 64);
+        for (ascii, left) in [(n - 1, 1), (n - 2, 2)] {
+            let mut b = vec![b'a'; ascii];
+            b.extend_from_slice("→".as_bytes());
+            b.extend_from_slice(b"tail");
+            let r = interpretations(&b).into_iter().find(|r| r.label.starts_with("UTF-8")).unwrap();
+            assert_eq!(r.label, format!("UTF-8 (first {n} B)"));
+            let s = r.tokens.concat();
+            assert_eq!(s.chars().filter(|&c| c == super::UNPRINTABLE).count(), left, "{left} leftover byte(s) of the cut char");
+            assert_eq!(s, format!("{}{}", "a".repeat(ascii), "◽".repeat(left)));
+        }
     }
 }

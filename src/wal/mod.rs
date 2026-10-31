@@ -9,7 +9,7 @@ pub mod batch;
 pub use crate::format::log;
 pub use crate::limits::{MAX_OPS_LISTED, RECORDS_PER_PAGE};
 
-use crate::format::codec::{compression_name, zstd_stream, ZSTD};
+use crate::format::codec::{ZSTD, compression_name, zstd_stream};
 use crate::io::{RangeRead, RangeReader};
 use crate::limits::MAX_RECORD_BYTES;
 use crate::model::{CheckKind, DecodedValue as DV, Diagnostic, Fact, FieldKind as K, Space, Span, Status, Trust};
@@ -60,13 +60,13 @@ impl LogInspector {
     pub fn from_reader(r: Box<dyn RangeRead>, path: PathBuf, mode: LogMode) -> Self {
         let expected_log = log_number_from_name(&path);
         let mut s = LogInspector { r, path, mode, expected_log, wal_compression: None, first_record: None, cache: None };
-        if mode == LogMode::Wal {
-            if let Some(l) = log::read_logical(&*s.r, 0, 64) {
-                let payload = l.frags.first().map(|f| f.payload_off).unwrap_or(l.start);
-                s.first_record = Some(FirstRecord { start: l.start, payload_off: payload, status: l.status });
-                if l.rtype == 9 && l.data.len() >= 4 {
-                    s.wal_compression = fixed32(&l.data, 0);
-                }
+        if mode == LogMode::Wal
+            && let Some(l) = log::read_logical(&*s.r, 0, 64)
+        {
+            let payload = l.frags.first().map(|f| f.payload_off).unwrap_or(l.start);
+            s.first_record = Some(FirstRecord { start: l.start, payload_off: payload, status: l.status });
+            if l.rtype == 9 && l.data.len() >= 4 {
+                s.wal_compression = fixed32(&l.data, 0);
             }
         }
         s
@@ -170,15 +170,16 @@ impl LogInspector {
     /// Marks a recyclable record whose header log number differs from the file's number as
     /// stale (status Unknown + diagnostic; log_reader.cc treats it as kOldRecord).
     pub fn mark_stale(&self, l: &mut Logical) {
-        if let (Some(ln), Some(e)) = (l.log_number, self.expected_log) {
-            if u64::from(ln) != e & 0xffff_ffff && l.status == Status::Present {
-                let note = format!("stale record from an older log (header log number {ln}, file {e}); log_reader.cc treats it as kOldRecord");
-                l.fail(Status::Unknown, CheckKind::LogNumber, Trust::Untrusted, "RocksVision marks the record stale (Unknown) and keeps reading the file", note);
-                if let Some(d) = l.diag.as_mut() {
-                    d.expected = Some(DV::U64(e & 0xffff_ffff));
-                    d.observed = Some(DV::U32(ln));
-                    d.engine = Some(log::ENGINE_OLD_RECORD);
-                }
+        if let (Some(ln), Some(e)) = (l.log_number, self.expected_log)
+            && u64::from(ln) != e & 0xffff_ffff
+            && l.status == Status::Present
+        {
+            let note = format!("stale record from an older log (header log number {ln}, file {e}); log_reader.cc treats it as kOldRecord");
+            l.fail(Status::Unknown, CheckKind::LogNumber, Trust::Untrusted, "RocksVision marks the record stale (Unknown) and keeps reading the file", note);
+            if let Some(d) = l.diag.as_mut() {
+                d.expected = Some(DV::U64(e & 0xffff_ffff));
+                d.observed = Some(DV::U32(ln));
+                d.engine = Some(log::ENGINE_OLD_RECORD);
             }
         }
     }
@@ -196,15 +197,23 @@ pub fn meta_facts(l: &Logical) -> Vec<Fact> {
     let mut f = Vec::new();
     match l.rtype {
         9 => match fixed32(d, 0) {
-            Some(c) => f.push(Fact::new("compression type", Some(Span::new(sp, 0, 4)), format!("{c} {}", compression_name(c as u8))).kind(K::CompressionType).dv(DV::U32(c)).raw(&d[..4]).enc("fixed32 LE")),
+            Some(c) => {
+                f.push(Fact::new("compression type", Some(Span::new(sp, 0, 4)), format!("{c} {}", compression_name(c as u8))).kind(K::CompressionType).dv(DV::U32(c)).raw(&d[..4]).enc("fixed32 LE"))
+            }
             None => f.push(Fact::new("compression type", None, "payload shorter than 4 bytes").kind(K::CompressionType).status(Status::Truncated).diag(short(4))),
         },
         10 | 11 => {
-            if d.len() % 6 != 0 {
+            if !d.len().is_multiple_of(6) {
                 let note = format!("{} bytes is not a multiple of 6", d.len());
-                f.push(Fact::new("timestamp sizes", None, note.clone()).status(Status::Invalid).diag(Diagnostic::new(CheckKind::Length, Some(Span::new(sp, 0, d.len() as u64)), Trust::Partial, "complete 6-byte entries are listed", note)));
+                f.push(Fact::new("timestamp sizes", None, note.clone()).status(Status::Invalid).diag(Diagnostic::new(
+                    CheckKind::Length,
+                    Some(Span::new(sp, 0, d.len() as u64)),
+                    Trust::Partial,
+                    "complete 6-byte entries are listed",
+                    note,
+                )));
             }
-            for (i, ch) in d.chunks_exact(6).enumerate() {
+            for (i, ch) in d.as_chunks::<6>().0.iter().enumerate() {
                 let cf = fixed32(ch, 0).unwrap_or(0);
                 let ts = fixed16(ch, 4).unwrap_or(0);
                 f.push(Fact::new(format!("cf {cf} timestamp size"), Some(Span::new(sp, (i * 6) as u64, 6)), ts.to_string()).dv(DV::U16(ts)).raw(ch).enc("fixed32 cf + fixed16 size"));

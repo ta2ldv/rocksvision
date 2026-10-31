@@ -4,9 +4,9 @@ use super::{Response, Tagged};
 use crate::io::RangeReader;
 pub use crate::limits::SEARCH_CHUNK;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::thread;
 
 /// Runs one search on its own thread; it stops when `search_id` moves past its own id.
@@ -88,16 +88,11 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     let first = needle[0];
     let mut i = 0;
     while i + needle.len() <= hay.len() {
-        match hay[i..hay.len() - needle.len() + 1].iter().position(|&b| b == first) {
-            Some(p) => {
-                let s = i + p;
-                if &hay[s..s + needle.len()] == needle {
-                    return Some(s);
-                }
-                i = s + 1;
-            }
-            None => return None,
+        let s = i + hay[i..hay.len() - needle.len() + 1].iter().position(|&b| b == first)?;
+        if &hay[s..s + needle.len()] == needle {
+            return Some(s);
         }
+        i = s + 1;
     }
     None
 }
@@ -110,7 +105,7 @@ pub fn parse_query(q: &str, hex_mode: bool) -> Result<Vec<u8>, String> {
         return Ok(q.as_bytes().to_vec());
     }
     let s: String = t.trim_start_matches("hex:").trim_start_matches("0x").chars().filter(|c| !c.is_whitespace()).collect();
-    if s.len() % 2 != 0 || s.is_empty() {
+    if !s.len().is_multiple_of(2) || s.is_empty() {
         return Err("hex query needs an even number of hex digits".into());
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("invalid hex digits {:?}", &s[i..i + 2]))).collect()

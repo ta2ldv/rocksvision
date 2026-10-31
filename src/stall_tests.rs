@@ -1,9 +1,9 @@
 //! Unit tests for scan/iteration loops: crafted inputs that could stall a non-monotonic loop
 //! must finish quickly with a problem/limited status.
 
+use crate::format::log;
 use crate::io::RangeReader;
 use crate::model::{NodeKind, Space, Status};
-use crate::format::log;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -74,7 +74,7 @@ fn wal_resync_garbage_is_bounded() {
 #[test]
 fn manifest_repeated_two_byte_tags_capped() {
     // tag 202 (ColumnFamilyDrop) = varint 0xCA 0x01, no payload: 2 MiB of it.
-    let d: Vec<u8> = std::iter::repeat([0xCAu8, 0x01]).take(1 << 20).flatten().collect();
+    let d: Vec<u8> = std::iter::repeat_n([0xCAu8, 0x01], 1 << 20).flatten().collect();
     let t = Instant::now();
     let e = crate::manifest::decode_edit(&d, Space::Record(0));
     assert!(e.fields.len() <= crate::manifest::MAX_EDIT_FIELDS + 1);

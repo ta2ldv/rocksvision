@@ -4,8 +4,8 @@
 use super::{btn, btn_sized, chip, chip_word, status_meaning, status_text, strong, table_style};
 use crate::app::diagnosis;
 use crate::app::{Action, AppState, CopyKind};
-use crate::model::{ColumnRole, NodeKind, Status, NOT_CHECKED};
-use crate::ui::layout::{column_width, plan_columns, status_column_width, table_need_h, LAYOUT};
+use crate::model::{ColumnRole, NOT_CHECKED, NodeKind, Status};
+use crate::ui::layout::{LAYOUT, column_width, plan_columns, status_column_width, table_need_h};
 use crate::ui::menu;
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
@@ -136,7 +136,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     let small = egui::TextStyle::Small.resolve(ui.style());
     let wrap_w = ui.available_width();
     let search_line = !find.row_matches().is_empty() || (!find.query().is_empty() && find.hit().is_none() && find.progress().is_none());
-    let notes_h: f32 = view.notes.iter().map(|n| ui.fonts_mut(|f| f.layout(n.text.clone(), small.clone(), tok.p.text, wrap_w).size().y) + sp_y).sum::<f32>() + if search_line { small_h + sp_y } else { 0.0 };
+    let notes_h: f32 =
+        view.notes.iter().map(|n| ui.fonts_mut(|f| f.layout(n.text.clone(), small.clone(), tok.p.text, wrap_w).size().y) + sp_y).sum::<f32>() + if search_line { small_h + sp_y } else { 0.0 };
     let post = ui.ctx().data(|d| d.get_temp::<f32>(post_id())).unwrap_or(tok.row_height(ui) + 8.0);
     let fixed = ui.cursor().top() - top_y;
     ui.ctx().data_mut(|d| d.insert_temp(overhead_id(), fixed + notes_h + post));
@@ -158,9 +159,15 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
             ui.add(egui::Label::new(RichText::new(&n.text).small().color(col)).wrap());
         }
         if !find.row_matches().is_empty() {
-            ui.small(format!("Rows: {} rows of the current table match \"{}\" (decoded cells; Prev/Next to step)", find.row_matches().len(), find.query()));
+            let n = find.row_matches().len();
+            let (rows, verb) = if n == 1 { ("row", "matches") } else { ("rows", "match") };
+            ui.small(format!("Rows: {n} {rows} of the current table {verb} \"{}\" (decoded cells; Prev/Next to step)", find.query()));
         } else if !find.query().is_empty() && find.hit().is_none() && find.progress().is_none() {
-            ui.small(if find.hex_mode() { "Hex query: Enter searches the physical file bytes (not decompressed)." } else { "No row of the current table matches — Enter searches the physical file bytes (not decompressed)." });
+            ui.small(if find.hex_mode() {
+                "Hex query: Enter searches the physical file bytes (not decompressed)."
+            } else {
+                "No row of the current table matches — Enter searches the physical file bytes (not decompressed)."
+            });
         }
     });
     let after_notes = ui.cursor().top();
@@ -224,7 +231,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     let would_hide = plan_columns(&roles, avail_cols, false, &width_of, ui.spacing().item_spacing.x).hidden;
     if would_hide > 0 {
         let label = if st.prefs().all_columns() { "Fewer columns".to_string() } else { format!("+{} columns", plan.hidden) };
-        let tip = if st.prefs().all_columns() { "Hide Raw hex / Encoding / Len again so the table fits (Reset View also restores this)" } else { "Show the columns hidden for lack of width (the table then scrolls horizontally)" };
+        let tip = if st.prefs().all_columns() {
+            "Hide Raw hex / Encoding / Len again so the table fits (Reset View also restores this)"
+        } else {
+            "Show the columns hidden for lack of width (the table then scrolls horizontally)"
+        };
         if ui.small_button(label).on_hover_text(tip).clicked() {
             acts.push(Action::ToggleAllColumns);
         }
@@ -384,7 +395,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
                 let has_span = r.field.span.is_some();
                 let has_key = r.field.key_bytes.is_some();
                 resp.context_menu(|ui| {
-                    for (k, label, enabled) in [(CopyKind::Value, "Copy value", true), (CopyKind::Key, "Copy key", has_key), (CopyKind::Hex, "Copy hex (max 64 KiB)", has_span), (CopyKind::Offset, "Copy offset", has_span), (CopyKind::RowTsv, "Copy row (TSV)", true)] {
+                    for (k, label, enabled) in [
+                        (CopyKind::Value, "Copy value", true),
+                        (CopyKind::Key, "Copy key", has_key),
+                        (CopyKind::Hex, "Copy hex (max 64 KiB)", has_span),
+                        (CopyKind::Offset, "Copy offset", has_span),
+                        (CopyKind::RowTsv, "Copy row (TSV)", true),
+                    ] {
                         let item = ui.add_enabled(enabled, egui::Button::new(label));
                         tok.menu_item_hover(ui, &item);
                         if item.clicked() {

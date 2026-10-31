@@ -38,9 +38,9 @@ impl PendingSel {
     }
 }
 
-pub use super::job_state::{copy_accepted, PendingCopy};
-pub use super::session::{TreeNode, FILE_SPACE_TITLE};
-pub use super::view_prefs::{ZoomFit, ZoomPolicy, CENTER_SPLIT_DEFAULT};
+pub use super::job_state::{PendingCopy, copy_accepted};
+pub use super::session::{FILE_SPACE_TITLE, TreeNode};
+pub use super::view_prefs::{CENTER_SPLIT_DEFAULT, ZoomFit, ZoomPolicy};
 
 #[cfg(test)]
 #[path = "state_tests.rs"]
@@ -110,7 +110,15 @@ enum HistoryChange {
 
 impl AppState {
     pub fn new(worker: Worker) -> Self {
-        AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new(), pending_sel: None, view_owner: None }
+        AppState {
+            doc: DocumentSession::new(),
+            sel: SelectionState::new(),
+            find: SearchState::new(),
+            jobs: JobState::new(worker),
+            view_prefs: ViewPreferences::new(),
+            pending_sel: None,
+            view_owner: None,
+        }
     }
 
     /// Test helper: a state with an idle worker, for UI tests (panels never name `app::jobs`).
@@ -536,7 +544,7 @@ impl AppState {
                 }
             }
             Response::Scanned { req, dir, outcome } => {
-                let Some(auto_open) = self.jobs.scan_matches(req) else { return None };
+                let auto_open = self.jobs.scan_matches(req)?;
                 if !self.doc.is_dir(&dir) {
                     return None;
                 }
@@ -586,7 +594,7 @@ impl AppState {
                 let hex_space = self.doc.hex().space;
                 let keep_space = hex_space == Space::File || view.spaces.iter().any(|s| s.space == hex_space);
                 let extent = view.extent;
-                if self.doc.accept_view(req, kind.clone(), view) {
+                if self.doc.accept_view(req, kind.clone(), *view) {
                     // A pending selection applies only if nothing was selected since the request.
                     let pending = self.pending_sel.take().filter(|p| p.epoch == self.sel.epoch());
                     self.sel.clear();
@@ -620,10 +628,10 @@ impl AppState {
                     _ => None,
                 };
                 // The file length is taken only from the page the hex view accepted.
-                if self.doc.hex_mut().complete(req, space, outcome) {
-                    if let Some(size) = size {
-                        self.doc.set_file_len(size);
-                    }
+                if self.doc.hex_mut().complete(req, space, outcome)
+                    && let Some(size) = size
+                {
+                    self.doc.set_file_len(size);
                 }
             }
             Response::Copied { req, sel, outcome } => match self.jobs.copy_reply(req, sel, self.sel.epoch()) {
@@ -785,13 +793,13 @@ impl AppState {
             }
             return;
         }
-        let hint = select.or(p.hint.clone()).unwrap_or(SelectHint { at: None, span: None });
+        let hint = select.or(p.hint).unwrap_or(SelectHint { at: None, span: None });
         let Some(view) = self.doc.view() else { return };
-        if let Some((space, off)) = hint.at {
-            if let Some(i) = field_at(view, space, off) {
-                self.select_field_row(i, p.origin, p.anchor);
-                return;
-            }
+        if let Some((space, off)) = hint.at
+            && let Some(i) = field_at(view, space, off)
+        {
+            self.select_field_row(i, p.origin, p.anchor);
+            return;
         }
         if let Some(s) = hint.span {
             if let Some(i) = view.rows.iter().position(|r| r.field.span == Some(s)) {
@@ -800,7 +808,13 @@ impl AppState {
             }
             let compressed = view.spaces.iter().find(|sp| matches!(&sp.map, SpaceMap::Compressed { file, .. } if file.offset <= s.offset && s.offset < file.offset + file.len.max(1)));
             let note = match compressed {
-                Some(sp) => format!("Compressed contents of {} [0x{:x},0x{:x}): stored bytes have no byte-to-byte mapping to decompressed fields. Open the decompressed view to select a field ({}).", view.title, s.offset, s.offset + s.len, sp.space.label()),
+                Some(sp) => format!(
+                    "Compressed contents of {} [0x{:x},0x{:x}): stored bytes have no byte-to-byte mapping to decompressed fields. Open the decompressed view to select a field ({}).",
+                    view.title,
+                    s.offset,
+                    s.offset + s.len,
+                    sp.space.label()
+                ),
                 None => format!("{} [0x{:x},0x{:x}): structure bytes, not a single field.", view.title, s.offset, s.offset + s.len),
             };
             self.sel.select_structure(s, note, p.origin, p.anchor);

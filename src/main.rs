@@ -21,7 +21,7 @@ static OWN_CONSOLE: AtomicBool = AtomicBool::new(false);
 /// NOT compiler- or runtime-verified on Windows (developed on macOS).
 #[cfg(windows)]
 fn attach_parent_console() -> bool {
-    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     // SAFETY: plain Win32 call with a constant argument; failure (no parent console, or one is
     // already attached) is reported via the return value only.
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) != 0 }

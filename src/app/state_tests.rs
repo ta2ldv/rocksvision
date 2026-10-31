@@ -378,7 +378,20 @@ fn failed_children_mark_node_invalid() {
     let gate = Gate::new();
     gate.release();
     let mut app = app_with(&gate);
-    app.doc.push_test_node(TreeNode { label: "n".into(), kind: NodeKind::Root, status: Status::Present, leaf: false, depth: 0, children: None, expanded: true, loading: true, diag: None, contains: None, role: ChildRole::Structure, checked: None });
+    app.doc.push_test_node(TreeNode {
+        label: "n".into(),
+        kind: NodeKind::Root,
+        status: Status::Present,
+        leaf: false,
+        depth: 0,
+        children: None,
+        expanded: true,
+        loading: true,
+        diag: None,
+        contains: None,
+        role: ChildRole::Structure,
+        checked: None,
+    });
     let msg = Response::Children { node: 0, children: Vec::new(), error: Some("boom".into()) };
     app.apply_response(Tagged { generation: app.session().generation(), msg });
     let nodes = app.session().nodes();
@@ -585,7 +598,10 @@ fn stale_replies_are_ignored_by_request_identity() {
     assert!(!app.session().changed());
     // A view of an older generation is dropped.
     app.close_file();
-    app.apply_response(Tagged { generation: g, msg: Response::View { req: 1, target: crate::jobs::ViewTarget::Node(NodeKind::Root), kind: Some(NodeKind::Root), view: View::default(), reveal: None, select: None } });
+    app.apply_response(Tagged {
+        generation: g,
+        msg: Response::View { req: 1, target: crate::jobs::ViewTarget::Node(NodeKind::Root), kind: Some(NodeKind::Root), view: Box::default(), reveal: None, select: None },
+    });
     assert!(app.session().view().is_none());
     gate.release();
     settle(&mut app);
@@ -964,8 +980,28 @@ fn byteless_row_reveals_enclosing_structure() {
 fn parent_group_coverage_counts_blocks() {
     let mut app = App::idle_for_tests();
     let group = |first: u64, count: u64| NodeKind::SstLayoutGroup { first, count };
-    app.doc.push_test_node(TreeNode { label: "Data blocks #0–#4095 · [0x0,0x3a0f00) · 4096 blocks".into(), kind: group(0, 4096), status: Status::Unknown, leaf: false, depth: 0, children: None, expanded: true, loading: true, diag: None, contains: None, role: ChildRole::Structure, checked: Some((0, 4096)) });
-    let kids: Vec<Child> = (0..64u64).map(|i| Child::new(format!("Data blocks #{}–#{} · [..) · 64 blocks", i * 64, i * 64 + 63), group(i * 64, 64)).status(if i == 0 { Status::Present } else { Status::Unknown }).checked(if i == 0 { (64, 64) } else { (0, 64) })).collect();
+    app.doc.push_test_node(TreeNode {
+        label: "Data blocks #0–#4095 · [0x0,0x3a0f00) · 4096 blocks".into(),
+        kind: group(0, 4096),
+        status: Status::Unknown,
+        leaf: false,
+        depth: 0,
+        children: None,
+        expanded: true,
+        loading: true,
+        diag: None,
+        contains: None,
+        role: ChildRole::Structure,
+        checked: Some((0, 4096)),
+    });
+    let kids: Vec<Child> =
+        (0..64u64)
+            .map(|i| {
+                Child::new(format!("Data blocks #{}–#{} · [..) · 64 blocks", i * 64, i * 64 + 63), group(i * 64, 64))
+                    .status(if i == 0 { Status::Present } else { Status::Unknown })
+                    .checked(if i == 0 { (64, 64) } else { (0, 64) })
+            })
+            .collect();
     app.doc.children_arrived(0, kids, None);
     let p = &app.session().nodes()[0];
     assert_eq!(p.checked, Some((64, 4096)));

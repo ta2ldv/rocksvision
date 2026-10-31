@@ -4,11 +4,11 @@
 
 use crate::io::{MemReader, RangeRead};
 use crate::model::*;
-use crate::sst::footer::Handle;
 use crate::sst::SstInspector;
+use crate::sst::footer::Handle;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// In-memory source that counts positional reads.
 struct Counting {

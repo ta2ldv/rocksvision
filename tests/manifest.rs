@@ -46,8 +46,10 @@ fn current_pointing_to_missing_manifest_is_not_present() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-fn live_table() -> BTreeMap<(&'static str, u32), Vec<(u64, u64, &'static str, &'static str)>> {
-    // (cf, level) -> [(file number, size, smallest user key, largest user key)]
+/// (cf, level) -> [(file number, size, smallest user key, largest user key)]
+type LiveTable<S> = BTreeMap<(S, u32), Vec<(u64, u64, S, S)>>;
+
+fn live_table() -> LiveTable<&'static str> {
     let mut m = BTreeMap::new();
     m.insert(("cf_events", 0), vec![(26, 1390, "e-00005", "e-00600")]);
     m.insert(("cf_events", 1), vec![(22, 4601, "e-00000", "e-00249"), (24, 4602, "e-00250", "e-00499")]);
@@ -64,7 +66,7 @@ fn manifest_observed_levels_match_live_files() {
     assert!(lv.problems.is_empty(), "{:?}", lv.problems);
     assert!(!lv.limited);
     assert_eq!(lv.comparator.as_deref(), Some("leveldb.BytewiseComparator"));
-    let mut got: BTreeMap<(String, u32), Vec<(u64, u64, String, String)>> = BTreeMap::new();
+    let mut got: LiveTable<String> = BTreeMap::new();
     for (name, levels) in lv.cfs.values() {
         for (level, files) in levels {
             for lf in files {
@@ -107,10 +109,7 @@ fn current_view_levels_rows_and_manifest_records() {
     assert_eq!(v.rows.len(), 8);
     let mut cells: Vec<(String, String, String)> = v.rows.iter().map(|r| (r.cells[0].clone(), r.cells[1].clone(), r.cells[2].clone())).collect();
     cells.sort();
-    let want = vec![
-        ("0 default", "L0", "000014"),
-        ("0 default", "L1", "000012"),
-    ];
+    let want = vec![("0 default", "L0", "000014"), ("0 default", "L1", "000012")];
     for (a, b, c) in want {
         assert!(cells.iter().any(|x| x.0 == a && x.1 == b && x.2 == c), "missing {a} {b} {c}: {cells:?}");
     }

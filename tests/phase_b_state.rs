@@ -3,7 +3,7 @@
 //! Fixtures are only read (never written).
 mod common;
 use common::fx;
-use rocksvision::app::{Action, AppState, CopyKind, ZoomFit, ZoomPolicy, CENTER_SPLIT_DEFAULT};
+use rocksvision::app::{Action, AppState, CENTER_SPLIT_DEFAULT, CopyKind, ZoomFit, ZoomPolicy};
 use rocksvision::discover::DirEntry;
 use rocksvision::jobs::{FsBackend, IoBackend, Worker};
 use rocksvision::model::Span;
@@ -112,7 +112,14 @@ fn reset_view_restores_layout_and_keeps_data_state() {
     app.apply(Action::SetShowRight(false));
     app.apply(Action::SetShowHex(false));
     assert!((app.prefs().zoom() - 1.3).abs() < 1e-5 && app.prefs().theme_id() == "matrix");
-    let (file, sel, sel_row, search, matches, view_rows) = (app.session().file().map(|p| p.to_path_buf()), app.selection().span(), app.selection().row(), app.search().query().to_string(), app.search().row_matches().to_vec(), app.session().view().unwrap().rows.len());
+    let (file, sel, sel_row, search, matches, view_rows) = (
+        app.session().file().map(|p| p.to_path_buf()),
+        app.selection().span(),
+        app.selection().row(),
+        app.search().query().to_string(),
+        app.search().row_matches().to_vec(),
+        app.session().view().unwrap().rows.len(),
+    );
     assert!(sel.is_some() && sel_row == Some(0) && !matches.is_empty(), "precondition: selection and search matches");
     let epoch = app.prefs().layout_epoch();
 
@@ -186,7 +193,14 @@ fn late_completion_is_rejected_after_opening_another_file() {
     assert!(app.session().generation() > g_old);
     pump(&mut app, "CURRENT opened while the old request is delayed", opened);
     app.apply(Action::SelectRow(0));
-    let (file, len, sel, nodes, label, rows) = (app.session().file().map(|p| p.to_path_buf()), app.session().file_len(), app.selection().span(), app.session().nodes().len(), app.session().file_label().to_string(), app.session().view().unwrap().rows.len());
+    let (file, len, sel, nodes, label, rows) = (
+        app.session().file().map(|p| p.to_path_buf()),
+        app.session().file_len(),
+        app.selection().span(),
+        app.session().nodes().len(),
+        app.session().file_label().to_string(),
+        app.session().view().unwrap().rows.len(),
+    );
     assert_eq!(file.as_deref(), Some(cur.as_path()));
     assert_eq!(len, 16);
 
@@ -213,7 +227,7 @@ fn zoom_ceiling_below_cap_and_zoom_in_beyond_is_noop() {
     let p = ZoomPolicy::DEFAULT;
     let small = ZoomFit { at_zoom: 1.0, avail_w: 1200.0, avail_h: 700.0, need_w: 900.0, need_h: 350.0 };
     let c = p.ceiling(small);
-    assert!(c < 2.0 && c >= 1.0, "ceiling {c}");
+    assert!((1.0..2.0).contains(&c), "ceiling {c}");
     assert!((c - 1.3).abs() < 1e-4, "floor_step(min(1.333, 2.0, 2.0)) = 1.3, got {c}");
     // Window so small the layout does not fit even at 100 %: never below 1.0.
     assert_eq!(p.ceiling(ZoomFit { avail_w: 300.0, avail_h: 200.0, ..small }), 1.0);

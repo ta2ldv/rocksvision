@@ -3,12 +3,12 @@
 //! default About panel), and forwards chosen items as `MenuCmd`s. Item tags index `items`.
 //! Hide / Hide Others / Show All use the standard NSApplication selectors.
 
-use super::super::menu::{self, tree, MenuCmd, MenuNode};
+use super::super::menu::{self, MenuCmd, MenuNode, tree};
 use crate::app::AppState;
 use eframe::egui;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, Sel};
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSWindow};
 use objc2_foundation::NSString;
 use std::sync::{Mutex, OnceLock};

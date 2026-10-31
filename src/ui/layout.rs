@@ -531,8 +531,8 @@ impl Measured {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ZoomPolicy;
     use crate::app::ZoomFit;
+    use crate::app::ZoomPolicy;
 
     /// 900 px / 110 %: the fields table hides Raw hex, then Encoding, then Len (in that order),
     /// never Offset/Field/Status/Decoded; Status keeps its word width (no icon-only mode since
@@ -695,7 +695,14 @@ mod tests {
                 toolbar_row_h: est.toolbar_row_h,
                 toolbar_pad_h: 2.0 * 4.0 + 1.0 + line + 2.0 + sp_y,
                 status_h: est.status_h,
-                records_min_h: records_min_h(est.toolbar_row_h, ui.text_style_height(&egui::TextStyle::Small) + sp_y, tok.header_height(ui), tok.row_height(ui), sp_y, ui.spacing().scroll.allocated_width()),
+                records_min_h: records_min_h(
+                    est.toolbar_row_h,
+                    ui.text_style_height(&egui::TextStyle::Small) + sp_y,
+                    tok.header_height(ui),
+                    tok.row_height(ui),
+                    sp_y,
+                    ui.spacing().scroll.allocated_width(),
+                ),
                 hex_groups: panels::hex::ceiling_groups(ui),
                 hex_gap: ui.spacing().item_spacing.x,
                 hex_line_h: panels::hex::HexMemory::default().line_h,
@@ -727,8 +734,11 @@ mod tests {
             let w = |s: &str| ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x);
             // Row: frame margin 8 each side, indent 4 + depth·14, "+" button, item spacing, button padding.
             let plus = w("+") + 2.0 * ui.spacing().button_padding.x;
-            let avail = |depth: f32| LAYOUT.left_default - 2.0 * 8.0 - ui.spacing().scroll.allocated_width() - 4.0 - depth * LAYOUT.tree_indent - plus - ui.spacing().item_spacing.x - 2.0 * ui.spacing().button_padding.x;
-            for (depth, head) in [(0.0, "Data blocks #0–#4095 · not checked"), (0.0, "✖ Data blocks #20480–#24575 · 4095 of 4096 checked"), (1.0, "Data blocks #4096–#4159 · 63 of 64 checked")] {
+            let avail = |depth: f32| {
+                LAYOUT.left_default - 2.0 * 8.0 - ui.spacing().scroll.allocated_width() - 4.0 - depth * LAYOUT.tree_indent - plus - ui.spacing().item_spacing.x - 2.0 * ui.spacing().button_padding.x
+            };
+            for (depth, head) in [(0.0, "Data blocks #0–#4095 · not checked"), (0.0, "✖ Data blocks #20480–#24575 · 4095 of 4096 checked"), (1.0, "Data blocks #4096–#4159 · 63 of 64 checked")]
+            {
                 out.push((head, w(head), avail(depth)));
             }
         });

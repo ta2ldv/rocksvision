@@ -2,22 +2,14 @@
 //! CURRENT and plain-text files.
 
 use crate::discover::FileKind;
-use crate::io::{read_vec, RangeRead};
+use crate::io::{RangeRead, read_vec};
 use crate::limits::{CURRENT_PREVIEW, TEXT_PREVIEW, TEXT_PREVIEW_LINES};
 use crate::model::*;
 use std::path::PathBuf;
 
 pub fn fields_columns() -> Vec<Column> {
     use ColumnRole as R;
-    vec![
-        col(R::Field, "Field"),
-        col(R::Offset, "Offset"),
-        col(R::Len, "Len"),
-        col(R::Decoded, "Decoded"),
-        col(R::Encoding, "Encoding"),
-        col(R::RawHex, "Raw hex"),
-        col(R::Status, "Status"),
-    ]
+    vec![col(R::Field, "Field"), col(R::Offset, "Offset"), col(R::Len, "Len"), col(R::Decoded, "Decoded"), col(R::Encoding, "Encoding"), col(R::RawHex, "Raw hex"), col(R::Status, "Status")]
 }
 
 /// A view whose rows are plain fields.
@@ -126,7 +118,10 @@ impl Location {
             v.push(line(format!("decompressed {} (block-local offsets, not file bytes)", bytes_dec_hex(n))));
         }
         match (&self.gap, &self.next) {
-            (Some(g), Some((at, _))) => v.push(WhereLine { text: format!("gap {} before the next structure ›", range(self.end, *at)), link: Some(Target { node: g.clone(), span: Some(Span::file(self.end, at - self.end)) }) }),
+            (Some(g), Some((at, _))) => v
+                .push(WhereLine {
+                    text: format!("gap {} before the next structure ›", range(self.end, *at)), link: Some(Target { node: g.clone(), span: Some(Span::file(self.end, at - self.end)) })
+                }),
             (None, Some((at, k))) => v.push(WhereLine { text: format!("next structure at 0x{at:x} ›"), link: Some(Target { node: k.clone(), span: None }) }),
             _ if self.end >= self.eof => v.push(line(format!("ends at end of file (0x{:x})", self.eof))),
             _ => {}
@@ -159,7 +154,13 @@ pub fn explained(f: Fact, explain: impl Into<String>) -> Field {
 
 /// CURRENT view from its first bytes and the resolved MANIFEST (path + exists on disk).
 pub fn current_view(raw: &[u8], target: Result<(PathBuf, bool), String>) -> View {
-    let mut f = vec![Field::new("contents", Some(Span::file(0, raw.len() as u64)), crate::util::text_preview(raw, CURRENT_PREVIEW)).raw(raw).value_bytes(raw).enc("text line + \\n").explain("CURRENT names the active MANIFEST (db/filename.cc SetCurrentFile).")];
+    let mut f = vec![
+        Field::new("contents", Some(Span::file(0, raw.len() as u64)), crate::util::text_preview(raw, CURRENT_PREVIEW))
+            .raw(raw)
+            .value_bytes(raw)
+            .enc("text line + \\n")
+            .explain("CURRENT names the active MANIFEST (db/filename.cc SetCurrentFile)."),
+    ];
     match target {
         Ok((p, exists)) => {
             let mut fld = Field::new("referenced MANIFEST", Some(Span::file(0, raw.len().saturating_sub(1) as u64)), p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())

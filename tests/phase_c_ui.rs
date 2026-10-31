@@ -4,11 +4,11 @@
 //! the in-crate unit tests and the GUI script tests/tools/scripts/search_enter.txt can check it.
 mod common;
 use common::fx;
-use rocksvision::app::{Action, AppState, ZoomFit, ZoomPolicy, CENTER_SPLIT_DEFAULT};
+use rocksvision::app::{Action, AppState, CENTER_SPLIT_DEFAULT, ZoomFit, ZoomPolicy};
 use rocksvision::inspect;
 use rocksvision::jobs::{FsBackend, Worker};
 use rocksvision::model::{CheckKind, DecodedValue, Diagnostic, NodeKind, Span, Status};
-use rocksvision::ui::layout::{choose_bytes_per_row, hex_row_chars, Measured, HexMetrics, LAYOUT};
+use rocksvision::ui::layout::{HexMetrics, LAYOUT, Measured, choose_bytes_per_row, hex_row_chars};
 use rocksvision::ui::theme::theme_by_id;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,7 +68,7 @@ fn bytes_per_row_floor_is_four_and_invalid_state_is_repaired() {
     assert_eq!(choose_bytes_per_row(0, 100000.0, &m), 16);
     // Row width formula: strictly increasing in n, ASCII header keeps 4-byte rows >= 5 ascii glyphs wide.
     assert!(hex_row_chars(4, 8) < hex_row_chars(8, 8) && hex_row_chars(8, 8) < hex_row_chars(16, 8));
-    assert_eq!(hex_row_chars(4, 8), 8 + 2 + 12 + 0 + 1 + 5);
+    assert_eq!(hex_row_chars(4, 8), 8 + 2 + 12 + 1 + 5);
 }
 
 // ------------------------------------------------------------------ zoom ceiling vs panel visibility
@@ -237,7 +237,10 @@ fn sst_checksum_flip_carries_check_span_expected_and_observed() {
             eprintln!("DIAG {:?} span={:?} exp={:?} obs={:?} trust={:?} note={}", d.check, d.span, d.expected, d.observed, d.trusted, d.note);
         }
     }
-    let d = ds.iter().find(|d| matches!(d.check, CheckKind::Crc32c | CheckKind::XxHash | CheckKind::XxHash64 | CheckKind::Xxh3)).unwrap_or_else(|| panic!("no checksum diagnostic: {:?}", ds.iter().map(|d| d.check).collect::<Vec<_>>()));
+    let d = ds
+        .iter()
+        .find(|d| matches!(d.check, CheckKind::Crc32c | CheckKind::XxHash | CheckKind::XxHash64 | CheckKind::Xxh3))
+        .unwrap_or_else(|| panic!("no checksum diagnostic: {:?}", ds.iter().map(|d| d.check).collect::<Vec<_>>()));
     assert!(typed(d), "checksum diagnostic lacks span/expected/observed: {d:?}");
     // The span is the checksummed byte range (data block 0: offset 0, contents + compression-type byte), in file space.
     let s: Span = d.span.unwrap();

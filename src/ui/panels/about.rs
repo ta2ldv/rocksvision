@@ -27,9 +27,5 @@ pub fn show(ctx: &egui::Context, st: &AppState, tok: &Tokens, logo: Option<&egui
             }
         });
     });
-    if close || resp.should_close() {
-        vec![Action::CloseAbout]
-    } else {
-        Vec::new()
-    }
+    if close || resp.should_close() { vec![Action::CloseAbout] } else { Vec::new() }
 }

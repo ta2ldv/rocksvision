@@ -15,12 +15,12 @@
 //! | assert_large_wal_search_cancel     | ASSERTION  | <dir>/large-wal.log                                |
 mod common;
 use common::*;
-use rocksvision::dump::{dump, DumpOpts};
-use rocksvision::jobs::{search_file, Response, Worker};
+use rocksvision::dump::{DumpOpts, dump};
+use rocksvision::jobs::{Response, Worker, search_file};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_DIR: &str = "/private/tmp/rocksvision-large";
@@ -28,6 +28,8 @@ const BLOCK: u64 = 32768;
 /// Dump bound: 3 x the worst measured wall time (0.10 s = WAL `--limit 400 --rows 400` on the 100 MB WAL, release build, warm cache; FREEZE C measured 0.03-0.08 s; local notes in the git-ignored tests/evidence-0015/).
 const DUMP_BOUND: Duration = Duration::from_millis(300);
 /// macOS `/usr/bin/time -l` max RSS bound: 3 x the worst measured (16.6 MiB, SST) ~ 50 MiB.
+/// Only the macOS path reads it; on other platforms the constant would be dead code under `-D warnings`.
+#[cfg(target_os = "macos")]
 const RSS_BOUND: u64 = 50 << 20;
 /// A bounded WAL scan must read far less than the file: measured 616 KB of 105 MB (0.6 %); bound 2 % (3 x).
 const WAL_SCAN_PERCENT: u64 = 2;

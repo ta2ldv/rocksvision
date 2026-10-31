@@ -3,7 +3,7 @@
 //! item maps to one `app::Action`; the same action is used by the toolbar, the panel chevrons
 //! and the keyboard. `shortcut_table()` is the single source of shortcut text.
 
-use super::theme::{Tokens, THEMES};
+use super::theme::{THEMES, Tokens};
 use crate::app::{Action, AppState, Panel};
 use eframe::egui;
 
@@ -287,7 +287,8 @@ pub fn shortcut_table() -> Vec<(String, &'static str)> {
 pub fn shortcut_table_in(l: KeyLabels) -> Vec<(String, &'static str)> {
     let mut all = Vec::new();
     items(&tree(), &mut all);
-    let mut out: Vec<(String, &'static str)> = all.iter().filter(|x| !x.3 && x.2.is_some() && !matches!(x.0, MenuCmd::Hide | MenuCmd::HideOthers)).filter_map(|x| Some((shortcut_text_in(x.0, l)?, x.1))).collect();
+    let mut out: Vec<(String, &'static str)> =
+        all.iter().filter(|x| !x.3 && x.2.is_some() && !matches!(x.0, MenuCmd::Hide | MenuCmd::HideOthers)).filter_map(|x| Some((shortcut_text_in(x.0, l)?, x.1))).collect();
     out.extend(window_keys(l));
     out
 }

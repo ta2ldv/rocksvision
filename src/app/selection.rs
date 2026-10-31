@@ -123,7 +123,16 @@ impl SelectionState {
 
     /// The selection as data (for the history).
     pub fn snapshot(&self) -> SelSnapshot {
-        SelSnapshot { target: self.target.clone(), span: self.span, extra: self.extra.clone(), anchor: self.anchor, origin: self.origin, raw_note: self.raw_note.clone(), via: self.via.clone(), shown: self.shown }
+        SelSnapshot {
+            target: self.target.clone(),
+            span: self.span,
+            extra: self.extra.clone(),
+            anchor: self.anchor,
+            origin: self.origin,
+            raw_note: self.raw_note.clone(),
+            via: self.via.clone(),
+            shown: self.shown,
+        }
     }
 
     /// Restores a saved selection (Back): a new epoch, and the table scrolls to its row.

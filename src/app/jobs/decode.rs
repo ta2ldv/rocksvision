@@ -2,15 +2,22 @@
 //! requests of an older generation are skipped. A panic is answered with a Failed response of
 //! the same kind and job id.
 
-use super::{hex_copy_text, Outcome, Request, Response, Reveal, SelectHint, Tagged, ViewTarget};
+use super::{Outcome, Request, Response, Reveal, SelectHint, Tagged, ViewTarget, hex_copy_text};
 use crate::inspect::{self, Inspector};
 use crate::model::{NodeKind, Space, Status, View};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 
-pub(super) fn spawn(rx_req: Receiver<(u64, u64, Request)>, rt: Sender<Tagged<Response>>, cancel_upto: Arc<AtomicU64>, latest_view: Arc<AtomicU64>, busy: Arc<AtomicU64>, wake: Arc<dyn Fn() + Send + Sync>) {
+pub(super) fn spawn(
+    rx_req: Receiver<(u64, u64, Request)>,
+    rt: Sender<Tagged<Response>>,
+    cancel_upto: Arc<AtomicU64>,
+    latest_view: Arc<AtomicU64>,
+    busy: Arc<AtomicU64>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+) {
     thread::Builder::new()
         .name("rocksvision-decode".into())
         .spawn(move || {
@@ -74,7 +81,14 @@ impl DecodeKind {
                     ViewTarget::Node(k) => Some(k.clone()),
                     ViewTarget::Locate { .. } => None,
                 };
-                Response::View { req, target, kind, view: View { title: "Decoding failed".into(), notes: vec![msg.into()], status: Some(Status::Invalid), ..Default::default() }, reveal: None, select: None }
+                Response::View {
+                    req,
+                    target,
+                    kind,
+                    view: Box::new(View { title: "Decoding failed".into(), notes: vec![msg.into()], status: Some(Status::Invalid), ..Default::default() }),
+                    reveal: None,
+                    select: None,
+                }
             }
             DecodeKind::Bytes(space, off) => Response::Page { req, space, off, outcome: Outcome::Failed(msg.into()) },
             DecodeKind::CopyBytes(sel) => Response::Copied { req, sel, outcome: Outcome::Failed(msg.into()) },
@@ -101,7 +115,7 @@ fn handle(insp: &mut Option<Inspector>, job: u64, req: Request, cancel: &dyn Fn(
         Request::Children { node, kind } => Response::Children { node, children: insp.as_mut().map(|i| i.children(&kind, cancel)).unwrap_or_default(), error: None },
         Request::View { target, reveal } => {
             let Some(i) = insp.as_mut() else {
-                return Response::View { req: job, kind: None, target, view: View::default(), reveal: None, select: None };
+                return Response::View { req: job, kind: None, target, view: Box::default(), reveal: None, select: None };
             };
             let (kind, select) = match &target {
                 ViewTarget::Node(k) => (Some(k.clone()), None),
@@ -111,12 +125,20 @@ fn handle(insp: &mut Option<Inspector>, job: u64, req: Request, cancel: &dyn Fn(
                 },
             };
             let Some(kind) = kind else {
-                return Response::View { req: job, target, kind: None, view: View::default(), reveal: None, select: None };
+                return Response::View { req: job, target, kind: None, view: Box::default(), reveal: None, select: None };
             };
-            let view = i.view(&kind, cancel);
+            let view = Box::new(i.view(&kind, cancel));
             // Canonical path: each ancestor with its children (bounded by the inspector).
             let reveal = if reveal && !cancel() {
-                i.path_to(&kind, cancel).map(|p| Reveal { path: p.into_iter().map(|a| { let ch = i.children(&a, cancel); (a, ch) }).collect() })
+                i.path_to(&kind, cancel).map(|p| Reveal {
+                    path: p
+                        .into_iter()
+                        .map(|a| {
+                            let ch = i.children(&a, cancel);
+                            (a, ch)
+                        })
+                        .collect(),
+                })
             } else {
                 None
             };

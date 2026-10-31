@@ -6,7 +6,7 @@
 use crate::app::provenance;
 use crate::app::{Action, AppState};
 use crate::model::Status;
-use crate::ui::layout::{status_widths, LAYOUT};
+use crate::ui::layout::{LAYOUT, status_widths};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
 
@@ -19,7 +19,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
     // Mirror of the Explanation "Where": file range(s) first, then the derived offset.
     let sel = if st.selection().is_structure() && st.selection().anchor().is_none() {
         // The whole structure: "selection: structure Physical blocks · file [0x0,0x37d00)".
-        let name = doc.sel_node().and_then(|i| doc.nodes().get(i)).filter(|n| Some(&n.kind) == doc.view_kind()).map(|n| n.label.clone()).or_else(|| doc.view().map(|v| v.title.clone())).unwrap_or_default();
+        let name =
+            doc.sel_node().and_then(|i| doc.nodes().get(i)).filter(|n| Some(&n.kind) == doc.view_kind()).map(|n| n.label.clone()).or_else(|| doc.view().map(|v| v.title.clone())).unwrap_or_default();
         match st.selection().span() {
             Some(s) if s.space == crate::model::Space::File => format!("selection: structure {name} · file [0x{:x},0x{:x})", s.offset, s.offset + s.len),
             Some(s) => format!("selection: structure {name} · {}", provenance::status_text(doc.view(), &s)),
@@ -91,7 +92,12 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
         }
         if let Some((d, t)) = find.progress() {
             ui.label("Searching file bytes");
-            ui.add(egui::ProgressBar::new(if t > 0 { d as f32 / t as f32 } else { 0.0 }).desired_width(LAYOUT.progress_width).desired_height(ui.text_style_height(&egui::TextStyle::Small)).show_percentage());
+            ui.add(
+                egui::ProgressBar::new(if t > 0 { d as f32 / t as f32 } else { 0.0 })
+                    .desired_width(LAYOUT.progress_width)
+                    .desired_height(ui.text_style_height(&egui::TextStyle::Small))
+                    .show_percentage(),
+            );
             if ui.small_button("Cancel").clicked() {
                 acts.push(Action::CancelSearch);
             }
@@ -122,11 +128,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
 /// "kind · file name"; the name alone when it equals the kind (e.g. "CURRENT"). Only exact
 /// equality collapses ("MANIFEST · MANIFEST-000005" stays).
 fn kind_and_name(kind: &str, name: &str) -> String {
-    if kind == name || name.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind} · {name}")
-    }
+    if kind == name || name.is_empty() { kind.to_string() } else { format!("{kind} · {name}") }
 }
 
 #[cfg(test)]

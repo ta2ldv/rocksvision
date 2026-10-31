@@ -7,8 +7,8 @@
 //! Sources: table/format.h (BlockHandle, kBlockTrailerSize), table/meta_blocks.cc (metaindex
 //! names), table/block_based/partitioned_index_reader.cc (top-level index → partitions).
 
-use super::footer::{Handle, BLOCK_TRAILER};
-use super::{meta_kind, SstInspector};
+use super::footer::{BLOCK_TRAILER, Handle};
+use super::{SstInspector, meta_kind};
 use crate::limits::{LAYOUT_GROUP, LAYOUT_HANDLES};
 use crate::model::BlockKind;
 
@@ -17,7 +17,11 @@ use crate::model::BlockKind;
 pub enum ItemKind {
     /// A block with its handle; `name` is the metaindex name for meta blocks ("" otherwise);
     /// `ordinal` numbers data blocks in index order.
-    Block { kind: BlockKind, name: String, ordinal: Option<u64> },
+    Block {
+        kind: BlockKind,
+        name: String,
+        ordinal: Option<u64>,
+    },
     Footer,
 }
 
@@ -161,10 +165,10 @@ impl PhysLayout {
         let mut prev = from;
         for e in entries {
             let (a, b) = self.range_of(&e);
-            if let Some(p) = prev {
-                if p < a {
-                    out.push(Entry::Gap { start: p, end: a });
-                }
+            if let Some(p) = prev
+                && p < a
+            {
+                out.push(Entry::Gap { start: p, end: a });
             }
             prev = Some(prev.map_or(b, |p| p.max(b)));
             out.push(e);
@@ -190,22 +194,44 @@ impl PhysLayout {
             }
         }
         let mut v = self.with_gaps(entries, Some(0));
-        if let Some(end) = self.items.iter().map(Item::end).max() {
-            if end < self.file_len {
-                v.push(Entry::Gap { start: end, end: self.file_len });
-            }
+        if let Some(end) = self.items.iter().map(Item::end).max()
+            && end < self.file_len
+        {
+            v.push(Entry::Gap { start: end, end: self.file_len });
         }
         self.with_invalid(v)
     }
     /// Every item (no groups) with the gaps between them, from offset 0 to the end of file.
     pub fn with_all_gaps(&self) -> Vec<Entry> {
         let mut v = self.with_gaps((0..self.items.len()).map(Entry::Item).collect(), Some(0));
-        if let Some(end) = self.items.iter().map(Item::end).max() {
-            if end < self.file_len {
-                v.push(Entry::Gap { start: end, end: self.file_len });
-            }
+        if let Some(end) = self.items.iter().map(Item::end).max()
+            && end < self.file_len
+        {
+            v.push(Entry::Gap { start: end, end: self.file_len });
         }
         self.with_invalid(v)
+    }
+    /// Furthest end of the file-order items before item `first` (0 for the first item): where
+    /// the "Gap before" of a group page's first row is measured from.
+    pub fn end_before(&self, first: usize) -> u64 {
+        self.items[..first.min(self.items.len())].iter().map(Item::end).max().unwrap_or(0)
+    }
+    /// "Gap before" per entry: bytes between the furthest end so far (starting at `from`) and
+    /// the entry's start; None for invalid entries, which do not advance the end.
+    pub fn gaps_before(&self, entries: &[Entry], from: u64) -> Vec<Option<u64>> {
+        let mut prev = from;
+        entries
+            .iter()
+            .map(|e| {
+                if matches!(e, Entry::Invalid(_)) {
+                    return None;
+                }
+                let (a, b) = self.range_of(e);
+                let gap = a.saturating_sub(prev);
+                prev = prev.max(b);
+                Some(gap)
+            })
+            .collect()
     }
     /// Children of a group entry.
     pub fn group(&self, first: usize, count: usize) -> Vec<Entry> {
@@ -342,7 +368,7 @@ pub(super) fn build(s: &mut SstInspector, cancel: &dyn Fn() -> bool) -> PhysLayo
     for (n, h) in data.into_iter().enumerate() {
         items.push(Item { start: h.offset, size: h.size, trailer: BLOCK_TRAILER, kind: ItemKind::Block { kind: BlockKind::Data, name: String::new(), ordinal: Some(n as u64) } });
     }
-    items.sort_by(|a, b| (a.start, a.size).cmp(&(b.start, b.size)));
+    items.sort_by_key(|a| (a.start, a.size));
     items.dedup_by(|b, a| a.start == b.start && a.size == b.size);
     // A handle must address bytes entirely before the footer (and inside the file); one that
     // does not is a corrupt handle, kept apart so the Footer stays the last structure.
@@ -383,6 +409,27 @@ mod tests {
         assert_eq!(l.gap_containing(15_003), Some((15_000, 15_010)));
         assert_eq!(l.gap_containing(15_020), None);
         assert_eq!(l.item_at_start(15_045), Some(151));
+    }
+
+    /// 0017 D2: the "Gap before" of a group page's first row is measured from the end of the
+    /// items before the page (not from offset 0); contiguous → 0, a real gap → its byte count.
+    #[test]
+    fn group_page_first_row_gap_is_relative_to_previous_items() {
+        // 150 contiguous 100-byte items, except a 50-byte hole before item 64.
+        let items: Vec<Item> = (0..150).map(|i| data(i * 100 + if i >= 64 { 50 } else { 0 }, 95, i)).collect();
+        let l = PhysLayout { items, file_len: 15_050, data_complete: true, ..Default::default() };
+        let gaps = |first: usize, count: usize| l.gaps_before(&l.group(first, count), l.end_before(first));
+        // The defect: measured from 0, page 2's first row reported its own start (6450).
+        assert_eq!(l.gaps_before(&l.group(64, 64), 0)[0], Some(6450));
+        assert_eq!(gaps(0, 64)[..2], [Some(0), Some(0)], "page 1 starts at offset 0");
+        assert_eq!(gaps(64, 64)[..2], [Some(50), Some(0)], "page 2: real 50-byte gap, then contiguous");
+        assert_eq!(gaps(128, 22)[0], Some(0), "page 3 is contiguous with page 2");
+        assert!(gaps(128, 22).iter().all(|g| *g == Some(0)));
+        // The whole-file table keeps its semantics: gaps from offset 0, invalid entries None.
+        let all = l.with_all_gaps();
+        let g = l.gaps_before(&all, 0);
+        assert_eq!(g.len(), all.len());
+        assert_eq!(g.iter().filter(|g| **g != Some(0)).count(), 0, "the hole is its own Gap entry: {all:?}");
     }
 
     /// Reviewer 1/2 (0011 fix): a handle beyond the footer is an Invalid entry placed before

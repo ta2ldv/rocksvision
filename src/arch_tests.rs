@@ -183,8 +183,10 @@ fn every_request_has_a_matching_failed_arm() {
     let variants = |enum_name: &str| -> Vec<String> {
         let start = jobs.find(&format!("pub enum {enum_name} {{")).unwrap_or_else(|| panic!("enum {enum_name}"));
         let body = &jobs[start..start + jobs[start..].find("\n}").unwrap()];
+        // Variant lines only (enum-body indent; rustfmt may put struct-variant fields on their own lines).
         body.lines()
             .skip(1)
+            .filter(|l| l.starts_with("    ") && !l.starts_with("     "))
             .map(str::trim)
             .filter(|l| !l.starts_with("//") && !l.is_empty())
             .map(|l| l.split(|c: char| !c.is_alphanumeric()).next().unwrap().to_string())
@@ -215,7 +217,14 @@ fn every_request_has_a_matching_failed_arm() {
 /// the visibility; this text check guards against a field or mutator becoming `pub` again.
 #[test]
 fn app_components_have_private_fields_and_read_only_pub_api() {
-    let comps = [("app/session.rs", "DocumentSession"), ("app/selection.rs", "SelectionState"), ("app/search.rs", "SearchState"), ("app/job_state.rs", "JobState"), ("app/view_prefs.rs", "ViewPreferences"), ("app/state.rs", "AppState")];
+    let comps = [
+        ("app/session.rs", "DocumentSession"),
+        ("app/selection.rs", "SelectionState"),
+        ("app/search.rs", "SearchState"),
+        ("app/job_state.rs", "JobState"),
+        ("app/view_prefs.rs", "ViewPreferences"),
+        ("app/state.rs", "AppState"),
+    ];
     let mut bad = Vec::new();
     for (rel, name) in comps {
         let text = std::fs::read_to_string(src().join(rel)).unwrap();
@@ -243,7 +252,8 @@ fn app_components_have_private_fields_and_read_only_pub_api() {
 fn legacy_snapshot_shim_is_removed() {
     assert!(!src().join("app/compat.rs").exists(), "app/compat.rs is back");
     require("ui", "st.prefs()");
-    let bad: Vec<String> = code("").into_iter().filter(|(f, c)| !rel_matches(f, "arch_tests.rs") && (c.contains("LegacyFields") || c.contains("impl std::ops::Deref for AppState"))).map(|(f, _)| f).collect();
+    let bad: Vec<String> =
+        code("").into_iter().filter(|(f, c)| !rel_matches(f, "arch_tests.rs") && (c.contains("LegacyFields") || c.contains("impl std::ops::Deref for AppState"))).map(|(f, _)| f).collect();
     assert!(bad.is_empty(), "legacy shim still referenced: {bad:?}");
 }
 

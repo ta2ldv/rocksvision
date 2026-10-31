@@ -42,10 +42,24 @@ case $url in
     case $url in *page=1) reply 200 "$(cat "$s/assets.json" 2>/dev/null || echo '[]')" ;; *) reply 200 '[]' ;; esac ;;
   */releases\?*)
     case $url in *page=1) reply 200 "$(cat "$s/releases.json" 2>/dev/null || echo '[]')" ;; *) reply 200 '[]' ;; esac ;;
-  */commits/tags/*)
+  # Tag resolution (check-tag-commit.sh): commit_sha = commit the tag resolves to; tag_annotated
+  # (content = tag object sha) makes the ref point to a tag object; tagobj_type overrides the
+  # type that tag object points to; http_commit / http_tagobj force an HTTP code; ref_badjson
+  # returns a ref answer without an object.
+  */git/ref/tags/*)
+    t=${url##*/git/ref/tags/}
     if [ -f "$s/http_commit" ]; then reply "$(cat "$s/http_commit")" '{"message":"error"}'
-    elif [ -f "$s/commit_sha" ]; then reply 200 "{\"sha\":\"$(cat "$s/commit_sha")\"}"
-    else reply 404 '{"message":"No commit found"}'; fi ;;
+    elif [ -f "$s/ref_badjson" ]; then reply 200 "{\"ref\":\"refs/tags/$t\"}"
+    elif [ -f "$s/commit_sha" ] && [ -f "$s/tag_annotated" ]; then
+      reply 200 "{\"ref\":\"refs/tags/$t\",\"object\":{\"type\":\"tag\",\"sha\":\"$(cat "$s/tag_annotated")\"}}"
+    elif [ -f "$s/commit_sha" ]; then
+      reply 200 "{\"ref\":\"refs/tags/$t\",\"object\":{\"type\":\"commit\",\"sha\":\"$(cat "$s/commit_sha")\"}}"
+    else reply 404 '{"message":"Not Found"}'; fi ;;
+  */git/tags/*)
+    if [ -f "$s/http_tagobj" ]; then reply "$(cat "$s/http_tagobj")" '{"message":"error"}'
+    elif [ -f "$s/tag_annotated" ] && [ "${url##*/}" = "$(cat "$s/tag_annotated")" ]; then
+      reply 200 "{\"sha\":\"${url##*/}\",\"object\":{\"type\":\"$(cat "$s/tagobj_type" 2>/dev/null || echo commit)\",\"sha\":\"$(cat "$s/commit_sha")\"}}"
+    else reply 404 '{"message":"Not Found"}'; fi ;;
   *) reply 500 '{"message":"unexpected url in fake"}' ;;
 esac
 EOF
@@ -138,6 +152,13 @@ s_bad() { s_present; : >"$FAKE_STATE/badjson"; }
 s_moved() { s_present; echo "$other" >"$FAKE_STATE/commit_sha"; }
 s_notag() { s_present; rm -f "$FAKE_STATE/commit_sha"; }
 s_commit500() { s_present; echo 502 >"$FAKE_STATE/http_commit"; }
+tagobj=7c857d4800000000000000000000000000000001
+s_annot() { s_present; echo "$tagobj" >"$FAKE_STATE/tag_annotated"; }
+s_annot_moved() { s_annot; echo "$other" >"$FAKE_STATE/commit_sha"; }
+s_annot_tree() { s_annot; echo tree >"$FAKE_STATE/tagobj_type"; }
+s_annot_500() { s_annot; echo 500 >"$FAKE_STATE/http_tagobj"; }
+s_ref_bad() { s_present; : >"$FAKE_STATE/ref_badjson"; }
+s_absent_annot() { s_absent; echo "$tagobj" >"$FAKE_STATE/tag_annotated"; }
 s_all() { s_present; for a in "${names[@]}"; do jq --arg n "$a" '. + [{name: $n, state: "uploaded"}]' "$FAKE_STATE/assets.json" >"$FAKE_STATE/x" && mv "$FAKE_STATE/x" "$FAKE_STATE/assets.json"; done; }
 s_absent_drop() { s_absent; : >"$FAKE_STATE/gh_drop_one"; }
 
@@ -168,10 +189,19 @@ case_ R11 3 "unparsable answer -> fail closed" s_bad $R repo/x "$tag" "${names[@
 case_ R12 0 "--verify-uploaded, all eight attached" s_all $R --verify-uploaded repo/x "$tag" "${names[@]}"
 case_ R13 1 "--verify-uploaded, assets missing" s_present $R --verify-uploaded repo/x "$tag" "${names[@]}"
 echo "== check-tag-commit.sh"
-case_ T1 0 "tag at built commit" s_present $T repo/x "$tag" "$sha"
-case_ T2 1 "tag moved to another commit" s_moved $T repo/x "$tag" "$sha"
-case_ T3 1 "tag missing on GitHub" s_notag $T repo/x "$tag" "$sha"
+case_ T1 0 "lightweight tag at built commit" s_present $T repo/x "$tag" "$sha"
+case_ T2 1 "lightweight tag moved to another commit" s_moved $T repo/x "$tag" "$sha"
+case_ T3 1 "tag missing on GitHub (404)" s_notag $T repo/x "$tag" "$sha"
 case_ T4 3 "API HTTP 502" s_commit500 $T repo/x "$tag" "$sha"
+case_ T5 0 "annotated tag -> tag object -> built commit" s_annot $T repo/x "$tag" "$sha"
+case_ T6 1 "annotated tag -> tag object -> other commit" s_annot_moved $T repo/x "$tag" "$sha"
+case_ T7 1 "annotated tag object points to a tree" s_annot_tree $T repo/x "$tag" "$sha"
+case_ T8 3 "tag object read HTTP 500 -> fail closed" s_annot_500 $T repo/x "$tag" "$sha"
+case_ T9 3 "ref answer without object -> fail closed" s_ref_bad $T repo/x "$tag" "$sha"
+grep -q "/git/tags/$tagobj\$" "$base/state-T5/curl.log" && ! grep -q '/commits/' "$base/state-T5/curl.log" || {
+  echo "FAIL T5: expected GET git/ref/tags then git/tags/<tag object>, no commits/ endpoint"
+  fails=$((fails + 1))
+}
 echo "== publish-release.sh (end to end, fake gh records every call)"
 case_ P1 0 "absent -> gh release create --verify-tag + 8 assets, verified" s_absent $P repo/x "$tag" "$sha" "$base/assets"
 grep -q -- '--verify-tag' "$FAKE_STATE/gh.log" && [ "$(wc -l <"$FAKE_STATE/gh.log")" -eq 1 ] || {
@@ -193,6 +223,7 @@ case_ P5 1 "immutable -> no gh call" s_immut $P repo/x "$tag" "$sha" "$base/asse
 case_ P6 1 "tag moved -> no gh call" s_moved $P repo/x "$tag" "$sha" "$base/assets"
 case_ P7 3 "API error -> no gh call" s_500 $P repo/x "$tag" "$sha" "$base/assets"
 case_ P8 1 "create drops one asset -> post-write verify fails" s_absent_drop $P repo/x "$tag" "$sha" "$base/assets"
+case_ P9 0 "annotated tag at built commit, absent -> create + 8 assets" s_absent_annot $P repo/x "$tag" "$sha" "$base/assets"
 for id in P3 P4 P5 P6 P7; do
   [ -s "$base/state-$id/gh.log" ] && {
     echo "FAIL $id: gh was called"

@@ -9,13 +9,13 @@
 //! only Shift+click extends; a press-and-drag selects nothing (no text selection, no drag
 //! capture, no scroll-to-cursor animation).
 
-use super::{strong, PanelMemory};
+use super::{PanelMemory, strong};
 use crate::app::hex::{HexState, PageState};
 use crate::app::provenance;
 use crate::app::{Action, AppState, Panel};
 use crate::limits::LIMITS;
-use crate::model::{Space, Span, SpaceInfo, Status};
-use crate::ui::layout::{ascii_col, byte_at, byte_col, choose_bytes_per_row, hex_header_lines, hex_row_chars, offset_digits, HexMetrics, LAYOUT, PACK_SLACK};
+use crate::model::{Space, SpaceInfo, Span, Status};
+use crate::ui::layout::{HexMetrics, LAYOUT, PACK_SLACK, ascii_col, byte_at, byte_col, choose_bytes_per_row, hex_header_lines, hex_row_chars, offset_digits};
 use crate::ui::menu::{self, MenuCmd};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText, Sense};
@@ -237,7 +237,7 @@ pub fn paging_text(base: u64, size: u64, page: u64) -> PagingText {
     let cur = base / page;
     let end = |b: u64| b.saturating_add(page).min(size);
     let range = format!("0x{base:x}..0x{:x}", end(base));
-    let per = if page % 1024 == 0 { format!("{} KiB", page / 1024) } else { format!("{page} bytes") };
+    let per = if page.is_multiple_of(1024) { format!("{} KiB", page / 1024) } else { format!("{page} bytes") };
     PagingText {
         wide: format!("page {}/{pages} · {range} of {size} bytes", cur + 1),
         compact: format!("{}/{pages}", cur + 1),
@@ -266,10 +266,10 @@ fn group_paging(ui: &mut egui::Ui, base: u64, size: u64, acts: &mut Vec<Action>)
     let label_text_w = width(label, egui::TextStyle::Body);
     let button = |s: &str| egui::Button::new(s).min_size(egui::vec2(LAYOUT.glyph_button[0], LAYOUT.glyph_button[1]));
     let r = ui.add_enabled(t.prev.is_some(), button(prev)).on_disabled_hover_text("First page");
-    if let Some((to, tip)) = &t.prev {
-        if r.on_hover_text(tip).clicked() {
-            acts.push(Action::HexPage(*to));
-        }
+    if let Some((to, tip)) = &t.prev
+        && r.on_hover_text(tip).clicked()
+    {
+        acts.push(Action::HexPage(*to));
     }
     if compact {
         // Even "n/N" may not fit beside the buttons (huge spaces): elide it, keep "▶" reachable.
@@ -280,10 +280,10 @@ fn group_paging(ui: &mut egui::Ui, base: u64, size: u64, acts: &mut Vec<Action>)
         ui.add(egui::Label::new(label.as_str()).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(&t.tip);
     }
     let r = ui.add_enabled(t.next.is_some(), button(next)).on_disabled_hover_text("Last page");
-    if let Some((to, tip)) = &t.next {
-        if r.on_hover_text(tip).clicked() {
-            acts.push(Action::HexPage(*to));
-        }
+    if let Some((to, tip)) = &t.next
+        && r.on_hover_text(tip).clicked()
+    {
+        acts.push(Action::HexPage(*to));
     }
     wide_w
 }
@@ -312,7 +312,19 @@ pub fn row_selection(sel: Option<Span>, space: Space, row_off: u64, n: u64) -> O
 
 /// Draws the current page state. `idle_text` is shown when no page is requested.
 #[allow(clippy::too_many_arguments)]
-fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: &Sel, owner: &dyn Fn(u64) -> Option<String>, idle_text: &str, mem: &mut HexMemory, m: &HexMetrics, scroll_to: Option<u64>, strip: egui::layers::ShapeIdx, top: f32) -> Option<HexEvent> {
+fn show_bytes(
+    ui: &mut egui::Ui,
+    hex: &HexState,
+    tok: &Tokens,
+    sel: &Sel,
+    owner: &dyn Fn(u64) -> Option<String>,
+    idle_text: &str,
+    mem: &mut HexMemory,
+    m: &HexMetrics,
+    scroll_to: Option<u64>,
+    strip: egui::layers::ShapeIdx,
+    top: f32,
+) -> Option<HexEvent> {
     let p = &tok.p;
     let page = match hex.load() {
         PageState::Idle => {
@@ -391,11 +403,11 @@ fn show_bytes(ui: &mut egui::Ui, hex: &HexState, tok: &Tokens, sel: &Sel, owner:
         ui.painter().set(strip, s);
     }
     let mut area = egui::ScrollArea::both().id_salt("hex_scroll").auto_shrink([false, false]);
-    if let Some(t) = scroll_to {
-        if t >= hex.page_base() {
-            // Row pitch is exactly `row_h` (`rows_area` zeroes the spacing egui adds per row).
-            area = area.vertical_scroll_offset(scroll_offset_for_row((t - hex.page_base()) / n, row_h));
-        }
+    if let Some(t) = scroll_to
+        && t >= hex.page_base()
+    {
+        // Row pitch is exactly `row_h` (`rows_area` zeroes the spacing egui adds per row).
+        area = area.vertical_scroll_offset(scroll_offset_for_row((t - hex.page_base()) / n, row_h));
     }
     let page_base = hex.page_base();
     let mut new_hover = None;
@@ -512,7 +524,7 @@ mod tests {
     use super::*;
     use crate::model::{Space, Span};
     use crate::ui::layout::center_min;
-    use crate::ui::theme::{apply_theme, THEMES};
+    use crate::ui::theme::{THEMES, apply_theme};
 
     /// 0015 C3 GUI-2: Go to 0x5eec (16 B/row → row 0x5ee) puts that row on screen with three
     /// rows above; egui's plain `show_rows` (pitch row_h + item spacing) would land short.

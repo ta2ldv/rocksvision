@@ -31,9 +31,5 @@ pub fn show(ctx: &egui::Context, st: &AppState, tok: &Tokens) -> Vec<Action> {
             }
         });
     });
-    if close || resp.should_close() {
-        vec![Action::CloseShortcuts]
-    } else {
-        Vec::new()
-    }
+    if close || resp.should_close() { vec![Action::CloseShortcuts] } else { Vec::new() }
 }

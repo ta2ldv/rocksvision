@@ -45,3 +45,6 @@ Desktop.ini
 # Keep Cargo.lock, source, build scripts, screenshots, approved logos,
 # examples/data, examples/files and tests/fixtures in version control.
 # Do NOT ignore *.log / *.sst: these are the database samples and fixtures.
+
+# Owner notes, kept locally, not published
+community-todos/

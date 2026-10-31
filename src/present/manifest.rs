@@ -1,7 +1,7 @@
 //! MANIFEST presentation: VersionEdit element explanations and the observed-levels table.
 
 use super::common::explained;
-use crate::manifest::{ikey_preview, Levels, MAX_LIVE_FILES};
+use crate::manifest::{Levels, MAX_LIVE_FILES, ikey_preview};
 use crate::model::*;
 use crate::util::human_size;
 
@@ -78,7 +78,8 @@ pub fn levels_view(lv: &Levels, dir: Option<&std::path::Path>, exists: &dyn Fn(&
             }
         }
     }
-    let mut notes = vec![format!("Observed from MANIFEST: {} edits replayed, {} file additions, {} deletions. This is the final observed state, not compaction history.", lv.edits, lv.adds, lv.deletes)];
+    let mut notes =
+        vec![format!("Observed from MANIFEST: {} edits replayed, {} file additions, {} deletions. This is the final observed state, not compaction history.", lv.edits, lv.adds, lv.deletes)];
     if let Some(c) = &lv.comparator {
         notes.push(format!("Comparator: {c}"));
     }

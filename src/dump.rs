@@ -3,7 +3,7 @@
 
 use crate::discover;
 use crate::inspect;
-use crate::model::{group_glyph, with_coverage, Child, ChildRole, NodeKind, View};
+use crate::model::{Child, ChildRole, NodeKind, View, group_glyph, with_coverage};
 use std::io::Write;
 use std::path::Path;
 

@@ -12,10 +12,14 @@ fn put_batch() -> crate::wal::batch::Batch {
 }
 
 fn renamed(facts: &[Fact]) -> Vec<Fact> {
-    facts.iter().cloned().map(|mut f| {
-        f.name = format!("relabelled {}", f.name.len());
-        f
-    }).collect()
+    facts
+        .iter()
+        .cloned()
+        .map(|mut f| {
+            f.name = format!("relabelled {}", f.name.len());
+            f
+        })
+        .collect()
 }
 
 fn explanations(fields: &[Field]) -> Vec<(String, Option<NodeKind>)> {

@@ -3,7 +3,7 @@
 //! when no row is selected, the byte interpretations of the selection, or the status legend.
 //! Unsupported and Unknown are stated separately and never under Diagnosis.
 
-use super::{btn, chip, chip_word, fit_value, long_value, status_meaning, strong, title_line, value_tip, LEGEND};
+use super::{LEGEND, btn, chip, chip_word, fit_value, long_value, status_meaning, strong, title_line, value_tip};
 use crate::app::diagnosis::{self, DiagLine, Diagnosis, Finding, NodeFailure, SUMMARY_LINES};
 use crate::app::hex::interpretations;
 use crate::app::provenance;
@@ -141,10 +141,10 @@ fn structure_card(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec
         ui.add_space(4.0);
         let d = diagnosis::diagnosis(one.status, one.diag.as_ref());
         diagnosis_ui(ui, tok, &d, "card", acts);
-        if let Some(r) = one.row {
-            if ui.link(format!("Select the failing field: {}", one.name)).clicked() {
-                acts.push(Action::SelectRow(r));
-            }
+        if let Some(r) = one.row
+            && ui.link(format!("Select the failing field: {}", one.name)).clicked()
+        {
+            acts.push(Action::SelectRow(r));
         }
     } else if !fails.is_empty() {
         ui.add_space(4.0);
@@ -176,7 +176,10 @@ fn selection_range(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: &Span, act
     }
     where_section(ui, st, tok, Some(*s));
     // Compressed stored bytes: no byte maps to a field; offer the decompressed space.
-    let decompressed = st.session().view().and_then(|v| v.spaces.iter().find(|sp| matches!(&sp.map, SpaceMap::Compressed { file, .. } if s.space == Space::File && file.offset <= s.offset && s.offset < file.offset + file.len.max(1))));
+    let decompressed = st
+        .session()
+        .view()
+        .and_then(|v| v.spaces.iter().find(|sp| matches!(&sp.map, SpaceMap::Compressed { file, .. } if s.space == Space::File && file.offset <= s.offset && s.offset < file.offset + file.len.max(1))));
     if let Some(sp) = decompressed {
         ui.add_space(6.0);
         if btn(ui, tok, "Open decompressed view").on_hover_text(&sp.title).clicked() {
@@ -269,10 +272,10 @@ fn node(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Action>) 
     if let [one] = fails.as_slice() {
         let d = diagnosis::diagnosis(one.status, one.diag.as_ref());
         diagnosis_ui(ui, tok, &d, "node", acts);
-        if let Some(r) = one.row {
-            if ui.link(format!("Select the failing field: {}", one.name)).clicked() {
-                acts.push(Action::SelectRow(r));
-            }
+        if let Some(r) = one.row
+            && ui.link(format!("Select the failing field: {}", one.name)).clicked()
+        {
+            acts.push(Action::SelectRow(r));
         }
     } else if !fails.is_empty() {
         summary(ui, tok, &fails, acts);
@@ -377,10 +380,10 @@ fn diag_value(ui: &mut egui::Ui, tok: &Tokens, l: &DiagLine, acts: &mut Vec<Acti
     if !l.prose && l.link.is_none() {
         r = r.on_hover_text(value_tip(&l.text));
     }
-    if let Some(span) = l.link {
-        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Select these bytes in their own offset space").clicked() {
-            acts.push(Action::SelectSpan(span));
-        }
+    if let Some(span) = l.link
+        && r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Select these bytes in their own offset space").clicked()
+    {
+        acts.push(Action::SelectSpan(span));
     }
 }
 

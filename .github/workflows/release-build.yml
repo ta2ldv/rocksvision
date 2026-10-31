@@ -255,6 +255,18 @@ jobs:
         run: ${{ matrix.build }}
       - name: Check dist (version, target, LICENSE, checksums)
         run: bash scripts/ci/check-dist.sh "${{ matrix.platform }}" "${{ matrix.triple }}"
+      # rust-toolchain.toml uses profile "minimal" (no clippy/rustfmt): the components are added
+      # here (idempotent), not in the packaging scripts. Same target handling as Test.
+      - name: Lint (cargo fmt --check, cargo clippy -D warnings)
+        env:
+          RUST: ${{ steps.meta.outputs.rust }}
+          TEST_ARGS: ${{ matrix.test_args }}
+        # shellcheck disable=SC2086
+        run: |
+          rustup component add clippy rustfmt --toolchain "$RUST"
+          rustup run "$RUST" cargo fmt --check
+          rustup run "$RUST" cargo clippy --all-targets --locked $TEST_ARGS -- -D warnings
+          rustup run "$RUST" cargo clippy --all-targets --locked --features harness $TEST_ARGS -- -D warnings
       # All four platforms: the suite verifies checksums in pure Rust (no shasum).
       - name: Test (cargo test --release --locked)
         env:

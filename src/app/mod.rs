@@ -23,5 +23,5 @@ pub use job_state::JobState;
 pub use search::SearchState;
 pub use selection::SelectionState;
 pub use session::{DocumentSession, TreeNode};
-pub use state::{AppState, ScrollRequest, ZoomFit, ZoomPolicy, CENTER_SPLIT_DEFAULT, FILE_SPACE_TITLE};
+pub use state::{AppState, CENTER_SPLIT_DEFAULT, FILE_SPACE_TITLE, ScrollRequest, ZoomFit, ZoomPolicy};
 pub use view_prefs::ViewPreferences;

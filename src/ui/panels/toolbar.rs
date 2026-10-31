@@ -4,10 +4,10 @@
 //! rest of its row. View/Theme/About live in the menu bar; without a native menu bar the same
 //! menu tree is offered as an in-window "Menu" button.
 
-use super::{btn, status_text, PanelMemory};
+use super::{PanelMemory, btn, status_text};
 use crate::app::{Action, AppState, CopyKind};
 use crate::model::Status;
-use crate::ui::layout::{pack_rows, LAYOUT, PACK_SLACK};
+use crate::ui::layout::{LAYOUT, PACK_SLACK, pack_rows};
 use crate::ui::menu::{self, MenuCmd, MenuNode, RESET_VIEW_DEFAULT_TIP, RESET_VIEW_TIP};
 use crate::ui::theme::Tokens;
 use eframe::egui;
@@ -133,7 +133,13 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
                 let has_sel = st.selection().span().is_some();
                 let has_field = st.selected_field().is_some();
                 let has_key = st.selected_field().map(|f| f.key_bytes.is_some()).unwrap_or(false);
-                for (k, label, en) in [(CopyKind::Value, "Copy value", has_field), (CopyKind::Key, "Copy key", has_key), (CopyKind::Hex, "Copy hex (max 64 KiB)", has_sel), (CopyKind::Offset, "Copy offset", has_sel), (CopyKind::RowTsv, "Copy row (TSV)", has_field)] {
+                for (k, label, en) in [
+                    (CopyKind::Value, "Copy value", has_field),
+                    (CopyKind::Key, "Copy key", has_key),
+                    (CopyKind::Hex, "Copy hex (max 64 KiB)", has_sel),
+                    (CopyKind::Offset, "Copy offset", has_sel),
+                    (CopyKind::RowTsv, "Copy row (TSV)", has_field),
+                ] {
                     let item = ui.add_enabled(en, egui::Button::new(label));
                     tok.menu_item_hover(ui, &item);
                     if item.clicked() {
@@ -185,7 +191,7 @@ pub fn zoom_limit_tip(ceiling: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::{apply_theme, THEMES};
+    use crate::ui::theme::{THEMES, apply_theme};
 
     #[test]
     fn disabled_zoom_in_tooltip_names_the_limit() {
@@ -214,7 +220,7 @@ mod tests {
     }
 
     /// 0015 C3 GUI-3: the zoom ceiling from the shell's own measurement (`measure_layout` over
-    /// real toolbar widths measured by `show_groups`, default theme) at the README windows; and
+    /// real toolbar widths measured by `show_groups`, Autistic theme `THEMES[0]`) at the README windows; and
     /// it is the same whether measured at 100 % or at the ceiling itself (no flip-flop).
     #[test]
     fn shell_zoom_ceilings_from_measured_toolbar() {
@@ -231,12 +237,15 @@ mod tests {
                 let mut c = 0.0;
                 crate::ui::test_frame(&ctx, egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))), ..Default::default() }, |ui| {
                     // The status bar and a hex header line as the shell measures them.
-                    let r = egui::Panel::bottom("status").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, LAYOUT.status_pad as i8)).stroke(egui::Stroke::new(1.0, tok.p.border))).resizable(false).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.set_height(ui.text_style_height(&egui::TextStyle::Body) + LAYOUT.status_pad);
-                            ui.label("selection");
+                    let r = egui::Panel::bottom("status")
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, LAYOUT.status_pad as i8)).stroke(egui::Stroke::new(1.0, tok.p.border)))
+                        .resizable(false)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_height(ui.text_style_height(&egui::TextStyle::Body) + LAYOUT.status_pad);
+                                ui.label("selection");
+                            });
                         });
-                    });
                     mem.status_h = r.response.rect.height();
                     let line = ui.horizontal(|ui| {
                         let mut s = String::new();

@@ -10,12 +10,12 @@ pub mod compress;
 pub mod footer;
 pub mod layout;
 
-use crate::io::{read_vec, RangeRead, RangeReader};
+use crate::io::{RangeRead, RangeReader, read_vec};
 use crate::limits::{BLOCK_CACHE_BYTES, BLOCK_CACHE_ITEMS, KNOWN_BLOCK_HANDLES, MAX_DECOMPRESSED};
 use crate::model::{BlockKind, CheckKind, DecodedValue as DV, Diagnostic, Space, Span, Status, Trust};
 use crate::util::{fixed32, fixed64, varint64};
 use block::{Block, BlockCache, Entry, EntryError, IndexFmt, Layout, LayoutError};
-use footer::{Footer, Handle, BLOCK_TRAILER};
+use footer::{BLOCK_TRAILER, Footer, Handle};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +45,9 @@ pub struct BlockDecode {
     pub result: Result<(Layout, Vec<Entry>, Option<EntryError>), EntryError>,
 }
 
+/// `data_handles` result: ((handle, index key) per data block, more after this page, error).
+pub type DataHandles = (Vec<(Handle, Vec<u8>)>, bool, Option<String>);
+
 pub struct SstInspector {
     r: Box<dyn RangeRead>,
     /// Source path (display, sibling lookups); empty for in-memory sources.
@@ -66,9 +69,12 @@ pub struct SstInspector {
     known: std::collections::HashMap<u64, (Handle, BlockKind)>,
     /// Integrity status of blocks already checked (bounded): group nodes report coverage
     /// from it without reading any block.
-    /// Value: (status, checksum actually compared).
-    checked: std::collections::HashMap<(u64, u64), (Status, bool)>,
+    /// Value: (status, checksum actually compared, the check's diagnostic when it failed).
+    checked: std::collections::HashMap<(u64, u64), CheckedBlock>,
 }
+
+/// A remembered block check: (status, checksum actually compared, diagnostic if any).
+type CheckedBlock = (Status, bool, Option<Diagnostic>);
 
 /// table_properties.cc / meta_blocks.cc: properties written with PutVarint64.
 const U64_PROPS: &[&str] = &[
@@ -178,7 +184,20 @@ impl SstInspector {
                 (Err(m.clone()), Some(Diagnostic::new(CheckKind::Truncation, Some(Span::file(len - tail_len, tail_len)), Trust::Untrusted, "the file is not decoded", m)))
             }
         };
-        let mut s = SstInspector { r, path, footer, footer_diag, meta: Err("footer not decoded".into()), props: None, prop_spans: BTreeMap::new(), layout: None, cache: BlockCache::new(BLOCK_CACHE_ITEMS, BLOCK_CACHE_BYTES), dict: None, known: std::collections::HashMap::new(), checked: std::collections::HashMap::new() };
+        let mut s = SstInspector {
+            r,
+            path,
+            footer,
+            footer_diag,
+            meta: Err("footer not decoded".into()),
+            props: None,
+            prop_spans: BTreeMap::new(),
+            layout: None,
+            cache: BlockCache::new(BLOCK_CACHE_ITEMS, BLOCK_CACHE_BYTES),
+            dict: None,
+            known: std::collections::HashMap::new(),
+            checked: std::collections::HashMap::new(),
+        };
         if let Ok(f) = s.footer.clone() {
             let b = s.block(f.metaindex, BlockKind::Metaindex);
             // Read (and so checksum-verified) at open: recorded as checked (cache hit, no read).
@@ -188,10 +207,8 @@ impl SstInspector {
                 (None, Err(e)) => Err(e.to_string()),
                 (None, Ok(lay)) => {
                     let (es, err) = block::entries(&b.data, &lay, None);
-                    let v: Vec<MetaEntry> = es
-                        .iter()
-                        .filter_map(|e| Handle::decode(&b.data, e.value_off).map(|(h, _)| MetaEntry { name: String::from_utf8_lossy(&e.key).into_owned(), handle: h }))
-                        .collect();
+                    let v: Vec<MetaEntry> =
+                        es.iter().filter_map(|e| Handle::decode(&b.data, e.value_off).map(|(h, _)| MetaEntry { name: String::from_utf8_lossy(&e.key).into_owned(), handle: h })).collect();
                     match err {
                         Some(e) if v.is_empty() => Err(e.msg),
                         _ => Ok(v),
@@ -317,19 +334,11 @@ impl SstInspector {
     }
 
     pub fn meta_kind_for(&self, name: &str) -> BlockKind {
-        if name == "rocksdb.index" {
-            self.index_kind()
-        } else {
-            meta_kind(name)
-        }
+        if name == "rocksdb.index" { self.index_kind() } else { meta_kind(name) }
     }
 
     pub fn index_kind(&self) -> BlockKind {
-        if self.index_type() == 2 {
-            BlockKind::TopIndex
-        } else {
-            BlockKind::Index
-        }
+        if self.index_type() == 2 { BlockKind::TopIndex } else { BlockKind::Index }
     }
 
     fn dict(&mut self) -> Option<Arc<Vec<u8>>> {
@@ -342,13 +351,26 @@ impl SstInspector {
 
     /// Reads (cached, bounded) a block. Only data blocks use the compression dictionary.
     pub fn block(&mut self, h: Handle, kind: BlockKind) -> Arc<Block> {
-        if let Some(b) = self.cache.get(h.offset) {
-            if b.handle == h {
-                return b;
-            }
+        if let Some(b) = self.cache.get(h.offset)
+            && b.handle == h
+        {
+            return b;
         }
         let Ok(f) = self.footer.clone() else {
-            return Arc::new(Block { handle: h, ctype: 0, stored_checksum: 0, computed_checksum: None, modifier: 0, checksum_status: Status::Unknown, data: Arc::new(Vec::new()), compressed: false, size_prefix: None, error: Some((Status::Invalid, "no footer".into())), diags: Vec::new(), error_diag: None });
+            return Arc::new(Block {
+                handle: h,
+                ctype: 0,
+                stored_checksum: 0,
+                computed_checksum: None,
+                modifier: 0,
+                checksum_status: Status::Unknown,
+                data: Arc::new(Vec::new()),
+                compressed: false,
+                size_prefix: None,
+                error: Some((Status::Invalid, "no footer".into())),
+                diags: Vec::new(),
+                error_diag: None,
+            });
         };
         if self.known.len() >= KNOWN_BLOCK_HANDLES {
             self.known.clear();
@@ -374,13 +396,18 @@ impl SstInspector {
         if self.checked.len() >= KNOWN_BLOCK_HANDLES {
             self.checked.clear();
         }
-        self.checked.insert((h.offset, h.size), (st, verified));
+        self.checked.insert((h.offset, h.size), (st, verified, d.clone()));
         (st, d)
     }
 
     /// Status of block `h` if it was already checked (never reads).
     pub fn checked_status(&self, h: Handle) -> Option<Status> {
         self.checked.get(&(h.offset, h.size)).map(|c| c.0)
+    }
+
+    /// Status and recorded diagnostic of block `h` if it was already checked (never reads).
+    pub fn checked_result(&self, h: Handle) -> Option<(Status, Option<&Diagnostic>)> {
+        self.checked.get(&(h.offset, h.size)).map(|c| (c.0, c.2.as_ref()))
     }
 
     /// The check of block `h` compared its stored checksum (and it matched when the status is
@@ -394,7 +421,9 @@ impl SstInspector {
         if let Some(b) = self.cache.get(h.offset).filter(|b| b.handle == h) {
             let d = b.diags.first().cloned();
             return match &b.error {
-                Some((st, _)) => (*st, d, false),
+                // The status comes from `error`, so does its diagnostic (a checksum mismatch
+                // pushed earlier is not the problem behind this status).
+                Some((st, _)) => (*st, b.error_diagnostic().cloned().or(d), false),
                 None => match b.checksum_status {
                     Status::Invalid => (Status::Invalid, d, true),
                     Status::Present => (Status::Present, None, true),
@@ -422,7 +451,13 @@ impl SstInspector {
             return (Status::Invalid, Some(Diagnostic::new(CheckKind::Handle, None, Trust::Untrusted, rec, format!("block handle offset {} size {} overflows", h.offset, h.size))));
         };
         if end > self.r.len() {
-            return (Status::Truncated, Some(Diagnostic::new(CheckKind::Truncation, span, Trust::Untrusted, rec, format!("block handle offset {} size {} runs past file end {}", h.offset, h.size, self.r.len())).values(Some(DV::U64(end)), Some(DV::U64(self.r.len())))));
+            return (
+                Status::Truncated,
+                Some(
+                    Diagnostic::new(CheckKind::Truncation, span, Trust::Untrusted, rec, format!("block handle offset {} size {} runs past file end {}", h.offset, h.size, self.r.len()))
+                        .values(Some(DV::U64(end)), Some(DV::U64(self.r.len()))),
+                ),
+            );
         }
         if h.size > MAX_DECOMPRESSED {
             return (Status::Limited, Some(Diagnostic::new(CheckKind::Limit, span, Trust::Partial, rec, format!("block of {} bytes exceeds the {} byte cap", h.size, MAX_DECOMPRESSED))));
@@ -439,7 +474,10 @@ impl SstInspector {
                     Some(c) if stored.wrapping_sub(modifier) == c => (Status::Present, None),
                     Some(c) => (
                         Status::Invalid,
-                        Some(Diagnostic::new(footer::checksum_check(ct), span, Trust::Untrusted, "entries are still decoded for inspection but are not trusted", "Block checksum MISMATCH").values(Some(DV::U32(c.wrapping_add(modifier))), Some(DV::U32(stored)))),
+                        Some(
+                            Diagnostic::new(footer::checksum_check(ct), span, Trust::Untrusted, "entries are still decoded for inspection but are not trusted", "Block checksum MISMATCH")
+                                .values(Some(DV::U32(c.wrapping_add(modifier))), Some(DV::U32(stored))),
+                        ),
                     ),
                     None => (Status::Unknown, None),
                 }
@@ -487,7 +525,7 @@ impl SstInspector {
     }
 
     /// Data block handles in index order, starting at `skip`, at most `max`. Returns (handles, more).
-    pub fn data_handles(&mut self, skip: u64, max: usize, cancel: &dyn Fn() -> bool) -> (Vec<(Handle, Vec<u8>)>, bool, Option<String>) {
+    pub fn data_handles(&mut self, skip: u64, max: usize, cancel: &dyn Fn() -> bool) -> DataHandles {
         let Some(ih) = self.index_handle() else { return (Vec::new(), false, Some("no index handle".into())) };
         let mut out = Vec::new();
         let mut seen = 0u64;
@@ -558,5 +596,30 @@ mod tests {
         let s = SstInspector::from_reader(Box::new(MemReader::new(vec![0u8; 20])), PathBuf::new());
         assert!(s.footer.is_err());
         assert!(s.meta.is_err());
+    }
+
+    /// 0017 D4: a cached block that both mismatches its checksum and fails decompression pairs
+    /// the error's status with the error's diagnostic (not the checksum one pushed first).
+    #[test]
+    fn cached_failed_block_pairs_status_with_the_error_diagnostic() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sst-zstd/data.sst");
+        let orig = std::fs::read(&p).unwrap();
+        let (hs, _, _) = SstInspector::open(RangeReader::open(&p).unwrap()).data_handles(0, 1, &|| false);
+        let h = hs[0].0;
+        // Flip one contents byte at a time until the block fails both checks (deterministic).
+        let found = (8..h.size).find_map(|k| {
+            let mut bytes = orig.clone();
+            bytes[(h.offset + k) as usize] ^= 0xFF;
+            let mut s = SstInspector::from_reader(Box::new(MemReader::new(bytes)), p.clone());
+            let b = s.block(h, BlockKind::Data);
+            (b.error.is_some() && b.checksum_status == Status::Invalid).then_some((s, b))
+        });
+        let (mut s, b) = found.expect("a ZSTD contents flip that fails checksum and decompression");
+        let err = b.error_diagnostic().cloned().expect("error diagnostic");
+        assert_ne!(b.diags.first(), Some(&err), "fixture: the checksum diagnostic comes first");
+        let (st, d) = s.block_check(h);
+        assert_eq!(st, b.error.as_ref().unwrap().0);
+        assert_eq!(d.as_ref(), Some(&err), "status and diagnostic come from the same problem");
+        assert_eq!(s.checked_result(h).and_then(|r| r.1), Some(&err));
     }
 }

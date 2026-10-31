@@ -84,11 +84,7 @@ pub fn read(ctx: &egui::Context, st: &AppState, menu_owns_accelerators: bool, se
             cmd_minus: c && p(K::Minus),
             cmd_0: c && !a && p(K::Num0),
             shift_cmd_r: c && s && p(K::R),
-            alt_cmd_digit: if c && a && !s {
-                [(K::Num1, 1), (K::Num2, 2), (K::Num3, 3)].into_iter().find(|(k, _)| p(*k)).map(|(_, d)| d)
-            } else {
-                None
-            },
+            alt_cmd_digit: if c && a && !s { [(K::Num1, 1), (K::Num2, 2), (K::Num3, 3)].into_iter().find(|(k, _)| p(*k)).map(|(_, d)| d) } else { None },
         }
     });
     map(&k, st, menu_owns_accelerators)
@@ -122,7 +118,10 @@ pub fn map(k: &Keys, st: &AppState, menu_owns_accelerators: bool) -> Vec<Action>
     if k.nav {
         let has_rows = st.session().view().map(|v| !v.rows.is_empty()).unwrap_or(false);
         if has_rows {
-            let m = [(k.up, RowMove::Up), (k.down, RowMove::Down), (k.pgup, RowMove::PageUp), (k.pgdn, RowMove::PageDown), (k.home, RowMove::Home), (k.end, RowMove::End)].into_iter().find(|x| x.0).map(|x| x.1);
+            let m = [(k.up, RowMove::Up), (k.down, RowMove::Down), (k.pgup, RowMove::PageUp), (k.pgdn, RowMove::PageDown), (k.home, RowMove::Home), (k.end, RowMove::End)]
+                .into_iter()
+                .find(|x| x.0)
+                .map(|x| x.1);
             if let Some(m) = m {
                 acts.push(Action::MoveRow(m));
             }

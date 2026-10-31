@@ -209,38 +209,76 @@ impl BlockKind {
     }
 }
 
+/// Result of locating a byte: (node that holds it, "select the narrowest field at this
+/// offset", structure span when no field applies).
+pub type Located = (NodeKind, Option<(Space, u64)>, Option<Span>);
+
 /// Lazy tree node identity. Children/views are computed on demand from the file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Root,
     // ---- log format (WAL and MANIFEST) ----
     /// Physical blocks [first, first+count).
-    LogBlocks { first: u64, count: u64 },
+    LogBlocks {
+        first: u64,
+        count: u64,
+    },
     LogBlock(u64),
     LogFragment(u64),
     /// Page of logical records starting at a file offset that begins a record.
-    LogRecords { start: u64, page: u32 },
+    LogRecords {
+        start: u64,
+        page: u32,
+    },
     LogRecord(u64),
     /// One WriteBatch operation inside a logical record.
-    WalOp { rec: u64, idx: u32 },
+    WalOp {
+        rec: u64,
+        idx: u32,
+    },
     /// Observed LSM view built from MANIFEST VersionEdits.
     ManifestLevels,
     /// CURRENT pointing to a MANIFEST.
     CurrentFile,
     // ---- SST ----
     SstFooter,
-    SstBlock { off: u64, size: u64, kind: BlockKind },
-    SstRestarts { off: u64, size: u64, kind: BlockKind },
-    SstTrailer { off: u64, size: u64, kind: BlockKind },
-    SstEntry { off: u64, size: u64, kind: BlockKind, idx: u32 },
+    SstBlock {
+        off: u64,
+        size: u64,
+        kind: BlockKind,
+    },
+    SstRestarts {
+        off: u64,
+        size: u64,
+        kind: BlockKind,
+    },
+    SstTrailer {
+        off: u64,
+        size: u64,
+        kind: BlockKind,
+    },
+    SstEntry {
+        off: u64,
+        size: u64,
+        kind: BlockKind,
+        idx: u32,
+    },
     /// Page of data blocks enumerated through the index (`skip` handles skipped).
-    SstDataBlocks { skip: u64 },
+    SstDataBlocks {
+        skip: u64,
+    },
     SstProperties,
     /// Bytes between two known structures that no structure accounts for, [start, end).
-    SstGap { start: u64, end: u64 },
+    SstGap {
+        start: u64,
+        end: u64,
+    },
     /// Run of `count` physical layout items starting at item `first` (data blocks in file
     /// order, grouped because there are many).
-    SstLayoutGroup { first: u64, count: u64 },
+    SstLayoutGroup {
+        first: u64,
+        count: u64,
+    },
     /// Table of every physical structure in file order (Start | End | Stored | Contents …).
     SstLayout,
     /// Diagnostic text file (LOG, OPTIONS): raw bounded preview only.
@@ -494,11 +532,7 @@ impl Fact {
         self
     }
     pub fn diag_if(self, cond: bool, d: impl FnOnce() -> Diagnostic) -> Self {
-        if cond {
-            self.diag(d())
-        } else {
-            self
-        }
+        if cond { self.diag(d()) } else { self }
     }
     pub fn enc(mut self, e: impl Into<String>) -> Self {
         self.encoding = e.into();

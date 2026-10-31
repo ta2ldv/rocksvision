@@ -95,11 +95,7 @@ pub fn check_label(c: CheckKind) -> &'static str {
 /// record-completeness finding ("no LAST fragment"); "File length (truncation)" stays for bytes
 /// cut by the end of file (the cut-fragment variant expects a payload length, not a type).
 pub fn diag_check_label(d: &Diagnostic) -> &'static str {
-    if is_open_at_eof(d) && matches!(d.expected, Some(DecodedValue::Text(_))) {
-        "Record completeness (no LAST fragment)"
-    } else {
-        check_label(d.check)
-    }
+    if is_open_at_eof(d) && matches!(d.expected, Some(DecodedValue::Text(_))) { "Record completeness (no LAST fragment)" } else { check_label(d.check) }
 }
 
 /// Short phrase for a node summary line.
@@ -177,7 +173,8 @@ pub fn trust_text(d: &Diagnostic) -> String {
 /// The Diagnosis grid of one Invalid/Truncated element. Lines without a recorded value say so.
 pub fn diagnosis(status: Status, d: Option<&Diagnostic>) -> Diagnosis {
     let mut lines = Vec::new();
-    let mut line = |label: &'static str, text: String, link: Option<Span>| lines.push(DiagLine { label, text, link, prose: matches!(label, "Finding" | "Decoded content" | RECOVERY_LABEL | ENGINE_LABEL) });
+    let mut line =
+        |label: &'static str, text: String, link: Option<Span>| lines.push(DiagLine { label, text, link, prose: matches!(label, "Finding" | "Decoded content" | RECOVERY_LABEL | ENGINE_LABEL) });
     match d {
         Some(d) => {
             line("Check", diag_check_label(d).into(), None);
@@ -255,11 +252,7 @@ impl NodeFailure {
             None => "Invalid",
         };
         let at = self.diag.as_ref().and_then(|d| d.span).map(|s| format!(" at {}", at(&s))).unwrap_or_default();
-        if self.name.is_empty() {
-            format!("{phrase}{at}")
-        } else {
-            format!("{phrase}{at} ({})", self.name)
-        }
+        if self.name.is_empty() { format!("{phrase}{at}") } else { format!("{phrase}{at} ({})", self.name) }
     }
 }
 
@@ -272,7 +265,13 @@ fn is_failure(s: Status) -> bool {
 pub fn node_failures(view: &View, node_status: Option<Status>, node_diag: Option<&Diagnostic>) -> Vec<NodeFailure> {
     // Untrusted rows (decoded from a checksum-failed block) repeat the block's own failure,
     // which the view diagnostics already carry once.
-    let mut out: Vec<NodeFailure> = view.rows.iter().enumerate().filter(|(_, r)| is_failure(r.field.status) && !r.field.untrusted).map(|(i, r)| NodeFailure { row: Some(i), status: r.field.status, name: r.field.name.clone(), diag: r.field.diag.as_deref().cloned() }).collect();
+    let mut out: Vec<NodeFailure> = view
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| is_failure(r.field.status) && !r.field.untrusted)
+        .map(|(i, r)| NodeFailure { row: Some(i), status: r.field.status, name: r.field.name.clone(), diag: r.field.diag.as_deref().cloned() })
+        .collect();
     let status = view.status.or(node_status).filter(|s| is_failure(*s)).unwrap_or(Status::Invalid);
     let extra = view.diagnostics.iter().chain(node_diag);
     for d in extra {
@@ -435,7 +434,7 @@ mod tests {
     /// (fragment cut at EOF)". The valid fragmented control has no marker and no failure.
     #[test]
     fn wal_record_without_last_is_diagnosed() {
-        use crate::format::log::{open_tail, Reassembly, ENGINE_OPEN_AT_EOF, RECOVER_OPEN_AT_EOF};
+        use crate::format::log::{ENGINE_OPEN_AT_EOF, RECOVER_OPEN_AT_EOF, Reassembly, open_tail};
         let mut i = crate::inspect::open(&fx("tests/fixtures/corrupt/wal-missing-last.log")).unwrap();
         let root = i.children(&NodeKind::Root, &|| false);
         assert_eq!((root[0].contains, root[0].status), (None, Status::Present), "intact fragments: plain Physical blocks: {:?}", root[0]);
@@ -486,7 +485,11 @@ mod tests {
         // Record table: reassembly column, never "ok"; the fragments' CRCs all match.
         let page = i.view(&NodeKind::LogRecords { start: 0x3f48, page: 1 }, &|| false);
         let row = page.rows.iter().find(|r| r.field.span.map(|s| s.offset) == Some(0x5eec)).unwrap();
-        assert!(row.cells.contains(&"incomplete (no LAST)".to_string()) && row.cells.contains(&"all match".to_string()) && row.cells.last().map(String::as_str) == Some("✂ Incomplete (no LAST)"), "{:?}", row.cells);
+        assert!(
+            row.cells.contains(&"incomplete (no LAST)".to_string()) && row.cells.contains(&"all match".to_string()) && row.cells.last().map(String::as_str) == Some("✂ Incomplete (no LAST)"),
+            "{:?}",
+            row.cells
+        );
         assert!(page.rows.iter().all(|r| !r.cells.contains(&"ok".to_string())));
         // Bounded scan: one block back finds only the last MIDDLE, the start stays unknown.
         let rr = crate::io::RangeReader::open(&fx("tests/fixtures/corrupt/wal-missing-last.log")).unwrap();

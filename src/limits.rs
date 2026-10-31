@@ -97,14 +97,5 @@ pub struct Limits {
     pub history: usize,
 }
 
-pub const LIMITS: &Limits = &Limits {
-    hex_bytes_per_row: 16,
-    hex_page_bytes: 64 * 1024,
-    interp_bytes: 64,
-    copy_cap: 64 * 1024,
-    page_rows: 20,
-    change_check_secs: 2,
-    busy_repaint_ms: 100,
-    max_io_inflight: 16,
-    history: 200,
-};
+pub const LIMITS: &Limits =
+    &Limits { hex_bytes_per_row: 16, hex_page_bytes: 64 * 1024, interp_bytes: 64, copy_cap: 64 * 1024, page_rows: 20, change_check_secs: 2, busy_repaint_ms: 100, max_io_inflight: 16, history: 200 };

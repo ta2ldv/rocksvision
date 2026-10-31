@@ -14,15 +14,15 @@ mod search;
 use crate::discover::DirEntry;
 use crate::model::{Child, NodeKind, Space, Span, View};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::SystemTime;
 
 #[cfg(feature = "harness")]
 pub use io_pool::DelayBackend;
 pub use io_pool::{FsBackend, IoBackend, REFUSED};
-pub use search::{parse_query, search_file, SEARCH_CHUNK};
+pub use search::{SEARCH_CHUNK, parse_query, search_file};
 
 /// What a view request shows: a node, or the structure holding a byte (resolved by the worker).
 #[derive(Clone, Debug, PartialEq)]
@@ -50,13 +50,29 @@ pub struct SelectHint {
 /// Decode-worker requests.
 pub enum Request {
     Open(PathBuf),
-    Children { node: u64, kind: NodeKind },
+    Children {
+        node: u64,
+        kind: NodeKind,
+    },
     /// View of a node or located byte; `reveal` also returns the canonical tree path.
-    View { target: ViewTarget, reveal: bool },
+    View {
+        target: ViewTarget,
+        reveal: bool,
+    },
     /// A hex page of a derived (decompressed/reassembled) space.
-    Bytes { space: Space, off: u64, len: u64 },
+    Bytes {
+        space: Space,
+        off: u64,
+        len: u64,
+    },
     /// Copy-hex of derived bytes for selection `sel`; `requested` is the selection length.
-    CopyBytes { sel: u64, space: Space, off: u64, len: u64, requested: u64 },
+    CopyBytes {
+        sel: u64,
+        space: Space,
+        off: u64,
+        len: u64,
+        requested: u64,
+    },
 }
 
 /// Result of a background job: done, failed with a message, or cancelled before completion.
@@ -68,24 +84,70 @@ pub enum Outcome<T> {
 }
 
 pub enum Response {
-    Opened { label: String, children: Vec<Child>, file_len: u64, mtime: Option<SystemTime> },
+    Opened {
+        label: String,
+        children: Vec<Child>,
+        file_len: u64,
+        mtime: Option<SystemTime>,
+    },
     OpenFailed(String),
     /// `error`: decoding the children failed (the node is marked Invalid).
-    Children { node: u64, children: Vec<Child>, error: Option<String> },
+    Children {
+        node: u64,
+        children: Vec<Child>,
+        error: Option<String>,
+    },
     /// `req` is the job id (matched by the session), `target` echoes the request; `kind` is the
-    /// node shown (None: nothing located, or a superseded request).
-    View { req: u64, target: ViewTarget, kind: Option<NodeKind>, view: View, reveal: Option<Reveal>, select: Option<SelectHint> },
+    /// node shown (None: nothing located, or a superseded request). `view` is boxed so the
+    /// frequent small responses (search progress, pages) do not carry its size.
+    View {
+        req: u64,
+        target: ViewTarget,
+        kind: Option<NodeKind>,
+        view: Box<View>,
+        reveal: Option<Reveal>,
+        select: Option<SelectHint>,
+    },
     /// A hex page (`data`, total size of the space).
-    Page { req: u64, space: Space, off: u64, outcome: Outcome<(Vec<u8>, u64)> },
+    Page {
+        req: u64,
+        space: Space,
+        off: u64,
+        outcome: Outcome<(Vec<u8>, u64)>,
+    },
     /// Clipboard text + status note for selection id `sel`.
-    Copied { req: u64, sel: u64, outcome: Outcome<(String, String)> },
+    Copied {
+        req: u64,
+        sel: u64,
+        outcome: Outcome<(String, String)>,
+    },
     /// Answer of `IoRequest::Resolve`: is the path a folder (true) or a file (false)?
-    Resolved { req: u64, path: PathBuf, outcome: Outcome<bool> },
-    Scanned { req: u64, dir: PathBuf, outcome: Outcome<(Vec<DirEntry>, bool)> },
-    Stat { req: u64, outcome: Outcome<(u64, Option<SystemTime>)> },
-    SearchProgress { done: u64, total: u64 },
-    SearchHit { off: u64, len: u64 },
-    SearchDone { found: bool, cancelled: bool },
+    Resolved {
+        req: u64,
+        path: PathBuf,
+        outcome: Outcome<bool>,
+    },
+    Scanned {
+        req: u64,
+        dir: PathBuf,
+        outcome: Outcome<(Vec<DirEntry>, bool)>,
+    },
+    Stat {
+        req: u64,
+        outcome: Outcome<(u64, Option<SystemTime>)>,
+    },
+    SearchProgress {
+        done: u64,
+        total: u64,
+    },
+    SearchHit {
+        off: u64,
+        len: u64,
+    },
+    SearchDone {
+        found: bool,
+        cancelled: bool,
+    },
 }
 
 pub struct Tagged<T> {
@@ -107,8 +169,15 @@ pub enum IoRequest {
     Resolve(PathBuf),
     Scan(PathBuf),
     /// Physical file page (`Response::Page` with `Space::File`).
-    Page { path: PathBuf, off: u64, len: u64 },
-    Copy { sel: u64, job: CopyJob },
+    Page {
+        path: PathBuf,
+        off: u64,
+        len: u64,
+    },
+    Copy {
+        sel: u64,
+        job: CopyJob,
+    },
     Stat(PathBuf),
 }
 
@@ -163,7 +232,20 @@ impl Worker {
         let busy = Arc::new(AtomicU64::new(0));
         let latest_view = Arc::new(AtomicU64::new(0));
         decode::spawn(rx_req, resp_tx.clone(), cancel.clone(), latest_view.clone(), busy.clone(), wake.clone());
-        Worker { tx, rx, resp_tx, cancel_upto: cancel, next_job: AtomicU64::new(0), latest_view, scan_cancel_upto: Arc::new(AtomicU64::new(0)), busy, io_inflight: Arc::new(AtomicUsize::new(0)), search_id: Arc::new(AtomicU64::new(0)), wake, backend }
+        Worker {
+            tx,
+            rx,
+            resp_tx,
+            cancel_upto: cancel,
+            next_job: AtomicU64::new(0),
+            latest_view,
+            scan_cancel_upto: Arc::new(AtomicU64::new(0)),
+            busy,
+            io_inflight: Arc::new(AtomicUsize::new(0)),
+            search_id: Arc::new(AtomicU64::new(0)),
+            wake,
+            backend,
+        }
     }
 
     fn next_id(&self) -> u64 {

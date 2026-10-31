@@ -1,7 +1,7 @@
 //! Malformed / truncated / corrupt input: no panics, honest statuses.
 mod common;
 use common::*;
-use rocksvision::dump::{dump, DumpOpts};
+use rocksvision::dump::{DumpOpts, dump};
 use rocksvision::inspect;
 use rocksvision::model::{BlockKind, NodeKind, Status};
 use rocksvision::sst::SstInspector;
@@ -190,7 +190,16 @@ fn nonexistent_and_text_files_error_without_panic() {
     let w = rocksvision::wal::log::read_logical(&rd_abs(&d.join("fake.log")), 0, 1 << 20).unwrap();
     assert_ne!(w.status, Status::Present, "text read as a Present WAL record");
     // empty files and tiny files
-    for (name, bytes) in [("empty.sst", vec![]), ("empty.log", vec![]), ("one.sst", vec![1u8]), ("tiny.log", vec![0u8; 5]), ("zeros.log", vec![0u8; 40000]), ("zeros.sst", vec![0u8; 100]), ("MANIFEST-000001", vec![]), ("CURRENT", vec![])] {
+    for (name, bytes) in [
+        ("empty.sst", vec![]),
+        ("empty.log", vec![]),
+        ("one.sst", vec![1u8]),
+        ("tiny.log", vec![0u8; 5]),
+        ("zeros.log", vec![0u8; 40000]),
+        ("zeros.sst", vec![0u8; 100]),
+        ("MANIFEST-000001", vec![]),
+        ("CURRENT", vec![]),
+    ] {
         let p = d.join(name);
         std::fs::write(&p, bytes).unwrap();
         let (_, _t) = dump_text(&p);
@@ -206,7 +215,13 @@ fn rd_abs(p: &Path) -> rocksvision::io::RangeReader {
 #[test]
 fn truncation_and_bitflip_sweeps_never_panic() {
     let d = scratch("sweep");
-    for (src, name, step) in [("sst-variants/mixed-kinds.sst", "m.sst", 1usize), ("wal-basic/000004.log", "w.log", 1), ("wal-recycled/000011.log", "r.log", 3), ("db-levels/MANIFEST-000005", "MANIFEST-000005", 7), ("sst-variants/rangedel.sst", "rd.sst", 1)] {
+    for (src, name, step) in [
+        ("sst-variants/mixed-kinds.sst", "m.sst", 1usize),
+        ("wal-basic/000004.log", "w.log", 1),
+        ("wal-recycled/000011.log", "r.log", 3),
+        ("db-levels/MANIFEST-000005", "MANIFEST-000005", 7),
+        ("sst-variants/rangedel.sst", "rd.sst", 1),
+    ] {
         let data = std::fs::read(fx(src)).unwrap();
         let p = d.join(name);
         let mut n = 0;
@@ -247,9 +262,15 @@ fn oversized_logical_record_is_resource_limited() {
         let room = 32768 - (f.len() % 32768);
         assert!(room >= 7);
         let n = left.min(room - 7);
-        let ty: u8 = if first { if n == left { 1 } else { 2 } } else if n == left { 4 } else { 3 };
+        let ty: u8 = if first {
+            if n == left { 1 } else { 2 }
+        } else if n == left {
+            4
+        } else {
+            3
+        };
         let mut crc_in = vec![ty];
-        crc_in.extend(std::iter::repeat(0u8).take(n));
+        crc_in.extend(std::iter::repeat_n(0u8, n));
         let crc = rocksvision::util::crc_mask(rocksvision::util::crc32c(&crc_in));
         f.extend_from_slice(&crc.to_le_bytes());
         f.extend_from_slice(&(n as u16).to_le_bytes());

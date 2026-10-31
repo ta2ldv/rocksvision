@@ -69,21 +69,12 @@ struct Cur<'a> {
 
 impl Cur<'_> {
     fn fail(&self) -> Status {
-        if self.clipped && self.pos >= self.d.len().saturating_sub(10) {
-            Status::Limited
-        } else {
-            Status::Truncated
-        }
+        if self.clipped && self.pos >= self.d.len().saturating_sub(10) { Status::Limited } else { Status::Truncated }
     }
     fn v32(&mut self, name: &str, kind: K, fields: &mut Vec<Fact>) -> Result<u32, Status> {
         let (v, n) = varint32(self.d, self.pos).ok_or_else(|| self.fail())?;
-        fields.push(
-            Fact::new(name, Some(Span::new(self.space, self.pos as u64, n as u64)), v.to_string())
-                .kind(kind)
-                .dv(DV::VarInt(u64::from(v)))
-                .raw(&self.d[self.pos..self.pos + n])
-                .enc("varint32"),
-        );
+        fields
+            .push(Fact::new(name, Some(Span::new(self.space, self.pos as u64, n as u64)), v.to_string()).kind(kind).dv(DV::VarInt(u64::from(v))).raw(&self.d[self.pos..self.pos + n]).enc("varint32"));
         self.pos += n;
         Ok(v)
     }
@@ -96,12 +87,10 @@ impl Cur<'_> {
             let b = self.d[s.min(self.d.len())..].to_vec();
             let span = Span::new(self.space, s as u64, have as u64);
             fields.push(
-                Fact::new(name, Some(span), format!("{} (first {have} of {len} bytes)", bytes_preview(&b, 64)))
-                    .kind(kind)
-                    .raw(&b)
-                    .bytes(&b)
-                    .status(Status::Limited)
-                    .diag(Diagnostic::new(CheckKind::Limit, Some(span), Trust::Partial, RECOVER_PREVIEW, format!("first {have} of {len} bytes kept")).values(Some(DV::U64(len as u64)), Some(DV::U64(have as u64)))),
+                Fact::new(name, Some(span), format!("{} (first {have} of {len} bytes)", bytes_preview(&b, 64))).kind(kind).raw(&b).bytes(&b).status(Status::Limited).diag(
+                    Diagnostic::new(CheckKind::Limit, Some(span), Trust::Partial, RECOVER_PREVIEW, format!("first {have} of {len} bytes kept"))
+                        .values(Some(DV::U64(len as u64)), Some(DV::U64(have as u64))),
+                ),
             );
             self.pos = self.d.len();
             self.hit_limit = true;
@@ -113,21 +102,14 @@ impl Cur<'_> {
             let span = Span::new(self.space, s as u64, have as u64);
             let check = if st == Status::Limited { CheckKind::Limit } else { CheckKind::Truncation };
             fields.push(
-                Fact::new(name, Some(span), format!("needs {len} bytes, {have} available"))
-                    .kind(kind)
-                    .status(st)
-                    .diag(Diagnostic::new(check, Some(span), Trust::Partial, RECOVER_STOP, format!("needs {len} bytes, {have} available")).values(Some(DV::U64(len as u64)), Some(DV::U64(have as u64)))),
+                Fact::new(name, Some(span), format!("needs {len} bytes, {have} available")).kind(kind).status(st).diag(
+                    Diagnostic::new(check, Some(span), Trust::Partial, RECOVER_STOP, format!("needs {len} bytes, {have} available")).values(Some(DV::U64(len as u64)), Some(DV::U64(have as u64))),
+                ),
             );
             return Err(st);
         }
         let b = self.d[s..s + len].to_vec();
-        fields.push(
-            Fact::new(name, Some(Span::new(self.space, s as u64, len as u64)), bytes_preview(&b, 96))
-                .kind(kind)
-                .raw(&b)
-                .bytes(&b)
-                .enc("bytes (length-prefixed)"),
-        );
+        fields.push(Fact::new(name, Some(Span::new(self.space, s as u64, len as u64)), bytes_preview(&b, 96)).kind(kind).raw(&b).bytes(&b).enc("bytes (length-prefixed)"));
         self.pos += len;
         Ok(b)
     }
@@ -150,12 +132,8 @@ pub fn decode(data: &[u8], total_len: u64, space: Space, max_ops: usize) -> Batc
     let count = fixed32(data, 8).unwrap_or(0);
     b.seq = Some(seq);
     b.count = Some(count);
-    b.header.push(
-        Fact::new("sequence", Some(Span::new(space, 0, 8)), seq.to_string()).kind(K::Sequence).dv(DV::U64(seq)).raw(&data[0..8]).enc("fixed64 LE"),
-    );
-    b.header.push(
-        Fact::new("count", Some(Span::new(space, 8, 4)), count.to_string()).kind(K::Count).dv(DV::U32(count)).raw(&data[8..12]).enc("fixed32 LE"),
-    );
+    b.header.push(Fact::new("sequence", Some(Span::new(space, 0, 8)), seq.to_string()).kind(K::Sequence).dv(DV::U64(seq)).raw(&data[0..8]).enc("fixed64 LE"));
+    b.header.push(Fact::new("count", Some(Span::new(space, 8, 4)), count.to_string()).kind(K::Count).dv(DV::U32(count)).raw(&data[8..12]).enc("fixed32 LE"));
     let mut c = Cur { d: data, pos: HEADER, space, clipped, hit_limit: false };
     let mut seq_cursor = seq;
     let mut counted = 0u32;
@@ -167,11 +145,13 @@ pub fn decode(data: &[u8], total_len: u64, space: Space, max_ops: usize) -> Batc
         }
         let start = c.pos;
         let tag = data[start];
-        let mut fields = vec![Fact::new("tag", Some(Span::new(space, start as u64, 1)), format!("0x{tag:02x} {}", tag_name(tag)))
-            .kind(K::Tag)
-            .dv(DV::Enum { name: tag_name(tag), code: u64::from(tag) })
-            .raw(&data[start..start + 1])
-            .enc("u8 ValueType")];
+        let mut fields = vec![
+            Fact::new("tag", Some(Span::new(space, start as u64, 1)), format!("0x{tag:02x} {}", tag_name(tag)))
+                .kind(K::Tag)
+                .dv(DV::Enum { name: tag_name(tag), code: u64::from(tag) })
+                .raw(&data[start..start + 1])
+                .enc("u8 ValueType"),
+        ];
         c.pos += 1;
         let mut op = Op { idx, offset: start, end: start, tag, cf: None, key: None, value: None, seq: None, status: Status::Present, facts: Vec::new() };
         let res = decode_op(&mut c, tag, &mut op, &mut fields);
@@ -211,7 +191,10 @@ pub fn decode(data: &[u8], total_len: u64, space: Space, max_ops: usize) -> Batc
     if b.status == Status::Present && !clipped && b.note.is_empty() && counted != count {
         b.status = Status::Invalid;
         b.note = format!("header count {count} but {counted} sequence-consuming operations decoded");
-        b.diag = Some(Diagnostic::new(CheckKind::Count, Some(Span::new(space, 8, 4)), Trust::Untrusted, "all operations are listed; the header count is not trusted", b.note.clone()).values(Some(DV::U32(count)), Some(DV::U32(counted))));
+        b.diag = Some(
+            Diagnostic::new(CheckKind::Count, Some(Span::new(space, 8, 4)), Trust::Untrusted, "all operations are listed; the header count is not trusted", b.note.clone())
+                .values(Some(DV::U32(count)), Some(DV::U32(counted))),
+        );
     }
     if clipped && b.status == Status::Present {
         b.status = Status::Limited;
@@ -268,7 +251,13 @@ fn decode_op(c: &mut Cur, tag: u8, op: &mut Op, f: &mut Vec<Fact>) -> Result<(),
             let base = (c.pos - v.len()) as u64;
             if v.len() >= 8 {
                 let t = fixed64(&v, v.len() - 8).unwrap_or(0);
-                f.push(Fact::new("value", Some(Span::new(c.space, base, (v.len() - 8) as u64)), bytes_preview(&v[..v.len() - 8], 96)).kind(K::Value).raw(&v[..v.len() - 8]).bytes(&v[..v.len() - 8]).enc("bytes"));
+                f.push(
+                    Fact::new("value", Some(Span::new(c.space, base, (v.len() - 8) as u64)), bytes_preview(&v[..v.len() - 8], 96))
+                        .kind(K::Value)
+                        .raw(&v[..v.len() - 8])
+                        .bytes(&v[..v.len() - 8])
+                        .enc("bytes"),
+                );
                 // db/seqno_to_time_mapping.cc ParsePackedValueWithWriteTime: last 8 bytes.
                 f.push(Fact::new("write unix time", Some(Span::new(c.space, base + v.len() as u64 - 8, 8)), t.to_string()).kind(K::WriteTime).dv(DV::U64(t)).raw(&v[v.len() - 8..]).enc("fixed64 LE"));
                 op.value = Some(v[..v.len() - 8].to_vec());
@@ -307,7 +296,13 @@ fn decode_entity(v: &[u8], space: Space, base: u64, f: &mut Vec<Fact>) {
     f.push(Fact::new("  entity version", Some(Span::new(space, base, n1 as u64)), ver.to_string()).dv(DV::VarInt(u64::from(ver))).enc("varint32").raw(&v[..n1]));
     if ver != 1 {
         let note = format!("version {ver} layout not decoded");
-        f.push(Fact::new("  entity columns", None, note.clone()).status(Status::Unsupported).diag(Diagnostic::new(CheckKind::Unsupported, Some(Span::new(space, base, n1 as u64)), Trust::Partial, "the entity is shown as opaque bytes", note)));
+        f.push(Fact::new("  entity columns", None, note.clone()).status(Status::Unsupported).diag(Diagnostic::new(
+            CheckKind::Unsupported,
+            Some(Span::new(space, base, n1 as u64)),
+            Trust::Partial,
+            "the entity is shown as opaque bytes",
+            note,
+        )));
         return;
     }
     let Some((num, n2)) = varint32(v, n1) else { return };
@@ -325,7 +320,13 @@ fn decode_entity(v: &[u8], space: Space, base: u64, f: &mut Vec<Fact>) {
     for (name, ns, vs) in cols {
         let Some(val) = v.get(pos..pos + vs as usize) else {
             let span = Some(Span::new(space, base + pos as u64, (v.len() - pos.min(v.len())) as u64));
-            f.push(Fact::new("  column value", None, "value runs past entity").kind(K::EntityColumn).status(Status::Truncated).diag(Diagnostic::new(CheckKind::Truncation, span, Trust::Partial, "remaining columns are not listed", "value runs past entity")));
+            f.push(Fact::new("  column value", None, "value runs past entity").kind(K::EntityColumn).status(Status::Truncated).diag(Diagnostic::new(
+                CheckKind::Truncation,
+                span,
+                Trust::Partial,
+                "remaining columns are not listed",
+                "value runs past entity",
+            )));
             return;
         };
         f.push(

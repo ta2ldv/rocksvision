@@ -32,9 +32,9 @@ RocksVision incelenen veritabanını değiştirmez; repair, replay veya compacti
 
 ## UI ve temalar
 
-Bağımsız, ZSTD ile sıkıştırılmış bir SST: seçili kaydın **açılmış block byte’ları** vurgulanıyor.
+Varsayılan XCopy temasında, bağımsız ve ZSTD ile sıkıştırılmış bir SST: seçili çözülmüş kaydın **açılmış block byte’ları** vurgulanıyor (tam çözünürlüklü orijinal için görsele tıklayın; tüm orijinaller [screenshots/highres/](screenshots/highres/) altında):
 
-![Autistic temasında yapı ağacı, alanlar, byte görünümü ve açıklamalar](screenshots/autistic.png)
+[![Varsayılan XCopy temasında yapı ağacı, çözülmüş kayıt, açılmış block byte’ları ve açıklama](screenshots/xcopy.png)](screenshots/highres/xcopy_highres.png)
 
 ### Temalar
 
@@ -46,18 +46,18 @@ Bağımsız, ZSTD ile sıkıştırılmış bir SST: seçili kaydın **açılmı�
 | Matrix | Siyah zemin, lime yeşili terminal görünümü |
 | Amiga Workbench | Mavi zemin, beyaz yazı ve turuncu seçim |
 | Amiga Tool Style | Açık gri yüzeyler, koyu yazı ve mavi seçim |
-| XCopy | Siyah zemin, cyan ve sarı vurgular |
+| XCopy (varsayılan) | Siyah zemin, cyan ve sarı vurgular |
 | Wooden | Ahşap dokulu çerçeveler, pirinç tonları ve düz veri alanları |
 
-Altı temanın ekran görüntüleri:
+Altı temanın ekran görüntüleri (önizleme; her biri tam çözünürlüklü dosyasına bağlıdır):
 
 | Matrix | Amiga Workbench |
 |---|---|
-| ![Matrix teması](screenshots/matrix.png) | ![Amiga Workbench teması](screenshots/amiga-workbench.png) |
+| [![Matrix teması](screenshots/matrix.png)](screenshots/highres/matrix_highres.png) | [![Amiga Workbench teması](screenshots/amiga-workbench.png)](screenshots/highres/amiga-workbench_highres.png) |
 | **Amiga Tool Style** | **XCopy** |
-| ![Amiga Tool Style teması](screenshots/amiga-tool-style.png) | ![XCopy teması](screenshots/xcopy.png) |
+| [![Amiga Tool Style teması](screenshots/amiga-tool-style.png)](screenshots/highres/amiga-tool-style_highres.png) | [![XCopy teması](screenshots/xcopy.png)](screenshots/highres/xcopy_highres.png) |
 | **Wooden** | **Autistic** |
-| ![Wooden teması](screenshots/wooden.png) | ![Autistic teması](screenshots/autistic.png) |
+| [![Wooden teması](screenshots/wooden.png)](screenshots/highres/wooden_highres.png) | [![Autistic teması](screenshots/autistic.png)](screenshots/highres/autistic_highres.png) |
 
 ### Menüler
 
@@ -70,9 +70,9 @@ Altı temanın ekran görüntüleri:
 
 macOS’ta menüler sistem menü çubuğundadır; diğer platformlarda pencere içi menü kullanılır. Aşağıdaki görsel **View → Theme** menüsünü ve panel seçeneklerini gösterir:
 
-![macOS View menüsünden tema seçimi](screenshots/theme-menu.png)
+[![macOS View menüsünden tema seçimi](screenshots/theme-menu.png)](screenshots/highres/theme-menu_highres.png)
 
-![Taşlardan oluşan kedi gözü logosu ve TA2LDV imzalı About ekranı](screenshots/about.png)
+[![Taşlardan oluşan kedi gözü logosu ve TA2LDV imzalı About ekranı](screenshots/about.png)](screenshots/highres/about_highres.png)
 
 
 ## Kullanım
@@ -119,7 +119,7 @@ Bir satırı seçince byte aralığı vurgulanır; bir link veya handle’a çif
 
 Arama, mevcut tablonun çözümlenmiş hücrelerinde ve dosyanın saklanan byte’larında çalışır; bütün tabloları veya açılmış block’ları taramaz. **Hex bytes**, `4d 41 4e` gibi bir byte dizisi arar. Arama kutusunda **Enter** sonraki, **Shift+Enter** önceki eşleşmeye gider.
 
-**View** menüsünden tema, panel görünürlüğü ve zoom ayarlanır. **Reset View**, iç yerleşimi ve %100 zoom’u geri getirir; pencerenin boyutunu değiştirmez. **Help → RocksVision Help** arayüzü, **Keyboard Shortcuts** ise kısayolları açıklar. macOS’ta sistem menüleri, diğer platformlarda pencere içi menü kullanılır.
+**View** menüsünden tema, panel görünürlüğü ve zoom ayarlanır. Yazı boyutu (A− / A+) tüm yerleşimin hâlâ sığdığı en büyük zoom’a kadar çıkar: 1400×900’de %160, 900×700’de %120, 900×560’ta %100 (çalışan uygulamada, varsayılan XCopy temasıyla ölçüldü); o tavanda A+ devre dışıdır, daha büyük pencere tavanı yükseltir. “Checked”, bir block’un checksum ve trailer’ının doğrulandığı anlamına gelir: block’u açmak onu kontrol eder, ağaçta en fazla 64 block listelemek o block’ları okuyup kontrol eder; diğerleri “Not checked” yazar. **Reset View**, iç yerleşimi ve %100 zoom’u geri getirir; pencerenin boyutunu değiştirmez. **Help → RocksVision Help** arayüzü, **Keyboard Shortcuts** ise kısayolları açıklar. macOS’ta sistem menüleri, diğer platformlarda pencere içi menü kullanılır.
 
 ## Derleme
 

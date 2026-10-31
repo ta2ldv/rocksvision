@@ -27,7 +27,7 @@ use crate::app::{Action, AppState, Effect, Panel, ZoomFit};
 use crate::branding;
 use crate::limits::LIMITS;
 use eframe::egui;
-use layout::{side_max, Measured, LAYOUT};
+use layout::{LAYOUT, Measured, side_max};
 use menu::{MenuCmd, MenuNode};
 use panels::PanelMemory;
 use platform::Platform;
@@ -52,15 +52,22 @@ pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
             let mut app = App::new(AppState::new(worker), platform::native());
             // Preferences (theme id + zoom) live in eframe's per-user storage, never in inspected folders.
             let prefs = Prefs::load(|k| cc.storage.and_then(|s| s.get_string(k)));
-            let mut acts = vec![Action::SetTheme(theme::theme_by_id(&prefs.theme).id), Action::SetZoom(prefs.zoom)];
-            if let Some(p) = initial {
-                acts.push(Action::OpenPath(p));
-            }
-            app.dispatch(&cc.egui_ctx, acts);
+            app.dispatch(&cc.egui_ctx, startup_actions(&prefs, initial));
             app.sync_theme(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
+}
+
+/// Startup actions from the stored preferences. A saved valid theme id is kept; an unknown or
+/// empty id opens in `DEFAULT_THEME` (XCopy) through `theme_by_id`. The stored value is not
+/// rewritten here; on exit `save` stores the resolved id, as before.
+fn startup_actions(prefs: &Prefs, initial: Option<PathBuf>) -> Vec<Action> {
+    let mut acts = vec![Action::SetTheme(theme::theme_by_id(&prefs.theme).id), Action::SetZoom(prefs.zoom)];
+    if let Some(p) = initial {
+        acts.push(Action::OpenPath(p));
+    }
+    acts
 }
 
 struct App {
@@ -124,11 +131,11 @@ impl App {
     }
 
     fn about_logo(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        if self.logo.is_none() {
-            if let Ok(icon) = eframe::icon_data::from_png_bytes(branding::LOGO_PNG) {
-                let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
-                self.logo = Some(ctx.load_texture("about-logo", img, egui::TextureOptions::LINEAR));
-            }
+        if self.logo.is_none()
+            && let Ok(icon) = eframe::icon_data::from_png_bytes(branding::LOGO_PNG)
+        {
+            let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+            self.logo = Some(ctx.load_texture("about-logo", img, egui::TextureOptions::LINEAR));
         }
         self.logo.clone()
     }
@@ -163,7 +170,14 @@ pub(crate) fn measure_layout(ui: &egui::Ui, tok: &theme::Tokens, mem: &PanelMemo
         status_h: mem.status_h,
         // Overhead with the notes collapsed + header + 3 table rows (0015 F2): the ceiling and
         // the split keep them at the minimum height.
-        records_min_h: layout::records_min_h(mem.toolbar_row_h, ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y, tok.header_height(ui), rh, ui.spacing().item_spacing.y, ui.spacing().scroll.allocated_width()),
+        records_min_h: layout::records_min_h(
+            mem.toolbar_row_h,
+            ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y,
+            tok.header_height(ui),
+            rh,
+            ui.spacing().item_spacing.y,
+            ui.spacing().scroll.allocated_width(),
+        ),
         hex_groups: if ceiling { panels::hex::ceiling_groups(ui) } else { mem.hex.groups },
         hex_gap: ui.spacing().item_spacing.x,
         hex_line_h: mem.hex.line_h,
@@ -256,15 +270,11 @@ impl eframe::App for App {
             let x = rect.right() - sep.width / 2.0;
             ui.painter().line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], sep);
         } else {
-            egui::Panel::left(egui::Id::new("nav_strip"))
-                .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.border)))
-                .resizable(false)
-                .exact_size(strip)
-                .show(ui, |ui| {
-                    if panels::collapse_strip(ui, &self.tok, "Navigation", "▶", true, &menu::tip("Show Navigation", MenuCmd::TogglePanel(Panel::Navigation))) {
-                        acts.push(Action::TogglePanel(Panel::Navigation));
-                    }
-                });
+            egui::Panel::left(egui::Id::new("nav_strip")).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.border))).resizable(false).exact_size(strip).show(ui, |ui| {
+                if panels::collapse_strip(ui, &self.tok, "Navigation", "▶", true, &menu::tip("Show Navigation", MenuCmd::TogglePanel(Panel::Navigation))) {
+                    acts.push(Action::TogglePanel(Panel::Navigation));
+                }
+            });
             self.mem.left_w = 0.0;
         }
         self.dispatch(&ctx, std::mem::take(&mut acts));
@@ -283,15 +293,11 @@ impl eframe::App for App {
             let x = rect.left() + sep.width / 2.0;
             ui.painter().line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], sep);
         } else {
-            egui::Panel::right(egui::Id::new("explain_strip"))
-                .frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.border)))
-                .resizable(false)
-                .exact_size(strip)
-                .show(ui, |ui| {
-                    if panels::collapse_strip(ui, &self.tok, "Explanation", "◀", false, &menu::tip("Show Explanation", MenuCmd::TogglePanel(Panel::Explanation))) {
-                        acts.push(Action::TogglePanel(Panel::Explanation));
-                    }
-                });
+            egui::Panel::right(egui::Id::new("explain_strip")).frame(egui::Frame::new().fill(p.panel).stroke(egui::Stroke::new(1.0, p.border))).resizable(false).exact_size(strip).show(ui, |ui| {
+                if panels::collapse_strip(ui, &self.tok, "Explanation", "◀", false, &menu::tip("Show Explanation", MenuCmd::TogglePanel(Panel::Explanation))) {
+                    acts.push(Action::TogglePanel(Panel::Explanation));
+                }
+            });
             self.mem.right_w = 0.0;
         }
         self.mem.widths_default = widths_default;
@@ -388,11 +394,11 @@ impl App {
         ui.painter().line_segment([egui::pos2(handle_rect.left(), y), egui::pos2(handle_rect.right(), y)], egui::Stroke::new(if active { 2.0 } else { 1.0 }, if active { p.focus } else { p.border }));
         if resp.double_clicked() {
             acts.push(Action::ResetCenterSplit);
-        } else if resp.dragged() {
-            if let Some(pos) = resp.interact_pointer_pos() {
-                let h = (full.height() - handle).max(1.0);
-                acts.push(Action::SetCenterSplit(((pos.y - handle / 2.0 - full.top()) / h).clamp(0.0, 1.0)));
-            }
+        } else if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            let h = (full.height() - handle).max(1.0);
+            acts.push(Action::SetCenterSplit(((pos.y - handle / 2.0 - full.top()) / h).clamp(0.0, 1.0)));
         }
         ui.painter().rect_filled(hex_rect, 0.0, p.data);
         let mut hex_acts = Vec::new();
@@ -402,5 +408,38 @@ impl App {
         });
         acts.extend(hex_acts);
         acts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::prefs::{KEY_THEME, KEY_ZOOM};
+
+    /// Opens an app state with the given stored key/values, as `run` does at startup.
+    fn open_with(stored: &[(String, String)]) -> AppState {
+        let prefs = Prefs::load(|k| stored.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone()));
+        let mut st = AppState::idle_for_tests();
+        for a in startup_actions(&prefs, None) {
+            st.apply(a);
+        }
+        st
+    }
+
+    /// 0017 A: missing → XCopy, unknown → XCopy, saved Matrix survives store/load and reopen.
+    #[test]
+    fn startup_theme_default_fallback_and_saved_choice() {
+        assert_eq!(AppState::idle_for_tests().prefs().theme_id(), "xcopy");
+        assert_eq!(open_with(&[]).prefs().theme_id(), "xcopy");
+        let unknown = [(KEY_THEME.to_string(), "no-such-theme".to_string())];
+        assert_eq!(open_with(&unknown).prefs().theme_id(), "xcopy");
+        let saved = [(KEY_THEME.to_string(), "matrix".to_string()), (KEY_ZOOM.to_string(), "1".to_string())];
+        let st = open_with(&saved);
+        assert_eq!(st.prefs().theme_id(), "matrix");
+        let mut kv = Vec::new();
+        st.prefs().persisted().store(|k, v| kv.push((k.to_string(), v)));
+        assert!(kv.contains(&(KEY_THEME.to_string(), "matrix".to_string())));
+        assert_eq!(open_with(&kv).prefs().theme_id(), "matrix");
+        assert_eq!(theme::theme_by_id(open_with(&kv).prefs().theme_id()).name, "Matrix");
     }
 }

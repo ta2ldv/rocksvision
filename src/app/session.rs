@@ -209,11 +209,7 @@ impl DocumentSession {
         };
         let pos = list.iter().position(|&x| x == i)?;
         let ok = |x: &usize| self.nodes[*x].role != ChildRole::Absent;
-        if forward {
-            list[pos + 1..].iter().find(|x| ok(x)).copied()
-        } else {
-            list[..pos].iter().rev().find(|x| ok(x)).copied()
-        }
+        if forward { list[pos + 1..].iter().find(|x| ok(x)).copied() } else { list[..pos].iter().rev().find(|x| ok(x)).copied() }
     }
     pub fn can_go_back(&self) -> bool {
         !self.history.is_empty()
@@ -239,10 +235,10 @@ impl DocumentSession {
         if space == Space::File {
             return (FILE_SPACE_TITLE.into(), self.file_len);
         }
-        if let Some(v) = &self.view {
-            if let Some(s) = v.spaces.iter().find(|s| s.space == space) {
-                return (s.title.clone(), s.size);
-            }
+        if let Some(v) = &self.view
+            && let Some(s) = v.spaces.iter().find(|s| s.space == space)
+        {
+            return (s.title.clone(), s.size);
         }
         (space.label(), self.hex.size)
     }
@@ -389,7 +385,20 @@ impl DocumentSession {
     }
 
     fn add_node(&mut self, c: Child, depth: usize) -> usize {
-        self.nodes.push(TreeNode { label: c.label, kind: c.kind, status: c.status, leaf: c.leaf, depth, children: None, expanded: false, loading: false, diag: c.diag, contains: c.contains, role: c.role, checked: c.checked });
+        self.nodes.push(TreeNode {
+            label: c.label,
+            kind: c.kind,
+            status: c.status,
+            leaf: c.leaf,
+            depth,
+            children: None,
+            expanded: false,
+            loading: false,
+            diag: c.diag,
+            contains: c.contains,
+            role: c.role,
+            checked: c.checked,
+        });
         self.nodes.len() - 1
     }
 
@@ -414,7 +423,13 @@ impl DocumentSession {
             });
             let worst = members.iter().filter(|&&k| !self.nodes[k].unchecked()).map(|&k| self.nodes[k].shown_status()).max_by_key(|s| rank(*s)).unwrap_or(Status::Present);
             self.nodes[i].checked = Some((x, n));
-            self.nodes[i].status = if rank(worst) > 0 { worst } else if x == 0 { Status::Unknown } else { Status::Present };
+            self.nodes[i].status = if rank(worst) > 0 {
+                worst
+            } else if x == 0 {
+                Status::Unknown
+            } else {
+                Status::Present
+            };
             cur = self.nodes.iter().position(|p| p.children.as_deref().is_some_and(|c| c.contains(&i)));
         }
     }
@@ -566,10 +581,10 @@ impl DocumentSession {
     }
 
     pub(super) fn collapse_selected(&mut self) {
-        if let Some(n) = self.sel_node.and_then(|i| self.nodes.get_mut(i)) {
-            if n.expanded {
-                n.expanded = false;
-            }
+        if let Some(n) = self.sel_node.and_then(|i| self.nodes.get_mut(i))
+            && n.expanded
+        {
+            n.expanded = false;
         }
     }
 

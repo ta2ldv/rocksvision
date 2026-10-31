@@ -16,6 +16,10 @@ use std::time::SystemTime;
 pub trait RangeRead: Send + Sync {
     /// Size observed when the source was opened. All decoding is bounded by this.
     fn len(&self) -> u64;
+    /// The source had no bytes when it was opened.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// One positional read into `buf` (may return fewer bytes; 0 at end of data).
     fn read_at(&self, off: u64, buf: &mut [u8]) -> io::Result<usize>;
     /// Modification time observed when the source was opened.
@@ -33,10 +37,7 @@ pub type RangeReader = FileReader;
 /// past the end (caller reports Truncated). Refuses ranges above `MAX_READ`.
 pub fn read_vec(r: &dyn RangeRead, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     if len > MAX_READ {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("resource limit: refusing to read {len} bytes in one range (cap {MAX_READ})"),
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("resource limit: refusing to read {len} bytes in one range (cap {MAX_READ})")));
     }
     let size = r.len();
     if offset >= size {

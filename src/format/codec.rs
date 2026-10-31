@@ -67,10 +67,10 @@ pub fn decompress(t: u8, payload: &[u8], cfv: u32, dict: Option<&[u8]>) -> Resul
     } else {
         (None, payload)
     };
-    if let Some((v, _)) = size_prefix {
-        if v > cap {
-            return Err(DecompError::Limit(format!("declared uncompressed size {v} exceeds cap {cap}")));
-        }
+    if let Some((v, _)) = size_prefix
+        && v > cap
+    {
+        return Err(DecompError::Limit(format!("declared uncompressed size {v} exceeds cap {cap}")));
     }
     let declared = size_prefix.map(|x| x.0);
     let data = match t {
@@ -117,10 +117,10 @@ pub fn decompress(t: u8, payload: &[u8], cfv: u32, dict: Option<&[u8]>) -> Resul
         }
         t => return Err(DecompError::Unsupported(format!("compression type {} not built in", compression_name(t)))),
     };
-    if let Some(n) = declared {
-        if data.len() as u64 != n {
-            return Err(DecompError::Corrupt(format!("size mismatch: declared {n}, got {}", data.len())));
-        }
+    if let Some(n) = declared
+        && data.len() as u64 != n
+    {
+        return Err(DecompError::Corrupt(format!("size mismatch: declared {n}, got {}", data.len())));
     }
     Ok(Decompressed { data, size_prefix, declared_size: declared })
 }

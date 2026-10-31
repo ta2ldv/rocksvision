@@ -5,9 +5,9 @@
 //! table/block_based/data_block_hash_index.h (HASH_IDX = buckets(u8) + NUM_BUCK(u16)),
 //! table/format.cc (IndexValue::DecodeFrom: delta-encoded handles).
 
-use super::footer::{builtin_checksum, checksum_check, context_modifier, Footer, Handle, BLOCK_TRAILER};
+use super::footer::{BLOCK_TRAILER, Footer, Handle, builtin_checksum, checksum_check, context_modifier};
 use crate::format::codec::{self as compress, DecompError};
-use crate::io::{read_vec, RangeRead};
+use crate::io::{RangeRead, read_vec};
 use crate::limits::MAX_RESTARTS_READ;
 use crate::model::{CheckKind, DecodedValue as DV, Diagnostic, Space, Span, Status, Trust};
 use crate::util::{fixed16, fixed32, varint32, varsigned64};
@@ -56,11 +56,7 @@ impl Block {
     /// Span of contents bytes `[off, off+len)`: block-local (derived space) when the block was
     /// decompressed, file offsets otherwise.
     pub fn span(&self, off: usize, len: usize) -> Span {
-        if self.compressed {
-            Span::new(Space::Block(self.handle.offset), off as u64, len as u64)
-        } else {
-            Span::file(self.handle.offset + off as u64, len as u64)
-        }
+        if self.compressed { Span::new(Space::Block(self.handle.offset), off as u64, len as u64) } else { Span::file(self.handle.offset + off as u64, len as u64) }
     }
 }
 
@@ -85,7 +81,11 @@ pub(super) fn read_block(r: &dyn RangeRead, f: &Footer, h: Handle, cfv: u32, dic
     match end {
         Some(e) if e <= r.len() => {}
         _ => {
-            b.fail(Status::Truncated, Diagnostic::new(CheckKind::Truncation, whole, Trust::Untrusted, RECOVER_BLOCK, format!("block handle offset {} size {} runs past file end {}", h.offset, h.size, r.len())).values(end.map(DV::U64), Some(DV::U64(r.len()))));
+            b.fail(
+                Status::Truncated,
+                Diagnostic::new(CheckKind::Truncation, whole, Trust::Untrusted, RECOVER_BLOCK, format!("block handle offset {} size {} runs past file end {}", h.offset, h.size, r.len()))
+                    .values(end.map(DV::U64), Some(DV::U64(r.len()))),
+            );
             return b;
         }
     }
@@ -96,7 +96,10 @@ pub(super) fn read_block(r: &dyn RangeRead, f: &Footer, h: Handle, cfv: u32, dic
     let buf = match read_vec(r, h.offset, h.size + BLOCK_TRAILER) {
         Ok(x) if x.len() as u64 == h.size + BLOCK_TRAILER => x,
         Ok(x) => {
-            b.fail(Status::Truncated, Diagnostic::new(CheckKind::Truncation, whole, Trust::Untrusted, RECOVER_BLOCK, "short read").values(Some(DV::U64(h.size + BLOCK_TRAILER)), Some(DV::U64(x.len() as u64))));
+            b.fail(
+                Status::Truncated,
+                Diagnostic::new(CheckKind::Truncation, whole, Trust::Untrusted, RECOVER_BLOCK, "short read").values(Some(DV::U64(h.size + BLOCK_TRAILER)), Some(DV::U64(x.len() as u64))),
+            );
             return b;
         }
         Err(e) => {
@@ -341,12 +344,12 @@ pub(super) fn entries(d: &[u8], lay: &Layout, index: Option<IndexFmt>) -> (Vec<E
                     return (out, eerr(Status::Invalid, CheckKind::Length, start, format!("entry at 0x{start:x}: value length {v} past entries end")));
                 }
                 e.value_len = v as usize;
-                if let Some(ix) = idx {
-                    if let Some((h, n)) = Handle::decode(d, key_end) {
-                        let fk = if ix.first_key { first_key(d, key_end + n) } else { None };
-                        e.handle = Some((h, false, fk));
-                        prev_handle = Some(h);
-                    }
+                if let Some(ix) = idx
+                    && let Some((h, n)) = Handle::decode(d, key_end)
+                {
+                    let fk = if ix.first_key { first_key(d, key_end + n) } else { None };
+                    e.handle = Some((h, false, fk));
+                    prev_handle = Some(h);
                 }
             }
             (None, Some(ix)) => {

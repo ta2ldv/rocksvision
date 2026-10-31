@@ -32,9 +32,9 @@ RocksVision does not modify, repair, replay or compact the inspected database. I
 
 ## UI and themes
 
-A standalone ZSTD-compressed SST, with a decoded entry selected and its **decompressed block bytes** highlighted:
+The default XCopy theme on a standalone ZSTD-compressed SST, with a decoded entry selected and its **decompressed block bytes** highlighted (click any screenshot for the full-resolution original; all originals are under [screenshots/highres/](screenshots/highres/)):
 
-![RocksVision in the Autistic theme: structure, fields, bytes and explanation](screenshots/autistic.png)
+[![RocksVision in the default XCopy theme: structure tree, decoded entry, decompressed block bytes and explanation](screenshots/xcopy.png)](screenshots/highres/xcopy_highres.png)
 
 ### Themes
 
@@ -46,18 +46,18 @@ Choose a look from **View → Theme**. Changing the theme does not change the da
 | Matrix | Black background with lime-green terminal styling |
 | Amiga Workbench | Blue surfaces, white text and orange selection |
 | Amiga Tool Style | Light grey surfaces, dark text and blue selection |
-| XCopy | Black background with cyan and yellow accents |
+| XCopy (default) | Black background with cyan and yellow accents |
 | Wooden | Wood-textured chrome, brass accents and plain data surfaces |
 
-Screenshots of all six themes:
+Screenshots of all six themes (previews; each links to its full-resolution file):
 
 | Matrix | Amiga Workbench |
 |---|---|
-| ![Matrix theme](screenshots/matrix.png) | ![Amiga Workbench theme](screenshots/amiga-workbench.png) |
+| [![Matrix theme](screenshots/matrix.png)](screenshots/highres/matrix_highres.png) | [![Amiga Workbench theme](screenshots/amiga-workbench.png)](screenshots/highres/amiga-workbench_highres.png) |
 | **Amiga Tool Style** | **XCopy** |
-| ![Amiga Tool Style theme](screenshots/amiga-tool-style.png) | ![XCopy theme](screenshots/xcopy.png) |
+| [![Amiga Tool Style theme](screenshots/amiga-tool-style.png)](screenshots/highres/amiga-tool-style_highres.png) | [![XCopy theme](screenshots/xcopy.png)](screenshots/highres/xcopy_highres.png) |
 | **Wooden** | **Autistic** |
-| ![Wooden theme](screenshots/wooden.png) | ![Autistic theme](screenshots/autistic.png) |
+| [![Wooden theme](screenshots/wooden.png)](screenshots/highres/wooden_highres.png) | [![Autistic theme](screenshots/autistic.png)](screenshots/highres/autistic_highres.png) |
 
 ### Menus
 
@@ -70,9 +70,9 @@ Screenshots of all six themes:
 
 macOS uses the system menu bar; other platforms use an in-window menu. The following screenshot shows **View → Theme** and the panel controls:
 
-![Theme selection in the macOS View menu](screenshots/theme-menu.png)
+[![Theme selection in the macOS View menu](screenshots/theme-menu.png)](screenshots/highres/theme-menu_highres.png)
 
-![RocksVision About with the stone cat-eye logo and TA2LDV credit](screenshots/about.png)
+[![RocksVision About with the stone cat-eye logo and TA2LDV credit](screenshots/about.png)](screenshots/highres/about_highres.png)
 
 
 ## Usage
@@ -119,7 +119,7 @@ Select a row to highlight its bytes; click a byte to select the field that holds
 
 Search checks decoded cells of the current table and stored file bytes, not every decoded table or decompressed block. **Hex bytes** accepts a pattern such as `4d 41 4e`. In the search field, **Enter** advances and **Shift+Enter** goes back.
 
-Use **View** for themes, panel visibility and zoom. Text size (A− / A+) goes up to the largest zoom at which the whole layout still fits: 160 % at 1400×900 and 100 % at 900×560 (measured in the running app, default theme), 120 % at 900×700 by the layout measurement (to be confirmed in the running app). A+ is disabled at that ceiling; a larger window raises it. "Checked" means a block's checksum and trailer were verified: opening a block checks it, and listing up to 64 blocks in the tree reads and checks those blocks; the others say "Not checked". **Reset View** restores the internal layout and 100% zoom; it does not resize the window. **Help → RocksVision Help** explains the interface and **Keyboard Shortcuts** lists the keys. macOS uses native menus; other platforms have an in-window menu.
+Use **View** for themes, panel visibility and zoom. Text size (A− / A+) goes up to the largest zoom at which the whole layout still fits: 160 % at 1400×900, 120 % at 900×700 and 100 % at 900×560 (measured in the running app with the default XCopy theme; the same values with Autistic). A+ is disabled at that ceiling; a larger window raises it. "Checked" means a block's checksum and trailer were verified: opening a block checks it, and listing up to 64 blocks in the tree reads and checks those blocks; the others say "Not checked". **Reset View** restores the internal layout and 100% zoom; it does not resize the window. **Help → RocksVision Help** explains the interface and **Keyboard Shortcuts** lists the keys. macOS uses native menus; other platforms have an in-window menu.
 
 ## Build
 

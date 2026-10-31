@@ -2,10 +2,10 @@
 //! Reset View and the examples. Status meanings come from the shared legend; shortcuts are not
 //! repeated here (Help › Keyboard Shortcuts renders the one table).
 
-use super::{btn, status_meaning, strong, LEGEND};
+use super::{LEGEND, btn, status_meaning, strong};
 use crate::app::{Action, AppState};
 use crate::ui::layout::LAYOUT;
-use crate::ui::menu::{panel_keys, shortcut_text, tip, KeyLabels, MenuCmd, RESET_VIEW_TIP};
+use crate::ui::menu::{KeyLabels, MenuCmd, RESET_VIEW_TIP, panel_keys, shortcut_text, tip};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
 
@@ -14,7 +14,8 @@ const OPENING: &str = "Open Folder… reads a whole RocksDB directory (CURRENT, 
 const SEARCH: &str = "The search box finds text in the current table's decoded cells and in this file's stored bytes (not decompressed). Tick Hex bytes to search byte values such as 4d 41 4e. Enter: next match, Shift+Enter: previous.";
 const CHECKS: &str = "\"Checked\" means a block's checksum and trailer were verified. A block is checked when you open it. Listing up to 64 blocks in the tree reads and checks those blocks. Blocks not checked yet say \"Not checked\" and claim no status.";
 const LEVELS: &str = "LSM levels = which SST files sit at which level (MANIFEST); two-level index = index layout inside one SST.";
-const EXAMPLES: &str = "The repository's examples/ folder has ready databases under data/ (use Open Folder) and single files under files/ (use Open File). examples/README.md says what each one shows.";
+const EXAMPLES: &str =
+    "The repository's examples/ folder has ready databases under data/ (use Open Folder) and single files under files/ (use Open File). examples/README.md says what each one shows.";
 const KEYBOARD: &str = "All shortcuts: Help › Keyboard Shortcuts.";
 
 pub fn show(ctx: &egui::Context, st: &AppState, tok: &Tokens) -> Vec<Action> {
@@ -60,9 +61,5 @@ pub fn show(ctx: &egui::Context, st: &AppState, tok: &Tokens) -> Vec<Action> {
             }
         });
     });
-    if close || resp.should_close() {
-        vec![Action::CloseHelp]
-    } else {
-        Vec::new()
-    }
+    if close || resp.should_close() { vec![Action::CloseHelp] } else { Vec::new() }
 }

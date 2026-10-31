@@ -3,7 +3,7 @@
 //! three dialogs. `persisted()` is the subset stored per user (theme id + zoom). Mutators are
 //! visible to `app` only.
 
-use super::prefs::{Prefs, DEFAULT_THEME};
+use super::prefs::{DEFAULT_THEME, Prefs};
 use std::time::{Duration, Instant};
 
 /// How far the measured fit may fall below the current zoom before it is lowered (measurement

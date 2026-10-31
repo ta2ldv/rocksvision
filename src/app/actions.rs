@@ -94,7 +94,10 @@ pub enum Action {
     /// Go to a canonical structure (every link, reference node and location link): expand its
     /// ancestors, select and reveal its tree node, show its view, select `span` (or the
     /// target's row) there, move the byte view; Back returns.
-    Navigate { target: NodeKind, span: Option<Span> },
+    Navigate {
+        target: NodeKind,
+        span: Option<Span>,
+    },
     /// `]` / `[`: next / previous field of the current table in span order (one step).
     StepField(bool),
     /// `Shift+]` / `Shift+[`: next / previous sibling structure in tree order (one step).

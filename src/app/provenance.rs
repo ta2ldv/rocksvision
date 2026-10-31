@@ -188,7 +188,10 @@ mod tests {
         assert_eq!(file_ranges(Some(&v), &s), FileRanges::Contained { file: Span::file(0x5c9, 99), codec: "ZSTD".into() });
         assert!(exact_file_ranges(Some(&v), &s).is_empty());
         let w = where_lines(Some(&v), &s);
-        assert_eq!(w, vec!["Contained in compressed block: file [0x5c9,0x62c) 99 B (ZSTD); no byte-to-byte mapping to file offsets".to_string(), "Decompressed block offset: blk@0x5c9 +0x6d, 103 B".to_string()]);
+        assert_eq!(
+            w,
+            vec!["Contained in compressed block: file [0x5c9,0x62c) 99 B (ZSTD); no byte-to-byte mapping to file offsets".to_string(), "Decompressed block offset: blk@0x5c9 +0x6d, 103 B".to_string()]
+        );
         for off in 0x5c9..0x62c {
             assert_eq!(field_at(&v, Space::File, off), None, "file byte 0x{off:x} must not map into the decompressed block");
         }
