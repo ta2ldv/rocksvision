@@ -150,8 +150,12 @@ pub enum Response {
     },
 }
 
+/// A response with the generation of its request and the job id that answers it. Search
+/// replies (`SearchProgress`/`SearchHit`/`SearchDone`) are matched by `job` (0020 §5: the
+/// variants keep their shape for the integration tests; the id travels here).
 pub struct Tagged<T> {
     pub generation: u64,
+    pub job: u64,
     pub msg: T,
 }
 
@@ -179,16 +183,6 @@ pub enum IoRequest {
         job: CopyJob,
     },
     Stat(PathBuf),
-}
-
-/// Builds the clipboard text for a copy-hex of `data` (selection length `requested`).
-pub fn hex_copy_text(data: &[u8], requested: u64) -> (String, String) {
-    let note = if (data.len() as u64) < requested {
-        format!("Copied {} of {} bytes as hex (truncated: {} KiB copy cap / end of data)", data.len(), requested, crate::limits::LIMITS.copy_cap / 1024)
-    } else {
-        format!("Copied {} bytes as hex", data.len())
-    };
-    (crate::util::hex(data), note)
 }
 
 pub struct Worker {
@@ -304,8 +298,9 @@ impl Worker {
     }
 
     /// Searches the physical bytes of `path` for `needle`, forward from `from` (or backward),
-    /// in bounded chunks on a separate thread.
-    pub fn search(&self, generation: u64, path: PathBuf, needle: Vec<u8>, from: u64, backward: bool) {
-        search::spawn(self.search_id.clone(), self.resp_tx.clone(), self.wake.clone(), generation, path, needle, from, backward);
+    /// in bounded chunks on a separate thread. Supersedes any running search. Returns the
+    /// search's id, echoed as `Tagged::job` in its replies.
+    pub fn search(&self, generation: u64, path: PathBuf, needle: Vec<u8>, from: u64, backward: bool) -> u64 {
+        search::spawn(self.search_id.clone(), self.resp_tx.clone(), self.wake.clone(), generation, path, needle, from, backward)
     }
 }

@@ -128,6 +128,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                 }
                 let r = ui.add(egui::Button::selectable(is_sel, text).wrap_mode(if wrap { egui::TextWrapMode::Wrap } else { egui::TextWrapMode::Truncate }));
                 let tip = match (n.role, n.contains, n.checked) {
+                    _ if n.tally.is_some() => n.tally.map(|t| t.tooltip()).unwrap_or_default(),
                     (_, _, Some((0, _))) if unchecked && n.leaf => "Not checked: listed beyond this listing's check budget; it is checked when opened".to_string(),
                     (_, _, Some((0, _))) if unchecked => "Not checked: no member of this group was checked yet (expand it to check its blocks)".to_string(),
                     (_, _, Some((x, y))) if unchecked => format!("Not checked as a whole: {x} of {y} members checked, none with a problem; the others are checked when expanded or opened"),
@@ -135,7 +136,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                     (_, Some(c), _) if c != n.status => format!("{} · contains {} {} element(s)", n.status.label(), c.symbol(), c.label()),
                     _ => n.status.label().to_string(),
                 };
-                let r = r.on_hover_text(format!("{full}\n{tip}"));
+                // A table view node first says what it lists (0020 §5), then its status.
+                let r = match crate::app::provenance::view_tooltip(&n.kind).filter(|_| n.role == ChildRole::View) {
+                    Some(what) => r.on_hover_text(format!("{full}\n{what}\n{tip}")),
+                    None => r.on_hover_text(format!("{full}\n{tip}")),
+                };
                 if scroll_to == Some(i) {
                     // Vertical reveal only (the tree has no horizontal scrolling).
                     r.scroll_to_me(Some(egui::Align::Center));

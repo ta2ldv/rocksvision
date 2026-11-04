@@ -2,7 +2,8 @@
 //! requests of an older generation are skipped. A panic is answered with a Failed response of
 //! the same kind and job id.
 
-use super::{Outcome, Request, Response, Reveal, SelectHint, Tagged, ViewTarget, hex_copy_text};
+use super::{Outcome, Request, Response, Reveal, SelectHint, Tagged, ViewTarget};
+use crate::app::clipboard::hex_copy_text;
 use crate::inspect::{self, Inspector};
 use crate::model::{NodeKind, Space, Status, View};
 use std::sync::Arc;
@@ -46,7 +47,7 @@ pub(super) fn spawn(
                     resp.unwrap_or_else(|_| kind.failed(job, "internal decoder panic (reported instead of crashing)"))
                 };
                 busy.fetch_sub(1, Ordering::SeqCst);
-                let _ = rt.send(Tagged { generation: req_gen, msg });
+                let _ = rt.send(Tagged { generation: req_gen, job, msg });
                 wake();
             }
         })
@@ -168,6 +169,50 @@ fn handle(insp: &mut Option<Inspector>, job: u64, req: Request, cancel: &dyn Fn(
                 }
             };
             Response::Copied { req: job, sel, outcome }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// One request of every kind. The exhaustive `match` (no wildcard) makes a new `Request`
+    /// variant fail to compile here until it is listed (0020 §6).
+    fn all_requests() -> Vec<Request> {
+        let reqs = vec![
+            Request::Open(PathBuf::from("x.sst")),
+            Request::Children { node: 3, kind: NodeKind::Root },
+            Request::View { target: ViewTarget::Node(NodeKind::SstFooter), reveal: false },
+            Request::View { target: ViewTarget::Locate { space: Space::File, off: 9 }, reveal: true },
+            Request::Bytes { space: Space::Block(1), off: 16, len: 4 },
+            Request::CopyBytes { sel: 5, space: Space::Block(1), off: 0, len: 4, requested: 9 },
+        ];
+        for r in &reqs {
+            match r {
+                Request::Open(_) | Request::Children { .. } | Request::View { .. } | Request::Bytes { .. } | Request::CopyBytes { .. } => {}
+            }
+        }
+        reqs
+    }
+
+    /// Every decode request has a Failed reply of its own kind carrying its request id.
+    #[test]
+    fn every_request_fails_with_its_own_kind_and_req() {
+        for (i, r) in all_requests().iter().enumerate() {
+            let resp = DecodeKind::of(r).failed(7, "x");
+            let ok = match (r, &resp) {
+                (Request::Open(_), Response::OpenFailed(m)) => m == "x",
+                (Request::Children { node, .. }, Response::Children { node: n, children, error: Some(e) }) => node == n && children.is_empty() && e == "x",
+                (Request::View { target, .. }, Response::View { req: 7, target: t, kind, view, .. }) => {
+                    target == t && kind.is_some() == matches!(target, ViewTarget::Node(_)) && view.status == Some(Status::Invalid)
+                }
+                (Request::Bytes { space, off, .. }, Response::Page { req: 7, space: s, off: o, outcome: Outcome::Failed(_) }) => space == s && off == o,
+                (Request::CopyBytes { sel, .. }, Response::Copied { req: 7, sel: s, outcome: Outcome::Failed(_) }) => sel == s,
+                _ => false,
+            };
+            assert!(ok, "request #{i}: Failed reply of another kind or without its request id");
         }
     }
 }

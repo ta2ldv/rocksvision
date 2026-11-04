@@ -4,8 +4,8 @@
 
 use super::AppState as App;
 use super::*;
+use crate::app::clipboard::CopyReply;
 use crate::app::hex::{HexState, PageState};
-use crate::app::job_state::CopyReply;
 use crate::app::prefs as theme;
 use crate::jobs::{FsBackend, IoBackend, Outcome, Worker};
 use std::path::Path;
@@ -131,7 +131,7 @@ fn stale_copy_result_is_discarded() {
     let mut app = app_with(&gate);
     app.open_file(f);
     // The root view replaces the selection when it arrives; wait for it first.
-    pump(&mut app, "root view", |a| a.session().pending_view().is_none());
+    pump(&mut app, "root view", |a| a.navigation().pending_target().is_none());
     app.select_raw(Span::file(0, 4), "first");
     app.do_copy(CopyKind::Hex);
     // Selection changes while the delayed read is in flight.
@@ -139,7 +139,7 @@ fn stale_copy_result_is_discarded() {
     gate.release();
     let clip = pump(&mut app, "copy answered", |a| a.jobs().pending_copy().is_none());
     assert!(clip.is_empty(), "stale copy reached the clipboard: {clip:?}");
-    assert!(app.jobs().copy_note().contains("stale"), "note: {}", app.jobs().copy_note());
+    assert!(app.prefs().notice().contains("stale"), "note: {}", app.prefs().notice());
     // Control: an unchanged selection is copied.
     app.do_copy(CopyKind::Hex);
     let clip = pump(&mut app, "copy answered", |a| a.jobs().pending_copy().is_none());
@@ -158,9 +158,9 @@ fn stale_hex_page_discarded_after_file_switch() {
     let fast = write(&d.join("fast-b.log"), &[0xBBu8; 100]);
     let mut app = app_with(&gate);
     app.open_file(slow);
-    let PageState::Loading(r_slow) = app.session().hex().load.clone() else { panic!("expected Loading") };
+    let PageState::Loading(r_slow) = app.session().hex().load().clone() else { panic!("expected Loading") };
     app.open_file(fast);
-    assert!(matches!(app.session().hex().load, PageState::Loading(r) if r != r_slow));
+    assert!(matches!(app.session().hex().load(), PageState::Loading(r) if *r != r_slow));
     pump(&mut app, "fast page ready", |a| a.session().hex().page().is_some());
     gate.release();
     settle(&mut app);
@@ -183,7 +183,7 @@ fn delayed_scan_cancel_and_open_other_file() {
     assert!(!app.jobs().scanning());
     assert_eq!(app.session().dir_note(), "Folder scan cancelled");
     assert_eq!(app.busy_label(), None, "spinner left after cancel");
-    assert_eq!(app.session().hex().load, PageState::Idle);
+    assert_eq!(*app.session().hex().load(), PageState::Idle);
     // Opening another file works while the cancelled scan thread is still blocked.
     app.open_path(fast.clone());
     pump(&mut app, "other file bytes", |a| a.session().hex().page().is_some() && !a.jobs().scanning());
@@ -203,45 +203,45 @@ fn empty_failed_and_folder_only_never_spin() {
     let d = tmpdir("states");
     let empty = write(&d.join("empty.log"), b"");
     let mut app = app_with(&gate);
-    assert_eq!(app.session().hex().load, PageState::Idle);
+    assert_eq!(*app.session().hex().load(), PageState::Idle);
     app.open_file(empty);
     pump(&mut app, "empty page", |a| !a.session().hex().is_loading() && a.busy_label().is_none());
-    assert_eq!(app.session().hex().load, PageState::Ready(Vec::new()));
-    assert_eq!(app.session().hex().size, 0);
+    assert_eq!(*app.session().hex().load(), PageState::Ready(Vec::new()));
+    assert_eq!(app.session().hex().size(), 0);
     app.open_file(d.join("missing.log"));
     pump(&mut app, "open failure", |a| !a.session().hex().is_loading() && a.busy_label().is_none());
-    assert!(matches!(app.session().hex().load, PageState::Error(_)), "{:?}", app.session().hex().load);
+    assert!(matches!(app.session().hex().load(), PageState::Error(_)), "{:?}", app.session().hex().load());
     // Folder without CURRENT/MANIFEST: no file is opened, nothing spins.
     app.open_path(d.clone());
     pump(&mut app, "folder scanned", |a| !a.jobs().resolving() && !a.jobs().scanning() && !a.session().dir_entries().is_empty());
     assert!(app.session().file().is_none());
-    assert_eq!(app.session().hex().load, PageState::Idle);
+    assert_eq!(*app.session().hex().load(), PageState::Idle);
     assert_eq!(app.busy_label(), None);
 }
 
 #[test]
 fn hex_state_transitions() {
     let mut h = HexState::default();
-    assert_eq!(h.load, PageState::Idle);
+    assert_eq!(*h.load(), PageState::Idle);
     h.begin(1, 0);
     assert!(h.is_loading());
     assert!(!h.complete(2, Space::File, Outcome::Done((vec![9], 1))), "other request accepted");
-    assert_eq!(h.load, PageState::Loading(1));
+    assert_eq!(*h.load(), PageState::Loading(1));
     assert!(h.complete(1, Space::File, Outcome::Done((Vec::new(), 0))));
-    assert_eq!(h.load, PageState::Ready(Vec::new()));
+    assert_eq!(*h.load(), PageState::Ready(Vec::new()));
     // Cancel: the late answer does not resurrect the page.
     h.begin(3, 0);
     h.cancel();
-    assert_eq!(h.load, PageState::Cancelled);
+    assert_eq!(*h.load(), PageState::Cancelled);
     assert!(!h.complete(3, Space::File, Outcome::Done((vec![1], 1))));
-    assert_eq!(h.load, PageState::Cancelled);
+    assert_eq!(*h.load(), PageState::Cancelled);
     h.begin(4, 0);
     assert!(h.complete(4, Space::File, Outcome::Failed("boom".into())));
-    assert_eq!(h.load, PageState::Error("boom".into()));
+    assert_eq!(*h.load(), PageState::Error("boom".into()));
     // Wrong space (space switched while loading) is rejected.
     h.begin(5, 0);
     h.set_space(Space::Block(7), 10, "blk".into());
-    assert_eq!(h.load, PageState::Idle);
+    assert_eq!(*h.load(), PageState::Idle);
     assert!(!h.complete(5, Space::File, Outcome::Done((vec![1], 1))));
     // File switch: a fresh state; the old file's completion arrives after the new request.
     let mut h = HexState::default();
@@ -252,7 +252,7 @@ fn hex_state_transitions() {
     assert!(h2.complete(7, Space::File, Outcome::Done((vec![0xBB], 1))));
     assert_eq!(h2.page(), Some(&vec![0xBB]));
     h.cancel();
-    assert_eq!(h.load, PageState::Cancelled);
+    assert_eq!(*h.load(), PageState::Cancelled);
 }
 
 #[test]
@@ -328,6 +328,66 @@ fn zoom_ceiling_from_layout() {
     assert!((app.prefs().zoom_ceiling() - 2.0).abs() < 1e-4);
 }
 
+/// 0020 §7 + UI ruling (zoom return): the "reduced to fit" notice has one owner and lives only
+/// while the clamp is current: 1400×900 at 140 % → 900×700 (clamped to 100 %, notice; the
+/// chosen zoom stays 140 %) → same size (kept) → 1400×900 (the zoom returns to 140 %, notice
+/// cleared). A second clamp updates the number in place; any zoom command clears it and sets a
+/// new chosen zoom; a Reset View notice is not cleared by a resize.
+#[test]
+fn zoom_notice_clears_on_an_unclamped_resize_and_on_zoom_commands() {
+    use crate::app::ZoomFit;
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    // need 875×560 pt at any zoom: 1400×900 fits 160 %, 900×700 fits 100 %, 1100×700 fits 120 %.
+    let fit = |w: f32, h: f32, z: f32| Action::LayoutFit(ZoomFit { at_zoom: z, avail_w: w / z, avail_h: h / z, need_w: 875.0, need_h: 560.0 });
+    app.apply(fit(1400.0, 900.0, 1.0));
+    app.apply(Action::SetZoom(1.4));
+    app.apply(fit(1400.0, 900.0, 1.4));
+    assert!(app.prefs().notice().is_empty());
+    app.apply(fit(900.0, 700.0, 1.4));
+    assert!(app.prefs().notice().is_empty() && app.prefs().zoom_fit_pending(), "one over-fit frame: pending, no notice yet");
+    app.apply(fit(900.0, 700.0, 1.4));
+    assert_eq!((app.prefs().zoom(), app.prefs().notice()), (1.0, "Zoom reduced to 100% to fit window"));
+    assert_eq!((app.prefs().chosen_zoom(), app.prefs().persisted().zoom), (1.4, 1.4), "the clamp never changes the chosen zoom");
+    app.apply(fit(900.0, 700.0, 1.0));
+    assert_eq!(app.prefs().notice(), "Zoom reduced to 100% to fit window", "same window, still clamped: kept");
+    app.apply(fit(1400.0, 900.0, 1.0));
+    assert_eq!((app.prefs().zoom(), app.prefs().notice()), (1.4, ""), "window grows back: the zoom returns, notice cleared");
+    app.apply(fit(1400.0, 900.0, 1.4));
+    assert_eq!((app.prefs().zoom(), app.prefs().notice()), (1.4, ""), "steady at the chosen zoom");
+    // Zoom Out while clamped sets a new chosen zoom (from the effective one).
+    app.apply(fit(900.0, 700.0, 1.4));
+    app.apply(fit(900.0, 700.0, 1.4));
+    app.apply(Action::ZoomOut);
+    app.apply(fit(1400.0, 900.0, 1.0));
+    let (z, c) = (app.prefs().zoom(), app.prefs().chosen_zoom());
+    assert!((z - 0.9).abs() < 1e-4 && (c - 0.9).abs() < 1e-4, "Zoom Out from the clamped 100 %: chosen 90 %, no return to 140 %: {z} {c}");
+    app.apply(Action::SetZoom(1.4));
+    // A later clamp to another value updates the notice in place.
+    app.apply(Action::SetZoom(1.6));
+    app.apply(fit(1400.0, 900.0, 1.6));
+    app.apply(fit(1100.0, 700.0, 1.6));
+    app.apply(fit(1100.0, 700.0, 1.6));
+    assert_eq!(app.prefs().notice(), "Zoom reduced to 120% to fit window");
+    app.apply(fit(1000.0, 700.0, 1.2));
+    app.apply(fit(1000.0, 700.0, 1.2));
+    assert_eq!(app.prefs().notice(), "Zoom reduced to 110% to fit window");
+    // Any zoom command clears it.
+    for cmd in [Action::ZoomOut, Action::ZoomReset, Action::ZoomIn, Action::SetZoom(1.0)] {
+        app.apply(Action::SetZoom(1.6));
+        app.apply(fit(1000.0, 700.0, 1.6));
+        app.apply(fit(1000.0, 700.0, 1.6));
+        assert!(app.prefs().notice().starts_with("Zoom reduced to"), "{cmd:?}: {}", app.prefs().notice());
+        app.apply(cmd.clone());
+        assert!(!app.prefs().notice().starts_with("Zoom reduced to"), "{cmd:?} leaves {}", app.prefs().notice());
+    }
+    // The Reset View notice keeps its timer through a resize.
+    app.apply(Action::ResetView);
+    app.apply(fit(1400.0, 900.0, 1.0));
+    assert_eq!(app.prefs().notice(), crate::app::view_prefs::RESET_NOTICE);
+}
+
 /// 0015 C3 GUI-3: A+ enabled ⇔ Zoom In changes the zoom, at every step; a fit measured a
 /// hair below the new zoom right after a step (rounding) does not snap it back; the ceiling
 /// of a 900×700-like window (raw 1.205) is reached and kept.
@@ -391,9 +451,10 @@ fn failed_children_mark_node_invalid() {
         contains: None,
         role: ChildRole::Structure,
         checked: None,
+        tally: None,
     });
     let msg = Response::Children { node: 0, children: Vec::new(), error: Some("boom".into()) };
-    app.apply_response(Tagged { generation: app.session().generation(), msg });
+    app.apply_response(Tagged { generation: app.session().generation(), job: 0, msg });
     let nodes = app.session().nodes();
     assert_eq!(nodes[0].status, Status::Invalid);
     assert!(!nodes[0].loading);
@@ -554,8 +615,8 @@ fn only_selection_changes_the_epoch() {
     assert_eq!(app.selection().epoch(), e0 + 3);
 }
 
-/// The copy gate (JobState) rejects a reply whose selection epoch is no longer current and
-/// ignores replies that do not answer the copy in flight.
+/// The copy gate (`ClipboardState`, held by JobState) rejects a reply whose selection epoch is
+/// no longer current and ignores replies that do not answer the copy in flight.
 #[test]
 fn copy_gate_rejects_stale_epoch() {
     use crate::app::job_state::JobState;
@@ -564,16 +625,16 @@ fn copy_gate_rejects_stale_epoch() {
     gate.release();
     let mut j = JobState::new(Worker::spawn_with(Arc::new(|| {}), Arc::new(SlowBackend(gate.clone()))));
     let job = || CopyJob::Text { text: "t".into(), note: "n".into() };
-    j.copy(1, 5, job());
+    let req = j.copy(1, 5, job());
     let p = j.pending_copy().unwrap();
-    assert_eq!(p.sel, 5);
-    assert_eq!(j.copy_reply(p.req + 100, 5, 5), CopyReply::Ignored, "other request");
+    assert_eq!((p.req, p.sel), (req, 5));
+    assert_eq!(j.clipboard_mut().classify(p.req + 100, 5, 5), CopyReply::Ignored, "other request");
     assert!(j.pending_copy().is_some());
-    assert_eq!(j.copy_reply(p.req, 5, 6), CopyReply::Stale, "selection changed since the request");
+    assert_eq!(j.clipboard_mut().classify(p.req, 5, 6), CopyReply::Stale, "selection changed since the request");
     assert!(j.pending_copy().is_none());
     j.copy(1, 6, job());
     let p = j.pending_copy().unwrap();
-    assert_eq!(j.copy_reply(p.req, 6, 6), CopyReply::Accepted);
+    assert_eq!(j.clipboard_mut().classify(p.req, 6, 6), CopyReply::Accepted);
 }
 
 /// Request identity: JobState issues increasing ids; replies with another id or an older
@@ -591,15 +652,16 @@ fn stale_replies_are_ignored_by_request_identity() {
     app.open_path(d.clone());
     assert!(app.jobs().resolving());
     // Reply to another resolve: ignored, the resolve stays pending, no folder is set.
-    app.apply_response(Tagged { generation: g, msg: Response::Resolved { req: b + 1000, path: d.clone(), outcome: Outcome::Done(true) } });
+    app.apply_response(Tagged { generation: g, job: b + 1000, msg: Response::Resolved { req: b + 1000, path: d.clone(), outcome: Outcome::Done(true) } });
     assert!(app.jobs().resolving() && app.session().dir().is_none());
     // Stat reply that does not answer the stat in flight: ignored.
-    app.apply_response(Tagged { generation: g, msg: Response::Stat { req: b + 1001, outcome: Outcome::Done((1, None)) } });
+    app.apply_response(Tagged { generation: g, job: b + 1001, msg: Response::Stat { req: b + 1001, outcome: Outcome::Done((1, None)) } });
     assert!(!app.session().changed());
     // A view of an older generation is dropped.
     app.close_file();
     app.apply_response(Tagged {
         generation: g,
+        job: 1,
         msg: Response::View { req: 1, target: crate::jobs::ViewTarget::Node(NodeKind::Root), kind: Some(NodeKind::Root), view: Box::default(), reveal: None, select: None },
     });
     assert!(app.session().view().is_none());
@@ -669,13 +731,13 @@ fn open_ready(rel: &str) -> App {
     gate.release();
     let mut app = app_with(&gate);
     app.apply(Action::OpenFile(fixture(rel)));
-    pump(&mut app, "opened", |a| a.session().view().is_some() && a.session().pending_view().is_none() && !a.session().roots().is_empty() && a.session().hex().page().is_some());
+    pump(&mut app, "opened", |a| a.session().view().is_some() && a.navigation().pending_target().is_none() && !a.session().roots().is_empty() && a.session().hex().page().is_some());
     app
 }
 
 fn view_is(app: &mut App, k: &NodeKind) {
     let k2 = k.clone();
-    pump(app, "view", move |a| a.session().pending_view().is_none() && a.session().view_kind() == Some(&k2));
+    pump(app, "view", move |a| a.navigation().pending_target().is_none() && a.session().view_kind() == Some(&k2));
 }
 
 /// Navigate expands the canonical ancestors, selects and reveals the canonical node (never a
@@ -722,7 +784,7 @@ fn hex_click_and_row_select_agree_without_loops() {
     let e = app.selection().epoch();
     app.apply(Action::HexClick(0x11));
     assert_eq!((app.selection().row(), app.selection().anchor(), app.selection().epoch()), (Some(count), Some(Span::file(0x11, 1)), e + 1));
-    assert!(app.session().pending_view().is_none(), "the current table answered: no locate request");
+    assert!(app.navigation().pending_target().is_none(), "the current table answered: no locate request");
     for _ in 0..5 {
         app.poll();
         let _ = app.take_scroll_request();
@@ -739,7 +801,7 @@ fn hex_click_and_row_select_agree_without_loops() {
     // Shift+click: raw range from the anchor, row cleared, honest note.
     app.apply(Action::HexShiftClick(0x14));
     assert_eq!((app.selection().row(), app.selection().span()), (None, Some(Span::file(0x11, 4))));
-    assert_eq!(app.selection().raw_note(), Some("Raw range [0x11,0x15): not a single field"));
+    assert_eq!(app.selection().raw_note(), Some("Raw range file [0x11,0x15) · 4 B: not a single field"));
 }
 
 /// A pending (async) view and its selection are applied only if nothing was selected since the
@@ -750,7 +812,7 @@ fn pending_selection_never_overrides_a_newer_choice() {
     app.apply(Action::HexClick(0x11)); // root view: locate request
     app.apply(Action::SelectSpan(Span::file(2, 1))); // newer user choice before the reply
     let e = app.selection().epoch();
-    pump(&mut app, "locate answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "locate answered", |a| a.navigation().pending_target().is_none());
     assert_eq!(app.session().view_kind(), Some(&NodeKind::Root), "the stale locate replaced the view");
     assert_eq!((app.selection().span(), app.selection().epoch()), (Some(Span::file(2, 1)), e), "the newer selection stays");
 }
@@ -764,10 +826,10 @@ fn stale_view_results_are_discarded() {
     // (a) Locate overtaken by a row click in the current table.
     let mut app = open_ready("examples/files/wal-plain/000004.log");
     app.apply(Action::HexClick(0x11));
-    assert!(app.session().pending_view().is_some(), "locate request in flight");
+    assert!(app.navigation().pending_target().is_some(), "locate request in flight");
     app.apply(Action::SelectRow(0));
     let snap = app.selection().snapshot();
-    pump(&mut app, "locate answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "locate answered", |a| a.navigation().pending_target().is_none());
     settle(&mut app);
     assert_eq!(app.session().view_kind(), Some(&NodeKind::Root), "stale locate replaced the view");
     assert_eq!(app.selection().snapshot(), snap, "stale locate replaced the selection");
@@ -775,19 +837,19 @@ fn stale_view_results_are_discarded() {
     // Navigate and Back overtaken by a row click: discarded the same way.
     app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
     app.apply(Action::SelectRow(1));
-    pump(&mut app, "navigate answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "navigate answered", |a| a.navigation().pending_target().is_none());
     assert_eq!((app.session().view_kind(), app.selection().row()), (Some(&NodeKind::Root), Some(1)));
     // A tree click overtaken by a row click: the view stays and the tree follows it again.
     app.apply(Action::SelectNode(app.session().roots()[0]));
     assert!(app.session().sel_node().is_some());
     app.apply(Action::SelectRow(2));
-    pump(&mut app, "tree view answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "tree view answered", |a| a.navigation().pending_target().is_none());
     assert_eq!((app.session().view_kind(), app.session().sel_node(), app.selection().row()), (Some(&NodeKind::Root), None, Some(2)));
     app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
     view_is(&mut app, &NodeKind::LogRecord(0));
     app.apply(Action::Back);
     app.apply(Action::SelectRow(0));
-    pump(&mut app, "back answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "back answered", |a| a.navigation().pending_target().is_none());
     assert_eq!((app.session().view_kind(), app.selection().row()), (Some(&NodeKind::LogRecord(0)), Some(0)));
     // (b) Locate overtaken by a file change: the old generation's reply is dropped.
     app.apply(Action::SelectRoot);
@@ -795,7 +857,7 @@ fn stale_view_results_are_discarded() {
     app.apply(Action::HexClick(0x11));
     let other = fixture("examples/files/wal-fragmented/000004.log");
     app.apply(Action::OpenFile(other.clone()));
-    pump(&mut app, "other file", |a| a.session().view().is_some() && a.session().pending_view().is_none() && a.session().hex().page().is_some());
+    pump(&mut app, "other file", |a| a.session().view().is_some() && a.navigation().pending_target().is_none() && a.session().hex().page().is_some());
     settle(&mut app);
     assert_eq!((app.session().file(), app.session().view_kind()), (Some(other.as_path()), Some(&NodeKind::Root)));
     assert_eq!(app.selection().row(), None, "no located field of the previous file");
@@ -897,7 +959,7 @@ fn select_root_drops_pending_locate_selection() {
     app.apply(Action::HexClick(0x11));
     let e = app.selection().epoch();
     app.apply(Action::SelectRoot);
-    pump(&mut app, "views answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "views answered", |a| a.navigation().pending_target().is_none());
     settle(&mut app);
     assert_eq!(app.session().view_kind(), Some(&NodeKind::Root));
     assert!(app.selection().anchor().is_none() && app.selection().epoch() > e, "stale click applied to Root: {:?}", app.selection().raw_note());
@@ -910,22 +972,22 @@ fn overtaken_back_or_navigate_keeps_history_intact() {
     let mut app = open_ready("examples/files/wal-plain/000004.log");
     app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
     view_is(&mut app, &NodeKind::LogRecord(0));
-    assert!(app.session().can_go_back());
+    assert!(app.navigation().can_go_back());
     // Back overtaken by a row click: the entry for Root must still be there.
     app.apply(Action::Back);
     app.apply(Action::SelectRow(0));
-    pump(&mut app, "back answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "back answered", |a| a.navigation().pending_target().is_none());
     assert_eq!(app.session().view_kind(), Some(&NodeKind::LogRecord(0)));
-    assert!(app.session().can_go_back(), "the popped history entry was lost");
+    assert!(app.navigation().can_go_back(), "the popped history entry was lost");
     app.apply(Action::Back);
     view_is(&mut app, &NodeKind::Root);
-    assert!(!app.session().can_go_back());
+    assert!(!app.navigation().can_go_back());
     // Navigate overtaken by a row click: no stale source entry stays on the stack.
     app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
     app.apply(Action::SelectRow(1));
-    pump(&mut app, "navigate answered", |a| a.session().pending_view().is_none());
+    pump(&mut app, "navigate answered", |a| a.navigation().pending_target().is_none());
     assert_eq!(app.session().view_kind(), Some(&NodeKind::Root));
-    assert!(!app.session().can_go_back(), "a dropped navigation left its source entry");
+    assert!(!app.navigation().can_go_back(), "a dropped navigation left its source entry");
 }
 
 /// Residual 3 (design B1–B7): a link to a record whose selected row has no bytes moves the byte
@@ -946,32 +1008,32 @@ fn byteless_row_reveals_enclosing_structure() {
     // Move the byte view elsewhere first, then select the Implicit "reassembly" row.
     app.apply(Action::SetGoto("0x10".into()));
     app.apply(Action::GotoOffset);
-    assert_eq!(app.session().hex().scroll_to, Some(0x10));
+    assert_eq!(app.session().hex().scroll_to(), Some(0x10));
     let re = row_named(&app, "reassembly");
     assert!(app.session().view().unwrap().rows[re].field.span.is_none());
     app.apply(Action::SelectRow(re));
-    assert_eq!((app.session().hex().space(), app.session().hex().scroll_to), (Space::File, Some(0x5eec)), "FIRST header offset revealed in the file");
-    assert_eq!(app.session().goto(), "0x5eec", "Go-to text follows");
+    assert_eq!((app.session().hex().space(), app.session().hex().scroll_to()), (Space::File, Some(0x5eec)), "FIRST header offset revealed in the file");
+    assert_eq!(app.session().hex().goto(), "0x5eec", "Go-to text follows");
     assert_eq!((app.selection().span(), app.selection().spans().count(), app.selection().anchor()), (None, 0, None), "no fabricated span");
     assert_eq!(app.selection().shown(), Some(Span::file(0x5eec, 1)));
     assert_eq!(provenance::byteless_status("reassembly", &app.selection().shown().unwrap()), "selection: reassembly · no bytes · showing file 0x5eec");
     assert!(provenance::byteless_where(app.session().view(), &Span::file(0x5eec, 1)).ends_with("enclosing Logical record @0x5eec: file 0x5eec."));
     // Back: everything restored; the reveal added no history entry.
-    let before = (app.selection().snapshot(), app.session().hex().space(), app.session().goto().to_string());
+    let before = (app.selection().snapshot(), app.session().hex().space(), app.session().hex().goto().to_string());
     let f1 = app.session().view().unwrap().rows.iter().position(|r| r.field.name.starts_with("fragment 1")).unwrap();
     let target = app.session().view().unwrap().rows[f1].field.link.clone().unwrap();
     app.apply(Action::FollowRow(f1));
     view_is(&mut app, &target);
-    assert_ne!(app.session().goto(), "0x5eec", "navigation moved the byte view and Go-to");
+    assert_ne!(app.session().hex().goto(), "0x5eec", "navigation moved the byte view and Go-to");
     app.apply(Action::Back);
     view_is(&mut app, &NodeKind::LogRecord(0x5eec));
-    assert_eq!((app.selection().snapshot(), app.session().hex().space(), app.session().goto().to_string()), before, "Back restores selection, space and Go-to");
+    assert_eq!((app.selection().snapshot(), app.session().hex().space(), app.session().hex().goto().to_string()), before, "Back restores selection, space and Go-to");
     app.apply(Action::Back);
     view_is(&mut app, &NodeKind::LogFragment(0x5eec));
     assert_eq!(app.selection().row(), Some(link), "the reveal itself added no history entry");
     // A file change resets Go-to to the placeholder.
     app.apply(Action::OpenFile(fixture("tests/fixtures/wal-basic/000004.log")));
-    assert_eq!(app.session().goto(), "");
+    assert_eq!(app.session().hex().goto(), "");
 }
 
 /// 0015 C3 UI-6: a parent group counts blocks, not sub-groups: after its sub-group #0–#63 is
@@ -993,6 +1055,7 @@ fn parent_group_coverage_counts_blocks() {
         contains: None,
         role: ChildRole::Structure,
         checked: Some((0, 4096)),
+        tally: None,
     });
     let kids: Vec<Child> =
         (0..64u64)
@@ -1015,19 +1078,19 @@ fn parent_group_coverage_counts_blocks() {
 fn goto_text_follows_the_byte_pane() {
     let mut app = open_ready("tests/fixtures/wal-fragmented/000004.log");
     app.apply(Action::HexPage(0x10000));
-    assert_eq!((app.session().hex().page_base(), app.session().goto()), (0x10000, "0x10000"));
+    assert_eq!((app.session().hex().page_base(), app.session().hex().goto()), (0x10000, "0x10000"));
     app.apply(Action::Navigate { target: NodeKind::LogRecord(0x5eec), span: None });
     view_is(&mut app, &NodeKind::LogRecord(0x5eec));
-    assert_eq!(app.session().goto(), "0x5eec", "navigation shows the record start");
+    assert_eq!(app.session().hex().goto(), "0x5eec", "navigation shows the record start");
     app.apply(Action::HexShowSpace(Space::Record(0x5eec)));
-    assert_eq!((app.session().hex().space(), app.session().goto()), (Space::Record(0x5eec), "0x0"));
+    assert_eq!((app.session().hex().space(), app.session().hex().goto()), (Space::Record(0x5eec), "0x0"));
     // Root does not describe the record space: the pane returns to file 0x0, Go-to follows.
     app.apply(Action::SelectRoot);
     view_is(&mut app, &NodeKind::Root);
-    assert_eq!((app.session().hex().space(), app.session().goto()), (Space::File, "0x0"));
+    assert_eq!((app.session().hex().space(), app.session().hex().goto()), (Space::File, "0x0"));
 }
 
-/// B2: in a derived space (BLK+) the byte view stays there and shows +0x0; without an honest
+/// B2: in a derived space (BLOCK+) the byte view stays there and shows +0x0; without an honest
 /// enclosing range (WAL root "file" row) the byte view and Go-to stay unchanged (B6).
 #[test]
 fn byteless_row_keeps_derived_space_or_stays() {
@@ -1046,7 +1109,7 @@ fn byteless_row_keeps_derived_space_or_stays() {
     app.apply(Action::GotoOffset);
     let key = row_named(&app, "key (reconstructed)");
     app.apply(Action::SelectRow(key));
-    assert_eq!((app.session().hex().space(), app.session().hex().scroll_to, app.session().goto()), (Space::Block(off), Some(0), "0x0"), "BLK+ stays in BLK+ at +0x0");
+    assert_eq!((app.session().hex().space(), app.session().hex().scroll_to(), app.session().hex().goto()), (Space::Block(off), Some(0), "0x0"), "BLOCK+ stays in BLOCK+ at +0x0");
     assert_eq!((app.selection().span(), app.selection().shown()), (None, Some(Span::new(Space::Block(off), 0, 1))));
     // WAL root "file" row: no enclosing range — nothing moves.
     let mut app = open_ready("examples/files/wal-plain/000004.log");
@@ -1054,7 +1117,7 @@ fn byteless_row_keeps_derived_space_or_stays() {
     app.apply(Action::GotoOffset);
     let file = row_named(&app, "file");
     app.apply(Action::SelectRow(file));
-    assert_eq!((app.session().hex().scroll_to, app.session().goto(), app.selection().shown()), (Some(0x10), "0x10", None));
+    assert_eq!((app.session().hex().scroll_to(), app.session().hex().goto(), app.selection().shown()), (Some(0x10), "0x10", None));
 }
 
 /// F3: row keys scroll the table minimally; a jump (navigation, Back) centers the selected row.
@@ -1093,4 +1156,433 @@ fn opening_unchecked_row_checks_it_and_back_shows_it() {
     app.apply(Action::Back);
     view_is(&mut app, &NodeKind::SstLayout);
     assert_eq!(cell(&app), "✔ Present");
+}
+
+// ---------------- task 0010 / handoff 0019 ----------------
+
+fn node_of(app: &App, k: &NodeKind) -> usize {
+    app.session().nodes().iter().position(|n| &n.kind == k).unwrap_or_else(|| panic!("node {k:?}"))
+}
+
+/// 0019 §1a/§1b/§2a: open an Invalid block from the Physical layout table, then Back. The view
+/// nodes claim no status while rows are unchecked (fresh open) and ✖ once a row is Invalid;
+/// the table summary, tree glyph and tooltip agree; the row's Diagnosis after Back equals the
+/// block view's; its Derivation states the recorded cause, not the legend sentence.
+#[test]
+fn invalid_row_after_back_agrees_across_tree_table_and_explanation() {
+    use crate::app::diagnosis::{self, Finding};
+    let mut app = open_ready("tests/fixtures/corrupt/sst-bitflip-data-block.sst");
+    let (layout, via_index) = (node_of(&app, &NodeKind::SstLayout), node_of(&app, &NodeKind::SstDataBlocks { skip: 0 }));
+    for i in [layout, via_index] {
+        let n = &app.session().nodes()[i];
+        assert!(n.unchecked(), "fresh open: no glyph while rows are not checked: {:?}", n.tally);
+        assert!(n.tally.unwrap().tooltip().starts_with("Not checked as a whole: "), "{:?}", n.tally);
+    }
+    app.apply(Action::SelectNode(layout));
+    view_is(&mut app, &NodeKind::SstLayout);
+    assert_eq!(app.session().view().unwrap().rows[0].cells.last().unwrap(), NOT_CHECKED);
+    let b0 = app.session().view().unwrap().rows[0].field.link.clone().expect("row links to its block");
+    assert!(matches!(b0, NodeKind::SstBlock { off: 0, kind: BlockKind::Data, .. }), "{b0:?}");
+    app.apply(Action::FollowRow(0));
+    view_is(&mut app, &b0);
+    // The block view's own Diagnosis (one failure: the checksum).
+    let bv = app.session().view().unwrap();
+    let fails = diagnosis::node_failures(bv, Some(Status::Invalid), None);
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    let block_grid = diagnosis::diagnosis(fails[0].status, fails[0].diag.as_ref());
+    app.apply(Action::Back);
+    view_is(&mut app, &NodeKind::SstLayout);
+    // Tree: ✖ on the selected view node, no ✔; the tooltip counts the rows.
+    let n = &app.session().nodes()[layout];
+    assert_eq!((app.session().sel_node(), n.unchecked(), n.shown_status()), (Some(layout), false, Status::Invalid));
+    let t = app.session().view().unwrap().tally.expect("layout table tally");
+    assert_eq!(n.tally, Some(t), "tree and table use the same counts");
+    assert_eq!((t.invalid, t.truncated), (1, 0));
+    assert!(n.tally.unwrap().tooltip().starts_with("Contains 1 invalid, "), "{}", t.tooltip());
+    // Table summary: "✖ 1 invalid · ✔ p present · u not checked".
+    assert_eq!(t.summary().unwrap(), format!("✖ 1 invalid · ✔ {} present · {} not checked", t.present, t.not_checked));
+    // Explanation legend: only the statuses that occur, in order.
+    let legend: Vec<_> = diagnosis::table_legend(&t).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(legend, vec![Some(Status::Present), Some(Status::Invalid), None]);
+    // The row keeps the specific cause: same Diagnosis as the block view.
+    let row = &app.session().view().unwrap().rows[0];
+    assert_eq!((row.cells.last().unwrap().as_str(), row.field.status), ("✖ Invalid", Status::Invalid));
+    let Some(Finding::Diagnosis(row_grid)) = diagnosis::finding(row.field.status, row.field.diag.as_deref(), &row.field.name) else { panic!("no Diagnosis") };
+    assert_eq!(row_grid, block_grid, "Back keeps the block view's Diagnosis");
+    let NodeKind::SstBlock { size, .. } = b0 else { unreachable!() };
+    let bytes = row_grid.lines.iter().find(|l| l.label == "Bytes").unwrap();
+    assert_eq!(bytes.text, format!("file [0x0,0x{:x}) · {} B", size + 5, size + 5), "one range notation in the Diagnosis card");
+    assert!(row_grid.lines.iter().any(|l| l.label == diagnosis::ENGINE_FORM_LABEL), "fv6 block checksum: engine form shown: {row_grid:?}");
+    let block = matches!(row.field.link, Some(NodeKind::SstBlock { .. }));
+    assert_eq!(
+        diagnosis::failure_derivation(row.field.status, row.field.diag.as_deref(), block).as_deref(),
+        Some("Invalid: XXH3 checksum mismatch, found when this block was read. Details in Diagnosis above.")
+    );
+    // Review S2: "Data blocks via index" is ✖ right after Back, without being clicked.
+    let vi = &app.session().nodes()[via_index];
+    assert_eq!((vi.unchecked(), vi.shown_status()), (false, Status::Invalid), "{:?}", vi.tally);
+    // … and stays so when its view is shown.
+    app.apply(Action::SelectNode(via_index));
+    view_is(&mut app, &NodeKind::SstDataBlocks { skip: 0 });
+    let n = &app.session().nodes()[via_index];
+    assert_eq!((n.unchecked(), n.shown_status()), (false, Status::Invalid));
+}
+
+/// 0019 §1a: a table whose rows are all checked and clean shows ✔ (and no legend line for
+/// statuses that do not occur).
+#[test]
+fn fully_checked_clean_table_view_node_shows_present() {
+    let t = RowTally { invalid: 0, truncated: 0, present: 5, not_checked: 0, other: 0 };
+    assert_eq!((t.glyph(), t.summary().as_deref()), (Some(Status::Present), Some("✔ 5 present")));
+    assert_eq!(crate::app::diagnosis::table_legend(&t).len(), 1);
+    let u = RowTally { present: 3, not_checked: 2, ..t };
+    assert_eq!((u.glyph(), u.summary().as_deref()), (None, Some("✔ 3 present · 2 not checked")));
+    assert_eq!(u.tooltip(), "Not checked as a whole: 3 of 5 rows checked, none with a problem.");
+    let tr = RowTally { truncated: 1, ..u };
+    assert_eq!(tr.glyph(), Some(Status::Truncated));
+    assert_eq!(Child::new("x", NodeKind::SstLayout).tally(u).glyph(), None);
+}
+
+/// Review S1: a checked block whose status is neither Present nor a failure (Resource limit,
+/// Unknown) is counted as "other": the view node claims no ✔, the summary, tooltip and legend
+/// name it; a failure still wins.
+#[test]
+fn other_checked_statuses_prevent_a_present_claim() {
+    let mut t = RowTally::default();
+    for s in [Some(Status::Present), Some(Status::Present), Some(Status::Limited)] {
+        t.add(s);
+    }
+    assert_eq!((t.present, t.other, t.not_checked), (2, 1, 0));
+    assert_eq!(t.glyph(), None, "no ✔ while a row reads ⛔ Resource limit");
+    assert_eq!(t.summary().as_deref(), Some("✔ 2 present · 1 other"));
+    assert_eq!(t.tooltip(), "No status as a whole: 2 present and 1 other structures (unknown or limited, see their rows).");
+    assert!(crate::app::diagnosis::table_legend(&t).iter().any(|(s, l)| s.is_none() && l.starts_with("Other (Unknown, Resource limit)")));
+    t.add(Some(Status::Unknown));
+    t.add(None);
+    assert_eq!(t.tooltip(), "Not checked as a whole: 4 of 5 rows checked, none with a problem (2 other: unknown or limited, see their rows).");
+    t.add(Some(Status::Invalid));
+    assert_eq!(t.glyph(), Some(Status::Invalid));
+    assert_eq!(t.tooltip(), "Contains 1 invalid, 2 present, 2 other and 1 not-checked structures.");
+    assert_eq!(Child::new("x", NodeKind::SstLayout).tally(RowTally { other: 1, ..RowTally::default() }).glyph(), None);
+}
+
+/// 0019 §4: a query that matched rows of file A, carried into file B where it matches
+/// nothing: banner and status bar agree ("Rows 0 / 0"), no stale "Rows …" text, Next/Prev
+/// stay enabled (they start the byte search). Same for a table switch inside one file, and
+/// byte mode clears its file-scoped result on a file change.
+#[test]
+fn search_counts_agree_after_file_and_table_change() {
+    let mut app = open_ready("tests/fixtures/corrupt/sst-bitflip-data-block.sst");
+    let layout = node_of(&app, &NodeKind::SstLayout);
+    app.apply(Action::SelectNode(layout));
+    view_is(&mut app, &NodeKind::SstLayout);
+    let q = "Data block @0 ";
+    app.apply(Action::SetSearch(q.into()));
+    assert_eq!(app.search().row_matches().len(), 1);
+    app.apply(Action::SearchNext);
+    assert_eq!(app.search().status_segment(app.row_match_position()).as_deref(), Some("Rows 1 / 1 (current table)"));
+    assert_eq!(app.search().banner().as_deref(), Some("1 row of this table matches \"Data block @0 \" (decoded cells). Next/Prev to step."));
+    // Table switch inside the file: Root has no matching row.
+    app.apply(Action::SelectRoot);
+    view_is(&mut app, &NodeKind::Root);
+    let zero = |a: &App| (a.search().banner(), a.search().status_segment(a.row_match_position()), a.search().can_step());
+    let want = (Some(format!("No row of this table matches \"{q}\". Next/Prev search this file's stored bytes (not decompressed).")), Some("Rows 0 / 0 (current table)".to_string()), true);
+    assert!(app.search().row_matches().is_empty());
+    assert_eq!(zero(&app), want);
+    // File switch with the query kept.
+    app.apply(Action::OpenFile(fixture("tests/fixtures/wal-fragmented/000004.log")));
+    pump(&mut app, "wal opened", |a| a.session().view().is_some() && a.navigation().pending_target().is_none());
+    assert_eq!(app.search().query(), q);
+    assert_eq!(zero(&app), want, "no stale count from the previous file");
+    // Byte search with no hit: banner and status say so; Next/Prev stay enabled.
+    app.apply(Action::SearchNext);
+    pump(&mut app, "byte search done", |a| a.search().progress().is_none() && !a.search().status().contains("searching"));
+    assert_eq!(app.search().status_segment(None).as_deref(), Some(crate::app::search::BYTES_NO_MATCH));
+    assert_eq!(app.search().banner(), Some(format!("No row of this table matches \"{q}\"; no match in this file's stored bytes either.")));
+    assert!(app.search().can_step());
+    // Byte mode: a hit, then a file change forgets it (it described the old file).
+    app.apply(Action::SetSearchHex(true));
+    app.apply(Action::SetSearch("4d 41 4e".into()));
+    assert_eq!(app.search().banner().as_deref(), Some("Hex query 4d 41 4e: Next/Prev search this file's stored bytes (not decompressed)."));
+    assert_eq!(app.search().status_segment(None), None, "byte mode before a search: no status segment");
+    app.apply(Action::SetSearch("4c".into()));
+    app.apply(Action::SearchNext);
+    pump(&mut app, "hex hit", |a| a.search().progress().is_none() && !a.search().status().contains("searching"));
+    assert!(app.search().hit().is_some() && app.search().status().starts_with("Bytes: match at file 0x"), "{}", app.search().status());
+    // 0020 UI ruling F2: the hex banner stays after a hit and names it.
+    let hit = app.search().hit().unwrap();
+    assert_eq!(app.search().banner(), Some(format!("Hex query 4c: match at file 0x{hit:x} (stored bytes). Next/Prev to step.")));
+    app.apply(Action::OpenFile(fixture("tests/fixtures/wal-basic/000004.log")));
+    pump(&mut app, "wal-basic opened", |a| a.session().view().is_some() && a.navigation().pending_target().is_none());
+    assert_eq!((app.search().hit(), app.search().status_segment(None)), (None, None), "no hit or status from the previous file");
+    assert_eq!(app.search().banner().as_deref(), Some("Hex query 4c: Next/Prev search this file's stored bytes (not decompressed)."));
+    // Invalid hex: Next/Prev disabled and a no-op.
+    app.apply(Action::SetSearch("4".into()));
+    assert_eq!((app.search().can_step(), app.search().banner().as_deref()), (false, Some("Not a hex byte sequence. Use byte pairs such as 4d 41 4e.")));
+    app.apply(Action::SearchNext);
+    assert_eq!((app.search().progress(), app.search().status()), (None, String::new()));
+    // Empty query: nothing.
+    app.apply(Action::SetSearch(String::new()));
+    assert_eq!((app.search().banner(), app.search().status_segment(None), app.search().can_step()), (None, None, false));
+}
+
+/// Copies the current selection's offset range and returns the clipboard text.
+fn copied_offset(app: &mut App) -> String {
+    app.do_copy(CopyKind::Offset);
+    let clip = pump(app, "offset copied", |a| a.jobs().pending_copy().is_none());
+    assert_eq!(clip.len(), 1, "{clip:?} ({})", app.prefs().notice());
+    clip[0].clone()
+}
+
+/// 0020 §4: Copy Offset copies the selected range in the one range notation, with `= file …`
+/// when the bytes are one exact file range and the provenance qualifier last — file,
+/// decompressed block (compressed container) and reassembled record (one range / across a
+/// fragment boundary).
+#[test]
+fn copy_offset_text_for_file_block_and_record_spaces() {
+    // File space.
+    let mut app = open_ready("examples/files/sst-zstd/sst-zstd.sst");
+    app.apply(Action::SelectSpan(Span::file(0x10, 4)));
+    assert_eq!(copied_offset(&mut app), "file [0x10,0x14) · 4 B");
+    // Decompressed block: no file offset exists; the compressed container is named.
+    let (off, size) = app
+        .session()
+        .nodes()
+        .iter()
+        .find_map(|n| match n.kind {
+            NodeKind::SstBlock { off, size, kind: BlockKind::Data } => Some((off, size)),
+            _ => None,
+        })
+        .expect("a data block node");
+    let blk = NodeKind::SstBlock { off, size, kind: BlockKind::Data };
+    app.apply(Action::Navigate { target: blk.clone(), span: None });
+    view_is(&mut app, &blk);
+    let row = app.session().view().unwrap().rows.iter().position(|r| r.field.span.is_some_and(|s| s.space == Space::Block(off) && s.len > 0)).expect("a field in the decompressed block");
+    app.apply(Action::SelectRow(row));
+    let s = app.selection().span().unwrap();
+    assert_eq!(copied_offset(&mut app), format!("block@0x{off:x} [+0x{:x},+0x{:x}) · {} B · decompressed · compressed container file [0x{off:x},0x{:x})", s.offset, s.end(), s.len, off + size));
+    // Reassembled record, one contiguous file range: record+0x8 (count, 4 B) after the 7-byte header.
+    let mut app = open_ready("examples/files/wal-plain/000004.log");
+    app.apply(Action::Navigate { target: NodeKind::LogRecord(0), span: None });
+    view_is(&mut app, &NodeKind::LogRecord(0));
+    let count = app.session().view().unwrap().rows.iter().position(|r| r.field.span == Some(Span::new(Space::Record(0), 8, 4))).expect("count at record+0x8");
+    app.apply(Action::SelectRow(count));
+    assert_eq!(copied_offset(&mut app), "record@0x0 [+0x8,+0xc) · 4 B = file [0xf,0x13) · reassembled");
+    // Across a fragment boundary: not one file range, so no "= file …".
+    // Records of 4 and 2 fragments (dump: "in 4 fragment(s)", "in 2 fragment(s)").
+    let mut app = open_ready("tests/fixtures/wal-fragmented/000004.log");
+    let mut found = false;
+    for r in [0x5eec, 0x1ffe6] {
+        app.apply(Action::Navigate { target: NodeKind::LogRecord(r), span: None });
+        view_is(&mut app, &NodeKind::LogRecord(r));
+        let v = app.session().view().unwrap();
+        let Some(i) = v.rows.iter().position(|x| x.field.span.is_some_and(|s| s.space == Space::Record(r) && provenance::exact_file_ranges(Some(v), &s).len() > 1)) else { continue };
+        app.apply(Action::SelectRow(i));
+        let s = app.selection().span().unwrap();
+        assert_eq!(copied_offset(&mut app), format!("{} · reassembled", s.range_text()));
+        found = true;
+        break;
+    }
+    assert!(found, "a field crossing a fragment boundary in wal-fragmented");
+}
+
+/// 0020 §5 (bug): byte-search replies carry the search's request id; after a new query, Clear
+/// or Cancel a late hit of the old search neither selects a span nor sets the cursor, and its
+/// Done does not overwrite a newer search.
+#[test]
+fn stale_byte_search_replies_do_not_reach_the_selection() {
+    use crate::app::search::ByteSearch;
+    use crate::jobs::{Response, Tagged};
+    let mut app = open_ready("tests/fixtures/wal-fragmented/000004.log");
+    let running = |a: &App| match a.search().byte_search() {
+        ByteSearch::Running { req, .. } => Some(*req),
+        _ => None,
+    };
+    let late = |app: &mut App, job: u64, msg: Response| {
+        let g = app.session().generation();
+        app.apply_response(Tagged { generation: g, job, msg });
+    };
+    for stop in [Action::SetSearch("other".into()), Action::ClearSearch, Action::CancelSearch, Action::SetSearchHex(true)] {
+        app.apply(Action::SetSearch("no-such-bytes-anywhere".into()));
+        app.apply(Action::SetSearchHex(false));
+        app.apply(Action::SelectSpan(Span::file(0x20, 2)));
+        app.apply(Action::SearchNext);
+        let old = running(&app).expect("byte search running");
+        app.apply(stop.clone());
+        let before = (app.selection().span(), app.search().hit(), app.search().byte_search().clone());
+        late(&mut app, old, Response::SearchHit { off: 0x10, len: 3 });
+        late(&mut app, old, Response::SearchProgress { done: 5, total: 9 });
+        late(&mut app, old, Response::SearchDone { found: false, cancelled: true });
+        assert_eq!((app.selection().span(), app.search().hit(), app.search().byte_search().clone()), before, "{stop:?}: a late reply changed the state");
+        // A newer Next: the older search's Done cannot end it.
+        app.apply(Action::SetSearchHex(false));
+        app.apply(Action::SetSearch("no-such-bytes-anywhere".into()));
+        app.apply(Action::SearchNext);
+        let first = running(&app).unwrap();
+        app.apply(Action::SearchNext);
+        let second = running(&app).unwrap();
+        assert!(second > first);
+        late(&mut app, first, Response::SearchDone { found: false, cancelled: true });
+        assert_eq!(running(&app), Some(second), "{stop:?}: an older Done overwrote the newer search");
+        pump(&mut app, "search done", |a| running(a).is_none());
+        assert_eq!(app.search().status(), crate::app::search::BYTES_NO_MATCH);
+    }
+}
+
+/// Hex byte search for `q` to its end (hit or exhausted).
+fn hex_search(app: &mut App, q: &str) {
+    app.apply(Action::SetSearchHex(true));
+    app.apply(Action::SetSearch(q.into()));
+    app.apply(Action::SearchNext);
+    pump(app, "hex search done", |a| a.search().progress().is_none() && !a.search().status().contains("searching"));
+}
+
+/// 0020 D2: a byte-search hit selects a field holding it, else the structure shown when its
+/// extent holds the hit, else a raw range — from any start (row, whole structure, nothing).
+/// Subject, row, status segment, Where and the hex selection agree; no row the hit is not in
+/// stays highlighted; Next/Prev continue from the hit.
+#[test]
+fn byte_search_hit_selects_field_structure_bytes_or_raw_range() {
+    use crate::app::explanation::{self, Subject, WhereText};
+    const MAGIC: &str = "f7 cf f4 85 b7 41 e2 88";
+    const ZSTD: &str = "28 b5 2f fd";
+    #[derive(Clone, Copy, Debug)]
+    enum Start {
+        Row,
+        Whole,
+        Nothing,
+    }
+    // (view: footer?, query, hit, expected subject, row, status)
+    type Case = (bool, &'static str, Span, &'static str, Option<usize>, &'static str);
+    let cases: [Case; 3] = [
+        (true, MAGIC, Span::file(0xc12, 8), "Field", Some(9), "selection: file [0xc12,0xc1a) · 8 B"),
+        (false, ZSTD, Span::file(0x2, 4), "StructureRange", None, "selection: structure Data block @0 (0x0, 104 B) #0 · file [0x2,0x6) · 4 B"),
+        (false, MAGIC, Span::file(0xc12, 8), "Raw", None, "selection: file [0xc12,0xc1a) · 8 B"),
+    ];
+    for (footer, q, hit, want_subject, want_row, want_status) in cases {
+        for start in [Start::Row, Start::Whole, Start::Nothing] {
+            let what = format!("{q} from {start:?} in {}", if footer { "Footer" } else { "Data block @0" });
+            let mut app = open_ready("examples/files/sst-zstd/sst-zstd.sst");
+            let target = app
+                .session()
+                .nodes()
+                .iter()
+                .find(|n| if footer { n.label.starts_with("Footer") } else { matches!(n.kind, NodeKind::SstBlock { off: 0, kind: BlockKind::Data, .. }) })
+                .map(|n| n.kind.clone())
+                .expect("target node");
+            app.apply(Action::Navigate { target: target.clone(), span: None });
+            view_is(&mut app, &target);
+            match start {
+                Start::Row => {
+                    app.apply(Action::SelectRow(0));
+                }
+                Start::Whole => assert!(matches!(explanation::subject(app.session(), app.selection()), Subject::WholeStructure), "{what}"),
+                Start::Nothing => app.sel.clear(),
+            }
+            hex_search(&mut app, q);
+            assert_eq!(app.search().hit(), Some(hit.offset), "{what}");
+            assert_eq!(app.search().status_segment(app.row_match_position()), Some(format!("Bytes: match at file 0x{:x} (stored bytes)", hit.offset)), "{what}");
+            let s = explanation::subject(app.session(), app.selection());
+            assert_eq!(format!("{s:?}").split([' ', '(']).next(), Some(want_subject), "{what}: {s:?}");
+            assert_eq!(app.selection().row(), want_row, "{what}");
+            let status = explanation::selection_status(app.session(), app.selection());
+            assert_eq!(status, want_status, "{what}");
+            // Bytes outside a structure never carry its name.
+            assert!(want_subject != "Raw" || !status.contains("structure"), "{what}: {status}");
+            // The hex view shows the hit in file space, filled as the selection.
+            let hex = app.session().hex();
+            assert_eq!(hex.space(), Space::File, "{what}");
+            assert!(hex.page_base() <= hit.offset && hit.offset < hex.page_base() + LIMITS.hex_page_bytes, "{what}");
+            assert_eq!(app.selection().spans().collect::<Vec<_>>(), vec![hit], "{what}");
+            match s {
+                Subject::Field { row, field } => {
+                    assert_eq!((Some(row), field.name.as_str(), field.span), (want_row, "magic number", Some(hit)), "{what}");
+                    assert_eq!(app.selection().anchor(), Some(Span::file(hit.offset, 1)), "{what}");
+                }
+                Subject::StructureRange { span, clicked: false } | Subject::Raw(span) => {
+                    let card = explanation::range_card(app.session(), app.selection(), span);
+                    assert_eq!((card.structure, card.where_), (want_subject == "StructureRange", WhereText::Lines(vec![hit.range_text()])), "{what}");
+                    assert_eq!(app.selection().anchor(), None, "{what}");
+                }
+                other => panic!("{what}: {other:?}"),
+            }
+            // Next/Prev continue from the hit.
+            let sel_off = app.selection().span().map(|s| s.offset);
+            assert_eq!(app.search().next_byte_search(sel_off, false).map(|n| n.from), Ok(hit.offset + 1), "{what}");
+            assert_eq!(app.search().next_byte_search(sel_off, true).map(|n| n.from), Ok(hit.offset), "{what}");
+        }
+    }
+    // The next zstd frame (Data block @0x68) lies outside Data block @0: a raw range, no row.
+    let mut app = open_ready("examples/files/sst-zstd/sst-zstd.sst");
+    let blk = app.session().nodes().iter().find(|n| matches!(n.kind, NodeKind::SstBlock { off: 0, kind: BlockKind::Data, .. })).map(|n| n.kind.clone()).unwrap();
+    app.apply(Action::Navigate { target: blk.clone(), span: None });
+    view_is(&mut app, &blk);
+    app.apply(Action::SelectRow(0));
+    hex_search(&mut app, ZSTD);
+    app.apply(Action::SearchNext);
+    pump(&mut app, "next hit", |a| a.search().progress().is_none() && a.search().hit() != Some(0x2));
+    assert_eq!(app.search().hit(), Some(0x6a));
+    assert!(matches!(explanation::subject(app.session(), app.selection()), Subject::Raw(s) if s == Span::file(0x6a, 4)));
+    assert_eq!((app.selection().row(), explanation::selection_status(app.session(), app.selection()).as_str()), (None, "selection: file [0x6a,0x6e) · 4 B"));
+}
+
+/// Backend that records every bounded read (path-independent) and serves it from the disk.
+struct RecordingBackend(Arc<Mutex<Vec<(u64, u64)>>>);
+
+impl IoBackend for RecordingBackend {
+    fn is_dir(&self, p: &Path) -> std::io::Result<bool> {
+        FsBackend.is_dir(p)
+    }
+    fn scan(&self, dir: &Path) -> std::io::Result<(Vec<crate::discover::DirEntry>, bool)> {
+        FsBackend.scan(dir)
+    }
+    fn read(&self, p: &Path, off: u64, len: u64) -> std::io::Result<(Vec<u8>, u64)> {
+        self.0.lock().unwrap().push((off, len));
+        FsBackend.read(p, off, len)
+    }
+    fn stat(&self, p: &Path) -> std::io::Result<(u64, Option<std::time::SystemTime>)> {
+        FsBackend.stat(p)
+    }
+}
+
+/// 0020 §6: I/O stays bounded through the real request paths — every hex page read is at most
+/// `LIMITS.hex_page_bytes`; a Copy hex of a span larger than `LIMITS.copy_cap` reads at most
+/// the cap and reports the full requested length.
+#[test]
+fn page_and_copy_reads_are_bounded() {
+    let (page, cap) = (LIMITS.hex_page_bytes, LIMITS.copy_cap);
+    let d = tmpdir("bounded");
+    let size = page.max(cap) * 2 + 100;
+    let f = write(&d.join("big.log"), &vec![0x5au8; size as usize]);
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let mut app = App::new(Worker::spawn_with(Arc::new(|| {}), Arc::new(RecordingBackend(reads.clone()))));
+    app.apply(Action::OpenFile(f));
+    pump(&mut app, "first page", |a| a.session().hex().page().is_some() && a.navigation().pending_target().is_none());
+    // (action, the reads it must make: (offset, length))
+    type Case = (&'static str, Vec<Action>, Vec<(u64, u64)>);
+    let cases: Vec<Case> = vec![
+        ("page 1", vec![Action::HexPage(page)], vec![(page, page)]),
+        ("last page", vec![Action::HexPage(size / page * page)], vec![(size / page * page, page)]),
+        ("copy hex over the cap", vec![Action::SelectSpan(Span::file(10, cap + 50)), Action::Copy(CopyKind::Hex)], vec![(10, cap)]),
+    ];
+    for (what, acts, want) in cases {
+        settle(&mut app);
+        reads.lock().unwrap().clear();
+        let mut clip = Vec::new();
+        for a in acts {
+            app.apply(a);
+        }
+        clip.extend(pump(&mut app, what, |a| !a.session().hex().is_loading() && a.jobs().pending_copy().is_none()));
+        clip.extend(settle(&mut app));
+        let got: Vec<(u64, u64)> = reads.lock().unwrap().clone();
+        assert!(got.iter().all(|&(_, n)| n <= page.max(cap)), "{what}: unbounded read {got:?}");
+        for w in &want {
+            assert!(got.contains(w), "{what}: expected read {w:?}, got {got:?}");
+        }
+        if what.starts_with("copy") {
+            assert_eq!(clip.len(), 1, "{what}");
+            assert_eq!(clip[0].split(' ').count() as u64, cap, "{what}: cap bytes copied");
+            assert_eq!(app.prefs().notice(), format!("Copied {cap} of {} bytes as hex (truncated: {} KiB copy cap / end of data)", cap + 50, cap / 1024));
+        }
+    }
 }

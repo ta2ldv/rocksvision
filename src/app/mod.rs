@@ -1,15 +1,21 @@
-//! Application layer, independent of egui. `AppState` (`state`) coordinates five components with
-//! private fields: `DocumentSession` (`session`), `SelectionState` (`selection`), `SearchState`
-//! (`search`), `JobState` (`job_state`, the only holder of the worker) and `ViewPreferences`
-//! (`view_prefs`). Also: actions/effects, the hex page state machine (`hex`), persisted
-//! preferences (`prefs`) and background jobs (`jobs`). The UI renders `&AppState` and sends
-//! `Action`s; platform effects come back as `Effect`s. Never depends on `crate::ui`.
+//! Application layer, independent of egui. `AppState` (`state`) coordinates components with
+//! private fields: `DocumentSession` (`session`; owns `Navigation` (`navigation`) and the byte
+//! view `HexState` (`hex`)), `SelectionState` (`selection`), `SearchState` (`search`), `JobState`
+//! (`job_state`, the only holder of the worker; owns the copy gate `ClipboardState`
+//! (`clipboard`)) and `ViewPreferences` (`view_prefs`). Pure services: `provenance` (ranges,
+//! where), `diagnosis` (typed findings), `explanation` (the one selection classifier and the
+//! Explanation cards). Also: actions/effects, persisted preferences (`prefs`) and background
+//! jobs (`jobs`). The UI renders `&AppState` and sends `Action`s; platform effects come back as
+//! `Effect`s. Never depends on `crate::ui`.
 
 pub mod actions;
+pub mod clipboard;
 pub mod diagnosis;
+pub mod explanation;
 pub mod hex;
 pub mod job_state;
 pub mod jobs;
+pub mod navigation;
 pub mod prefs;
 pub mod provenance;
 pub mod search;

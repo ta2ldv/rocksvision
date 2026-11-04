@@ -119,7 +119,7 @@ Bir satırı seçince byte aralığı vurgulanır; bir link veya handle’a çif
 
 Arama, mevcut tablonun çözümlenmiş hücrelerinde ve dosyanın saklanan byte’larında çalışır; bütün tabloları veya açılmış block’ları taramaz. **Hex bytes**, `4d 41 4e` gibi bir byte dizisi arar. Arama kutusunda **Enter** sonraki, **Shift+Enter** önceki eşleşmeye gider.
 
-**View** menüsünden tema, panel görünürlüğü ve zoom ayarlanır. Yazı boyutu (A− / A+) tüm yerleşimin hâlâ sığdığı en büyük zoom’a kadar çıkar: 1400×900’de %160, 900×700’de %120, 900×560’ta %100 (çalışan uygulamada, varsayılan XCopy temasıyla ölçüldü); o tavanda A+ devre dışıdır, daha büyük pencere tavanı yükseltir. “Checked”, bir block’un checksum ve trailer’ının doğrulandığı anlamına gelir: block’u açmak onu kontrol eder, ağaçta en fazla 64 block listelemek o block’ları okuyup kontrol eder; diğerleri “Not checked” yazar. **Reset View**, iç yerleşimi ve %100 zoom’u geri getirir; pencerenin boyutunu değiştirmez. **Help → RocksVision Help** arayüzü, **Keyboard Shortcuts** ise kısayolları açıklar. macOS’ta sistem menüleri, diğer platformlarda pencere içi menü kullanılır.
+**View** menüsünden tema, panel görünürlüğü ve zoom ayarlanır. Yazı boyutu (A− / A+) tüm yerleşimin hâlâ sığdığı en büyük zoom’a kadar çıkar: 1400×900’de %160, 900×700’de %100, 900×560’ta %100 (varsayılan XCopy temasıyla çizilen karelerde ölçüldü; tavan en az üç tablo satırı ve satır başına sekiz byte bırakır, %100’ün üstünde yan paneller en küçük genişliklerine doğru daralır ve uzaklaştırınca sizin genişliklerinize döner); o tavanda A+ devre dışıdır, daha büyük pencere tavanı yükseltir. Pencere seçtiğiniz zoom için küçülürse zoom sığacak kadar düşürülür (durum çubuğu: “Zoom reduced to N% to fit window”) ve pencere yeniden yeterince büyüyünce kendiliğinden sizin zoom’unuza döner; bir sonraki açılış sizin zoom’unuzu ve pencere boyutunuzu geri getirir. “Checked”, bir block’un checksum ve trailer’ının doğrulandığı anlamına gelir: block’u açmak onu kontrol eder, ağaçta en fazla 64 block listelemek o block’ları okuyup kontrol eder; diğerleri “Not checked” yazar. **Reset View**, iç yerleşimi ve %100 zoom’u geri getirir; pencerenin boyutunu değiştirmez. **Help → RocksVision Help** arayüzü, **Keyboard Shortcuts** ise kısayolları açıklar. macOS’ta sistem menüleri, diğer platformlarda pencere içi menü kullanılır.
 
 ## Derleme
 
@@ -140,7 +140,7 @@ macOS’ta `.app` dosyasını Finder’dan, Windows’ta `.exe` dosyasını aç�
 
 ## Durum ve sınırlamalar
 
-**0.1.0**, erken aşamadaki bir inceleme aracıdır. Her dosya biçimi desteklenmez; desteklenmeyen özellikler ve eksik bağlam, bulunmayan veya bozuk veriden ayrı değerlendirilmelidir. Kontroller her bozulmanın tespit edileceğini garanti etmez.
+**0.1.3**, erken aşamadaki bir inceleme aracıdır. Her dosya biçimi desteklenmez; desteklenmeyen özellikler ve eksik bağlam, bulunmayan veya bozuk veriden ayrı değerlendirilmelidir. Kontroller her bozulmanın tespit edileceğini garanti etmez.
 
 Dar pencerede sayfalama düğmeleri, Matrix toolbar taşması ve eksik WAL fragment teşhisinin kök özete aktarılması bilinen takip işleridir. macOS paketleri ad-hoc imzalıdır; notarization yapılmamıştır. Platforma özgü sınırlamalar için [derleme rehberine](docs/BUILD.md) bakın.
 

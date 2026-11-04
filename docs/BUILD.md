@@ -233,9 +233,10 @@ make retries convenient.
 | Windows x64 | same steps: passed | user ran v0.1.1 (console/panic-hook behaviour not individually tested) |
 | GitHub Actions | tag-push release flow (2026-10-27): gates and `publish-release.sh` exercised locally with fake curl/gh (`selftest-release-ready.sh`, 32 cases), not yet run on GitHub | release upload path not yet run by the new workflow |
 
-Version 0.1.2 (Cargo.toml; About, BUILD-INFO and archive names derive from it; v0.1.0 and v0.1.1
-stay as published). Its changes (edition 2024, release automation, status/navigation fixes) are
-verified locally on macOS arm64 and await the owner's four-platform CI run. Windows uses the GUI
+Version 0.1.3 (Cargo.toml; About, BUILD-INFO and archive names derive from it; v0.1.0, v0.1.1
+and v0.1.2 stay as published). Its changes (consistent status and explanations, one byte-range
+notation, search state, zoom layout) are verified locally on macOS arm64 and await the owner's
+four-platform CI run. Windows uses the GUI
 subsystem (no console window from Explorer) and attaches to the parent console so
 `--dump`/`--help`/errors print in a terminal (the prompt may appear before the output). Linux has no .desktop file or icon theme entry. Windows has no embedded .ico (the
 window icon is set at run time). No installer, DMG, notarization or code signing beyond the

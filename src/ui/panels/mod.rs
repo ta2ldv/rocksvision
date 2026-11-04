@@ -31,6 +31,9 @@ pub struct PanelMemory {
     /// (window-clamped) defaults — Reset View is disabled when everything is default.
     pub left_w: f32,
     pub right_w: f32,
+    /// The user's own side-panel widths (last frame not shrunk for zoom, 0019 §3).
+    pub left_user: f32,
+    pub right_user: f32,
     pub widths_default: bool,
     pub hex: hex::HexMemory,
     /// Layout epoch these values belong to (Reset View starts fresh).
@@ -47,6 +50,8 @@ impl Default for PanelMemory {
             status_h: 26.0,
             left_w: LAYOUT.left_default,
             right_w: LAYOUT.right_default,
+            left_user: LAYOUT.left_default,
+            right_user: LAYOUT.right_default,
             widths_default: true,
             hex: hex::HexMemory::default(),
             layout_epoch: 0,
@@ -55,11 +60,14 @@ impl Default for PanelMemory {
 }
 
 impl PanelMemory {
-    /// Forgets view-local offsets when the app's layout epoch changed (Reset View).
+    /// Forgets view-local offsets and the user's panel widths when the app's layout epoch
+    /// changed (Reset View).
     pub fn follow_epoch(&mut self, epoch: u32) {
         if self.layout_epoch != epoch {
             self.layout_epoch = epoch;
             self.hex.hscroll = 0.0;
+            self.left_user = LAYOUT.left_default;
+            self.right_user = LAYOUT.right_default;
         }
     }
 }
@@ -167,14 +175,39 @@ pub fn chip(ui: &mut egui::Ui, tok: &Tokens, s: Status) {
     chip_word(ui, tok, s, s.label(), status_meaning(s));
 }
 
+/// Frame of the toolbar and the side panels: fill and `LAYOUT.panel_margin` (the one
+/// definition `measure_layout` also counts with, `layout::panel_pad_h`).
+pub fn panel_frame(fill: egui::Color32) -> egui::Frame {
+    let m = LAYOUT.panel_margin;
+    egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(m[0] as i8, m[1] as i8))
+}
+
+/// Frame of the status bar: `LAYOUT.panel_margin[0]` at the sides, `LAYOUT.status_pad` above
+/// and below, the frame stroke (the shell and the toolbar measurement rig share it).
+pub fn status_frame(fill: egui::Color32, border: egui::Color32) -> egui::Frame {
+    egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(LAYOUT.panel_margin[0] as i8, LAYOUT.status_pad as i8)).stroke(egui::Stroke::new(LAYOUT.frame_stroke, border))
+}
+
+/// Frame of a collapsed panel's strip: no margin, the frame stroke.
+pub fn strip_frame(fill: egui::Color32, border: egui::Color32) -> egui::Frame {
+    egui::Frame::new().fill(fill).stroke(egui::Stroke::new(LAYOUT.frame_stroke, border))
+}
+
+/// Frame of a chip on a flat data fill, with an optional status/tint stroke
+/// (`LAYOUT.chip_margin`, `layout::chip_pad_w`).
+pub fn chip_frame(tok: &Tokens, stroke: Option<egui::Color32>) -> egui::Frame {
+    let m = LAYOUT.chip_margin;
+    let f = egui::Frame::new().fill(tok.p.data).inner_margin(egui::Margin::symmetric(m[0] as i8, m[1] as i8)).corner_radius(tok.w.rounding);
+    match stroke {
+        Some(c) => f.stroke(egui::Stroke::new(LAYOUT.frame_stroke, c)),
+        None => f,
+    }
+}
+
 /// Chip with the status symbol/colour but its own word and tooltip (e.g. "✖ Untrusted").
 pub fn chip_word(ui: &mut egui::Ui, tok: &Tokens, s: Status, word: &str, tip: &str) {
     let c = tok.status(s);
-    egui::Frame::new()
-        .fill(tok.p.data)
-        .stroke(egui::Stroke::new(1.0, c))
-        .inner_margin(egui::Margin::symmetric(4, 1))
-        .corner_radius(tok.w.rounding)
+    chip_frame(tok, Some(c))
         .show(ui, |ui| {
             ui.label(RichText::new(format!("{} {word}", s.symbol())).color(c).small());
         })
@@ -184,7 +217,7 @@ pub fn chip_word(ui: &mut egui::Ui, tok: &Tokens, s: Status, word: &str, tip: &s
 
 /// Status-colored message on a flat data fill (used on chrome bars).
 pub fn status_text(ui: &mut egui::Ui, tok: &Tokens, s: Status, text: &str) {
-    egui::Frame::new().fill(tok.p.data).inner_margin(egui::Margin::symmetric(4, 1)).corner_radius(tok.w.rounding).show(ui, |ui| {
+    chip_frame(tok, None).show(ui, |ui| {
         ui.add(egui::Label::new(RichText::new(text).color(tok.status(s))).wrap());
     });
 }

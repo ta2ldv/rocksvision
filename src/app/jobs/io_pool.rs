@@ -2,7 +2,8 @@
 //! `LIMITS.max_io_inflight` at once (further requests fail fast with `REFUSED`). File-system
 //! access goes through the injectable `IoBackend`, so tests can delay or block reads.
 
-use super::{CopyJob, IoRequest, Outcome, Response, Tagged, hex_copy_text};
+use super::{CopyJob, IoRequest, Outcome, Response, Tagged};
+use crate::app::clipboard::hex_copy_text;
 use crate::discover::{self, DirEntry};
 use crate::io::RangeReader;
 use crate::limits::LIMITS;
@@ -109,7 +110,7 @@ pub(super) fn run(c: Ctx, req: IoRequest) {
     let Ctx { generation, job, tx, wake, inflight, cancel, backend } = c;
     let kind = IoKind::of(&req);
     if inflight.load(Ordering::SeqCst) >= LIMITS.max_io_inflight {
-        let _ = tx.send(Tagged { generation, msg: kind.failed(job, REFUSED) });
+        let _ = tx.send(Tagged { generation, job, msg: kind.failed(job, REFUSED) });
         wake();
         return;
     }
@@ -119,7 +120,7 @@ pub(super) fn run(c: Ctx, req: IoRequest) {
     let spawned = thread::Builder::new().name("rocksvision-io".into()).spawn(move || {
         let cancelled = || cancel.load(Ordering::Relaxed) >= job;
         let send = |msg: Response| {
-            let _ = tx2.send(Tagged { generation, msg });
+            let _ = tx2.send(Tagged { generation, job, msg });
             wake2();
         };
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_io(&*backend, job, req, &cancelled, &send)));
@@ -132,7 +133,7 @@ pub(super) fn run(c: Ctx, req: IoRequest) {
     });
     if let Err(e) = spawned {
         inflight.fetch_sub(1, Ordering::SeqCst);
-        let _ = tx.send(Tagged { generation, msg: kind.failed(job, &format!("cannot start an I/O thread: {e}")) });
+        let _ = tx.send(Tagged { generation, job, msg: kind.failed(job, &format!("cannot start an I/O thread: {e}")) });
         wake();
     }
 }
@@ -222,5 +223,54 @@ fn io_cancelled(req: u64, r: IoRequest) -> Response {
         IoRequest::Page { off, .. } => Response::Page { req, space: Space::File, off, outcome: Outcome::Cancelled },
         IoRequest::Copy { sel, .. } => Response::Copied { req, sel, outcome: Outcome::Cancelled },
         IoRequest::Stat(_) => Response::Stat { req, outcome: Outcome::Cancelled },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One I/O request of every kind; the exhaustive `match` makes a new `IoRequest` variant
+    /// fail to compile here until it is listed (0020 §6).
+    fn all_io_requests() -> Vec<IoRequest> {
+        let p = || PathBuf::from("x.log");
+        let reqs = vec![
+            IoRequest::Resolve(p()),
+            IoRequest::Scan(p()),
+            IoRequest::Page { path: p(), off: 16, len: 4 },
+            IoRequest::Copy { sel: 5, job: CopyJob::FileHex { path: p(), off: 0, len: 4, requested: 9 } },
+            IoRequest::Stat(p()),
+        ];
+        for r in &reqs {
+            match r {
+                IoRequest::Resolve(_) | IoRequest::Scan(_) | IoRequest::Page { .. } | IoRequest::Copy { .. } | IoRequest::Stat(_) => {}
+            }
+        }
+        reqs
+    }
+
+    /// The kind index and (req, failed?, cancelled?) of an I/O reply; None for other kinds.
+    fn io_reply(r: &Response) -> Option<(usize, u64, bool, bool)> {
+        let f = |o: bool, c: bool| (o, c);
+        let (k, req, (failed, cancelled)) = match r {
+            Response::Resolved { req, outcome, .. } => (0, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
+            Response::Scanned { req, outcome, .. } => (1, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
+            Response::Page { req, outcome, space: Space::File, off: 16 } => (2, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
+            Response::Copied { req, outcome, sel: 5 } => (3, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
+            Response::Stat { req, outcome } => (4, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
+            _ => return None,
+        };
+        Some((k, req, failed, cancelled))
+    }
+
+    /// Every I/O request has a Failed and a Cancelled reply of its own kind with its request id.
+    #[test]
+    fn every_io_request_fails_and_cancels_with_its_own_kind_and_req() {
+        for (i, r) in all_io_requests().iter().enumerate() {
+            assert_eq!(io_reply(&IoKind::of(r).failed(7, "x")), Some((i, 7, true, false)), "Failed reply of request #{i}");
+        }
+        for (i, r) in all_io_requests().into_iter().enumerate() {
+            assert_eq!(io_reply(&io_cancelled(7, r)), Some((i, 7, false, true)), "Cancelled reply of request #{i}");
+        }
     }
 }

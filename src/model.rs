@@ -26,23 +26,35 @@ impl Space {
             Space::Record(o) => format!("record@0x{o:x} (reassembled)"),
         }
     }
-    /// Short name of the offset column of a byte view in this space: FILE / BLK+ / REC+.
+    /// Short name of the offset column of a byte view in this space: FILE / BLOCK+ / RECORD+.
     pub fn offset_header(&self) -> &'static str {
         match self {
             Space::File => "FILE",
-            Space::Block(_) => "BLK+",
-            Space::Record(_) => "REC+",
+            Space::Block(_) => "BLOCK+",
+            Space::Record(_) => "RECORD+",
         }
     }
-    /// One "Where" line of a span in this space, e.g. "Reassembled record offset: rec@0x0
-    /// +0x8..+0xc" / "Decompressed block offset: blk@0x5c9 +0x6d, 103 B". File spans read
-    /// "File offset: [0xf,0x13) 4 B".
-    pub fn where_line(&self, offset: u64, len: u64) -> String {
+    /// Name of the address space in range and position texts: "file", "block@0x5c9"
+    /// (decompressed block contents), "record@0x0" (reassembled record).
+    pub fn name(&self) -> String {
         match self {
-            Space::File => format!("File offset: [0x{offset:x},0x{:x}) {len} B", offset.saturating_add(len)),
-            Space::Block(o) => format!("Decompressed block offset: blk@0x{o:x} +0x{offset:x}, {len} B"),
-            Space::Record(o) => format!("Reassembled record offset: rec@0x{o:x} +0x{offset:x}..+0x{:x}", offset.saturating_add(len)),
+            Space::File => "file".into(),
+            Space::Block(o) => format!("block@0x{o:x}"),
+            Space::Record(o) => format!("record@0x{o:x}"),
         }
+    }
+    /// One "Where" line of a span in this space: the shared range notation (`Span::range_text`).
+    pub fn where_line(&self, offset: u64, len: u64) -> String {
+        Span::new(*self, offset, len).range_text()
+    }
+}
+
+/// The one byte-range notation (0019 §2): half-open `[a,b)` in lowercase hex. Derived spaces
+/// mark offsets relative to their start with `+`: "[+0x6d,+0xd4)".
+pub fn range_text(space: Space, a: u64, b: u64) -> String {
+    match space {
+        Space::File => format!("[0x{a:x},0x{b:x})"),
+        _ => format!("[+0x{a:x},+0x{b:x})"),
     }
 }
 
@@ -85,9 +97,9 @@ impl SpaceMap {
                 let end = off.saturating_add(len.max(1));
                 let mut ranges = Vec::new();
                 for &(lo, fo, n) in segs {
-                    let (a, b) = (off.max(lo), end.min(lo + n));
+                    let (a, b) = (off.max(lo), end.min(lo.saturating_add(n)));
                     if a < b {
-                        ranges.push(Span::file(fo + (a - lo), if len == 0 { 0 } else { b - a }));
+                        ranges.push(Span::file(fo.saturating_add(a - lo), if len == 0 { 0 } else { b - a }));
                     }
                 }
                 if ranges.is_empty() {
@@ -115,8 +127,27 @@ impl Span {
     pub fn new(space: Space, offset: u64, len: u64) -> Self {
         Span { space, offset, len }
     }
+    /// `off` is a byte of this span (a zero-length span holds its start byte). Overflow-safe
+    /// near `u64::MAX` (0020 §2).
     pub fn contains(&self, space: Space, off: u64) -> bool {
-        self.space == space && off >= self.offset && off < self.offset + self.len.max(1)
+        self.space == space && off >= self.offset && off - self.offset < self.len.max(1)
+    }
+    /// End offset (exclusive).
+    pub fn end(&self) -> u64 {
+        self.offset.saturating_add(self.len)
+    }
+    /// The one range notation with its address space named (0019 §2): "file
+    /// [0x6390c,0x648fa) · 4078 B", "block@0x5c9 [+0x6d,+0xd4) · 103 B", "record@0x0
+    /// [+0x8,+0xc) · 4 B".
+    pub fn range_text(&self) -> String {
+        format!("{} {} · {} B", self.space.name(), range_text(self.space, self.offset, self.end()), self.len)
+    }
+    /// A single position: "file 0x6390c", "block@0x5c9 +0x6d", "record@0x0 +0x8".
+    pub fn position_text(&self) -> String {
+        match self.space {
+            Space::File => format!("file 0x{:x}", self.offset),
+            s => format!("{} +0x{:x}", s.name(), self.offset),
+        }
     }
 }
 
@@ -279,7 +310,7 @@ pub enum NodeKind {
         first: u64,
         count: u64,
     },
-    /// Table of every physical structure in file order (Start | End | Stored | Contents …).
+    /// Table of every physical structure in file order (Start | End | Stored | Payload …).
     SstLayout,
     /// Diagnostic text file (LOG, OPTIONS): raw bounded preview only.
     TextPreview,
@@ -459,11 +490,20 @@ pub struct Diagnostic {
     /// What the RocksDB engine does in this situation, with its source citation (version, file,
     /// function, lines). Only set where the behaviour was verified in the cited source.
     pub engine: Option<&'static str>,
+    /// SST block checksums (format_version ≥ 6): the context modifier added to the computed
+    /// value, so `expected` = engine computed + modifier and `observed` = the raw trailer value
+    /// (engine "stored" = observed − modifier). None when no modifier applies (or it is 0).
+    pub context_modifier: Option<u32>,
 }
 
 impl Diagnostic {
     pub fn new(check: CheckKind, span: Option<Span>, trusted: Trust, recovery: &'static str, note: impl Into<String>) -> Self {
-        Diagnostic { check, space: span.map(|s| s.space).unwrap_or(Space::File), span, expected: None, observed: None, trusted, recovery, note: note.into(), engine: None }
+        Diagnostic { check, space: span.map(|s| s.space).unwrap_or(Space::File), span, expected: None, observed: None, trusted, recovery, note: note.into(), engine: None, context_modifier: None }
+    }
+    /// Records the block checksum context modifier (kept only when non-zero).
+    pub fn modifier(mut self, m: u32) -> Self {
+        self.context_modifier = (m != 0).then_some(m);
+        self
     }
     pub fn engine(mut self, e: &'static str) -> Self {
         self.engine = Some(e);
@@ -854,6 +894,12 @@ pub struct View {
     pub lsm: Vec<LsmFile>,
     /// Problems found while decoding the structure shown (not printed by the text dump).
     pub diagnostics: Vec<Diagnostic>,
+    /// Check-status counts of every structure this table stands for (all pages; cache only),
+    /// for table views whose rows are checked lazily (0019 §1). Not printed by the dump.
+    pub tally: Option<RowTally>,
+    /// Current tallies of the table view nodes of this file (node kind → counts, cache only),
+    /// applied to the tree whenever any view is shown (review S2). Not printed by the dump.
+    pub tallies: Vec<(NodeKind, RowTally)>,
 }
 
 /// One live SST file of the observed LSM shape, as shown in the box diagram.
@@ -904,6 +950,101 @@ pub struct Child {
     /// nothing checked yet (no glyph, "· not checked"); otherwise `status` is the worst checked
     /// member (Present when the checked ones are clean; the glyph rule is `group_glyph`).
     pub checked: Option<(u64, u64)>,
+    /// A table view node (Physical layout table, Data blocks via index): the status counts of
+    /// the structures its table lists, from the check cache (0019 §1). Decides its glyph.
+    pub tally: Option<RowTally>,
+}
+
+/// Check-status counts of the structures a table lists (cache only, nothing read): the one
+/// source of a table view node's glyph, its tooltip and the table's summary line (0019 §1).
+/// Rows with another status (e.g. an unaccounted gap) are not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowTally {
+    pub invalid: u64,
+    pub truncated: u64,
+    pub present: u64,
+    pub not_checked: u64,
+    /// Checked with another outcome (e.g. "? Unknown" for an unknown checksum type, "⛔
+    /// Resource limit" for a block over the cap): neither a problem found nor ✔ (review S1).
+    pub other: u64,
+}
+
+impl RowTally {
+    /// Number of structures counted.
+    pub fn total(&self) -> u64 {
+        self.invalid + self.truncated + self.present + self.not_checked + self.other
+    }
+    /// Adds one structure: `None` = not checked.
+    pub fn add(&mut self, s: Option<Status>) {
+        match s {
+            None => self.not_checked += 1,
+            Some(Status::Invalid) => self.invalid += 1,
+            Some(Status::Truncated) => self.truncated += 1,
+            Some(Status::Present) => self.present += 1,
+            Some(_) => self.other += 1,
+        }
+    }
+    /// Takes back one structure counted by `add(s)` (its status changed; 0020 D1).
+    pub fn remove(&mut self, s: Option<Status>) {
+        let n = match s {
+            None => &mut self.not_checked,
+            Some(Status::Invalid) => &mut self.invalid,
+            Some(Status::Truncated) => &mut self.truncated,
+            Some(Status::Present) => &mut self.present,
+            Some(_) => &mut self.other,
+        };
+        *n = n.saturating_sub(1);
+    }
+    /// The glyph (worst of the rows, same "no claim" rule as groups, design A3): ✖ when any
+    /// row is Invalid, else ✂ when any is Truncated, else none while a row is not checked or
+    /// has another outcome (Unknown, Limited …), else ✔.
+    pub fn glyph(&self) -> Option<Status> {
+        if self.invalid > 0 {
+            Some(Status::Invalid)
+        } else if self.truncated > 0 {
+            Some(Status::Truncated)
+        } else if self.not_checked + self.other > 0 {
+            None
+        } else {
+            Some(Status::Present)
+        }
+    }
+    /// Summary next to the table title: "✖ 1 invalid · ✔ 515 present · 4 not checked" (fixed
+    /// order, zero terms left out; "not checked" has no glyph). None when nothing is counted.
+    pub fn summary(&self) -> Option<String> {
+        let parts: Vec<String> = self.parts().into_iter().map(|(_, t)| t).collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+    /// The summary's terms with their status (None: "not checked", shown without colour).
+    pub fn parts(&self) -> Vec<(Option<Status>, String)> {
+        [
+            (self.invalid, Some(Status::Invalid), "invalid"),
+            (self.truncated, Some(Status::Truncated), "truncated"),
+            (self.present, Some(Status::Present), "present"),
+            (self.not_checked, None, "not checked"),
+            (self.other, None, "other"),
+        ]
+        .into_iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(n, s, w)| (s, s.map_or_else(|| format!("{n} {w}"), |s| format!("{} {n} {w}", s.symbol()))))
+        .collect()
+    }
+    /// Tree tooltip of the view node.
+    pub fn tooltip(&self) -> String {
+        let other = if self.other > 0 { format!(" ({} other: unknown or limited, see their rows)", self.other) } else { String::new() };
+        match self.glyph() {
+            Some(Status::Invalid | Status::Truncated) => {
+                let tr = if self.truncated > 0 { format!(", {} truncated", self.truncated) } else { String::new() };
+                let ot = if self.other > 0 { format!(", {} other", self.other) } else { String::new() };
+                format!("Contains {} invalid{tr}, {} present{ot} and {} not-checked structures.", self.invalid, self.present, self.not_checked)
+            }
+            None if self.not_checked > 0 => {
+                format!("Not checked as a whole: {} of {} rows checked, none with a problem{other}.", self.present + self.other, self.present + self.other + self.not_checked)
+            }
+            None => format!("No status as a whole: {} present and {} other structures (unknown or limited, see their rows).", self.present, self.other),
+            _ => format!("All {} structures checked; none with a problem.", self.present),
+        }
+    }
 }
 
 /// Status word of bytes that are in range but were not checked (no glyph, no status claimed).
@@ -959,7 +1100,21 @@ pub fn group_glyph(status: Status, c: Option<(u64, u64)>) -> Option<Status> {
 
 impl Child {
     pub fn new(label: impl Into<String>, kind: NodeKind) -> Self {
-        Child { label: label.into(), kind, status: Status::Present, leaf: false, diag: None, contains: None, role: ChildRole::Structure, checked: None }
+        Child { label: label.into(), kind, status: Status::Present, leaf: false, diag: None, contains: None, role: ChildRole::Structure, checked: None, tally: None }
+    }
+    /// A table view node's row tally (see `tally`); its status is the tally's glyph (Unknown
+    /// while it claims none).
+    pub fn tally(mut self, t: RowTally) -> Self {
+        self.status = t.glyph().unwrap_or(Status::Unknown);
+        self.tally = Some(t);
+        self
+    }
+    /// The glyph this child shows: the tally's, a group's (`group_glyph`) or its status.
+    pub fn glyph(&self) -> Option<Status> {
+        match &self.tally {
+            Some(t) => t.glyph(),
+            None => group_glyph(self.status, self.checked),
+        }
     }
     /// A group's check coverage (see `checked`).
     pub fn checked(mut self, c: (u64, u64)) -> Self {
@@ -988,5 +1143,40 @@ impl Child {
     pub fn status(mut self, s: Status) -> Self {
         self.status = s;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0020 §2: spans near `u64::MAX` never panic; ends and mapped ranges saturate.
+    #[test]
+    fn span_bounds_near_u64_max() {
+        const M: u64 = u64::MAX;
+        // (span, probe offset, contains?)
+        for (s, off, want) in [
+            (Span::file(M - 1, 1), M - 1, true),
+            (Span::file(M - 1, 1), M, false),
+            (Span::file(M - 1, 5), M, true),
+            (Span::file(M, 0), M, true),
+            (Span::file(M, 0), M - 1, false),
+            (Span::file(M - 4, M), M, true),
+            (Span::file(0, M), M - 1, true),
+            (Span::file(0, M), M, false),
+            (Span::new(Space::Block(7), M, 1), M, true),
+            (Span::new(Space::Block(7), M, 1), 0, false),
+        ] {
+            assert_eq!(s.contains(s.space, off), want, "{s:?} contains {off:#x}");
+            assert!(!s.contains(Space::Record(9), off), "other space");
+        }
+        assert_eq!(Span::file(M - 1, 5).end(), M);
+        assert_eq!(Span::file(M - 1, 5).range_text(), format!("file [0x{:x},0x{M:x}) · 5 B", M - 1));
+        assert_eq!(Span::new(Space::Record(M), M - 2, 9).range_text(), format!("record@0x{M:x} [+0x{:x},+0x{M:x}) · 9 B", M - 2));
+        // Fragment maps whose record or file offsets reach the end of u64.
+        let map = SpaceMap::Fragments { segs: vec![(0, M - 4, 4), (4, M - 2, M)], headers: vec![] };
+        assert_eq!(map.file_ranges(2, 4), FileRanges::Exact { ranges: vec![Span::file(M - 2, 2), Span::file(M - 2, 2)], skipped: vec![] });
+        assert_eq!(map.file_ranges(M - 1, 1), FileRanges::Exact { ranges: vec![Span::file(M, 1)], skipped: vec![] });
+        assert_eq!(map.file_ranges(M, 0), FileRanges::Unknown, "the end of the record space holds no byte");
     }
 }

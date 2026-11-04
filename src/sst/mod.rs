@@ -12,7 +12,7 @@ pub mod layout;
 
 use crate::io::{RangeRead, RangeReader, read_vec};
 use crate::limits::{BLOCK_CACHE_BYTES, BLOCK_CACHE_ITEMS, KNOWN_BLOCK_HANDLES, MAX_DECOMPRESSED};
-use crate::model::{BlockKind, CheckKind, DecodedValue as DV, Diagnostic, Space, Span, Status, Trust};
+use crate::model::{BlockKind, CheckKind, DecodedValue as DV, Diagnostic, RowTally, Space, Span, Status, Trust};
 use crate::util::{fixed32, fixed64, varint64};
 use block::{Block, BlockCache, Entry, EntryError, IndexFmt, Layout, LayoutError};
 use footer::{BLOCK_TRAILER, Footer, Handle};
@@ -71,10 +71,26 @@ pub struct SstInspector {
     /// from it without reading any block.
     /// Value: (status, checksum actually compared, the check's diagnostic when it failed).
     checked: std::collections::HashMap<(u64, u64), CheckedBlock>,
+    /// Row tallies of the two table views over the cached layout (`layout_tallies`).
+    /// Boxed: keeps `Inspector::Sst` small (clippy::large_enum_variant).
+    tallies: Option<Box<LayoutTallies>>,
+    /// Full tally scans so far (bounded-cost test).
+    #[cfg(test)]
+    tally_scans: u64,
 }
 
 /// A remembered block check: (status, checksum actually compared, diagnostic if any).
 type CheckedBlock = (Status, bool, Option<Diagnostic>);
+
+/// Status counts of "Physical layout table" (`all`) and "Data blocks via index" (`data`) over
+/// one layout (0019 §1). Built by one scan of the layout, then kept current by `block_check`
+/// when a block's status changes, so attaching them to every view costs O(1), not O(blocks)
+/// (0020 D1, P3-F1: a 400-node dump of a 100 MB SST scanned all blocks twice per view).
+struct LayoutTallies {
+    layout: Arc<layout::PhysLayout>,
+    all: RowTally,
+    data: RowTally,
+}
 
 /// table_properties.cc / meta_blocks.cc: properties written with PutVarint64.
 const U64_PROPS: &[&str] = &[
@@ -197,6 +213,9 @@ impl SstInspector {
             dict: None,
             known: std::collections::HashMap::new(),
             checked: std::collections::HashMap::new(),
+            tallies: None,
+            #[cfg(test)]
+            tally_scans: 0,
         };
         if let Ok(f) = s.footer.clone() {
             let b = s.block(f.metaindex, BlockKind::Metaindex);
@@ -395,9 +414,61 @@ impl SstInspector {
         let (st, d, verified) = self.block_check_uncached(h);
         if self.checked.len() >= KNOWN_BLOCK_HANDLES {
             self.checked.clear();
+            // Every block is "not checked" again: the next view rescans.
+            self.tallies = None;
         }
-        self.checked.insert((h.offset, h.size), (st, verified, d.clone()));
+        let prev = self.checked.insert((h.offset, h.size), (st, verified, d.clone())).map(|c| c.0);
+        if prev != Some(st) {
+            self.retally(h, prev, st);
+        }
         (st, d)
+    }
+
+    /// Status counts of the two table views over layout `l` (cache only, never reads; 0019
+    /// §1): (every layout item and invalid handle, only the data blocks). Gaps are not counted.
+    /// Scanned once per layout, then updated per check (`retally`).
+    pub fn layout_tallies(&mut self, l: &Arc<layout::PhysLayout>) -> (RowTally, RowTally) {
+        if let Some(t) = &self.tallies
+            && Arc::ptr_eq(&t.layout, l)
+        {
+            return (t.all, t.data);
+        }
+        let (all, data) = (self.scan_tally(l, false), self.scan_tally(l, true));
+        #[cfg(test)]
+        {
+            self.tally_scans += 1;
+        }
+        self.tallies = Some(Box::new(LayoutTallies { layout: l.clone(), all, data }));
+        (all, data)
+    }
+
+    fn scan_tally(&self, l: &layout::PhysLayout, data_only: bool) -> RowTally {
+        let mut t = RowTally::default();
+        let wanted = |it: &layout::Item| !data_only || it.block_kind() == Some(BlockKind::Data);
+        for it in l.items.iter().filter(|it| wanted(it)) {
+            t.add(match it.block_kind() {
+                None => Some(if self.footer.is_ok() { Status::Present } else { Status::Invalid }),
+                Some(_) => self.checked_status(it.handle()),
+            });
+        }
+        for _ in l.invalid.iter().filter(|it| wanted(it)) {
+            t.add(Some(Status::Invalid));
+        }
+        t
+    }
+
+    /// Moves block `h` from `prev` (None: not checked) to `now` in the kept tallies, when it
+    /// is a block of their layout (the Footer and invalid handles never change).
+    fn retally(&mut self, h: Handle, prev: Option<Status>, now: Status) {
+        let Some(t) = &mut self.tallies else { return };
+        let Some(it) = t.layout.item_at_start(h.offset).map(|i| &t.layout.items[i]) else { return };
+        let Some(kind) = it.block_kind().filter(|_| it.handle() == h) else { return };
+        t.all.remove(prev);
+        t.all.add(Some(now));
+        if kind == BlockKind::Data {
+            t.data.remove(prev);
+            t.data.add(Some(now));
+        }
     }
 
     /// Status of block `h` if it was already checked (never reads).
@@ -476,7 +547,8 @@ impl SstInspector {
                         Status::Invalid,
                         Some(
                             Diagnostic::new(footer::checksum_check(ct), span, Trust::Untrusted, "entries are still decoded for inspection but are not trusted", "Block checksum MISMATCH")
-                                .values(Some(DV::U32(c.wrapping_add(modifier))), Some(DV::U32(stored))),
+                                .values(Some(DV::U32(c.wrapping_add(modifier))), Some(DV::U32(stored)))
+                                .modifier(modifier),
                         ),
                     ),
                     None => (Status::Unknown, None),
@@ -621,5 +693,30 @@ mod tests {
         assert_eq!(st, b.error.as_ref().unwrap().0);
         assert_eq!(d.as_ref(), Some(&err), "status and diagnostic come from the same problem");
         assert_eq!(s.checked_result(h).and_then(|r| r.1), Some(&err));
+    }
+
+    /// 0020 D1 (P3-F1): the table-view tallies attached to every view are scanned once per
+    /// layout and then follow each block check, so N views cost N lookups, not N × blocks; the
+    /// kept counts always equal a fresh scan (including a block turning Invalid).
+    #[test]
+    fn layout_tallies_are_scanned_once_and_follow_every_check() {
+        use crate::model::NodeKind;
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/corrupt/sst-bitflip-data-block.sst");
+        let mut s = SstInspector::open(RangeReader::open(&p).unwrap());
+        let never = || false;
+        let l = s.layout(&never);
+        let fresh = |s: &SstInspector| (s.scan_tally(&l, false), s.scan_tally(&l, true));
+        s.view(&NodeKind::Root, &never);
+        assert_eq!(s.tally_scans, 1);
+        let blocks: Vec<_> = l.items.iter().filter_map(|it| Some((it.handle(), it.block_kind()?))).take(40).collect();
+        assert!(blocks.len() > 10, "fixture has many blocks: {}", blocks.len());
+        for &(h, kind) in &blocks {
+            let v = s.view(&NodeKind::SstBlock { off: h.offset, size: h.size, kind }, &never);
+            let (all, data) = fresh(&s);
+            assert_eq!(v.tallies, vec![(NodeKind::SstLayout, all), (NodeKind::SstDataBlocks { skip: 0 }, data)], "block @{:#x}", h.offset);
+        }
+        let (all, data) = s.layout_tallies(&l);
+        assert_eq!((all.invalid, data.invalid), (1, 1), "the flipped data block is counted once it is checked");
+        assert_eq!(s.tally_scans, 1, "{} views, one scan", blocks.len() + 1);
     }
 }

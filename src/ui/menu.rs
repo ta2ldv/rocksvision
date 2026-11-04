@@ -215,7 +215,7 @@ impl MenuCmd {
         use MenuCmd as C;
         match self {
             C::GotoOffset => (st.session().file().is_some(), false),
-            C::FindNext | C::FindPrev => (!st.search().query().is_empty(), false),
+            C::FindNext | C::FindPrev => (st.search().can_step(), false),
             C::ZoomIn | C::ZoomInPlus => (st.can_zoom_in(), false),
             C::Theme(i) => (true, THEMES.get(i).map(|t| t.id == st.prefs().theme_id()).unwrap_or(false)),
             C::TogglePanel(p) => (true, st.prefs().shown(p)),

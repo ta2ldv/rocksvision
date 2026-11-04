@@ -6,7 +6,7 @@
 //! for a MANIFEST, "Observed levels (derived view)". A fragment's status is about its own bytes
 //! only; whether a record is complete is the record's `Reassembly`.
 
-use super::common::{Location, bytes_dec_hex, error_view, explained, of_fields, range, size_row, st_cell, st_word_cell};
+use super::common::{Location, error_view, explained, of_fields, range, range_len, size_row, st_cell, st_word_cell};
 use crate::format::codec::compression_name;
 use crate::format::log::{self, BLOCK_SIZE, FragRole, Logical, OpenTail, Phys, PhysKind, Reassembly};
 use crate::limits::{
@@ -601,7 +601,11 @@ impl LogInspector {
                 .kind(K::StructureRef)
                 .status(l.status)
                 .link(NodeKind::LogRecord(l.start))
-                .explain(if l.note.is_empty() { format!("Logical record {} reassembled from {} fragment(s); double-click to open it.", range(l.start, l.end), l.frag_count) } else { l.note.clone() })
+                .explain(if l.note.is_empty() {
+                    format!("Logical record: {} fragment(s) · {} reassembled; double-click to open it.", l.frag_count, Span::new(Space::Record(l.start), 0, l.total_len).range_text())
+                } else {
+                    l.note.clone()
+                })
                 .diag(l.diag.clone());
             let cells = vec![fld.name.clone(), format!("0x{:x}", l.start), (l.end - l.start).to_string(), fld.value.clone(), header_variant(&l), String::new(), record_status_cell(&l)];
             rows.push(Row { cells, field: fld });
@@ -623,7 +627,7 @@ impl LogInspector {
             let mut v = of_fields("Block groups", vec![Field::new("blocks", None, format!("{count} blocks; expand a group"))]);
             v.notes.push("Large file: blocks are grouped; only expanded groups are scanned.".into());
             let (a, z) = (first * BLOCK_SIZE, ((first + count) * BLOCK_SIZE).min(self.len()));
-            v.location = vec![WhereLine { text: format!("file {}", range(a, z)), link: None }];
+            v.location = vec![WhereLine { text: Span::file(a, z.saturating_sub(a)).range_text(), link: None }];
             v.extent = Some(Span::file(a, z.saturating_sub(a)));
             return v;
         }
@@ -657,7 +661,7 @@ impl LogInspector {
             title: format!("Blocks {}..{}", first, first + n - 1),
             columns: vec![col(R::Index, "#"), col(R::Offset, "File offset"), col(R::Len, "Bytes"), col(R::Count, "Records"), col(R::Summary, "Types"), col(R::Status, "Status")],
             rows,
-            location: vec![WhereLine { text: format!("file {}", range(first * BLOCK_SIZE, ((first + n) * BLOCK_SIZE).min(self.len()))), link: None }],
+            location: vec![WhereLine { text: Span::file(first * BLOCK_SIZE, ((first + n) * BLOCK_SIZE).min(self.len()) - first * BLOCK_SIZE).range_text(), link: None }],
             extent: Some(Span::file(first * BLOCK_SIZE, ((first + n) * BLOCK_SIZE).min(self.len()) - first * BLOCK_SIZE)),
             ..Default::default()
         }
@@ -685,7 +689,19 @@ impl LogInspector {
                     Some(c) => format!("{:08x} / {:08x}", crate::util::crc_unmask(p.stored_crc), c),
                     None => "-".into(),
                 };
-                let fld = Field::new(format!("physical item {i}"), Some(Span::file(p.offset, p.end - p.offset)), ty.clone())
+                // Meaning (0020 §2): header and payload ranges in the one notation, then the
+                // engine's fragment type word; the whole range is on the Where line.
+                let meaning = if p.header_len > 0 && matches!(p.kind, PhysKind::Record | PhysKind::Truncated) {
+                    format!(
+                        "header {} · payload {} · {}",
+                        Span::file(p.offset, p.payload_off - p.offset).range_text(),
+                        range_len(p.payload_off, p.payload_off + p.payload_avail),
+                        log::type_name(p.rtype)
+                    )
+                } else {
+                    ty.clone()
+                };
+                let fld = Field::new(format!("physical item {i}"), Some(Span::file(p.offset, p.end - p.offset)), meaning)
                     .kind(K::StructureRef)
                     .status(st)
                     .link(NodeKind::LogFragment(p.offset))
@@ -836,10 +852,9 @@ impl LogInspector {
                             .status(Status::Implicit)
                             .link(NodeKind::LogRecord(start))
                             .explain(format!(
-                                "This fragment's payload is reassembled offsets [0x{:x}, 0x{:x}) of the logical record {}.",
-                                l.frags[pos].logical_off,
-                                l.frags[pos].logical_off + l.frags[pos].len,
-                                range(l.start, l.end)
+                                "This fragment's payload is {} of the logical record at {}.",
+                                Span::new(Space::Record(start), l.frags[pos].logical_off, l.frags[pos].len).range_text(),
+                                Span::file(l.start, l.end - l.start).range_text()
                             )),
                     );
                 }
@@ -997,7 +1012,7 @@ impl LogInspector {
             Field::new("reassembled length", None, format!("{} bytes in {} fragment(s)", l.total_len, l.frag_count))
                 .kind(K::Length)
                 .dv(DV::U64(l.total_len))
-                .explain("Sum of fragment payload lengths. Logical offsets below are relative to the reassembled record (rec+), not the file."),
+                .explain("Sum of fragment payload lengths. Logical offsets below are relative to the reassembled record (record+, RECORD+ in the byte view), not the file."),
             Field::new("reassembly", None, l.reassembly().text())
                 .status(if l.reassembly() == Reassembly::Complete { Status::Implicit } else { l.status })
                 .diag(l.diag.clone())
@@ -1018,7 +1033,7 @@ impl LogInspector {
                 Field::new(
                     format!("fragment {i} {}", log::type_name(fr.rtype)),
                     Some(Span::file(fr.payload_off, fr.len)),
-                    format!("file 0x{:x}+{} -> rec+0x{:x}", fr.payload_off, fr.len, fr.logical_off),
+                    format!("{} -> {} {}", Span::file(fr.payload_off, fr.len).range_text(), sp.name(), range_text(sp, fr.logical_off, fr.logical_off + fr.len)),
                 )
                 .enc("payload bytes")
                 .status(match fr.crc_ok {
@@ -1029,11 +1044,10 @@ impl LogInspector {
                 .kind(K::Payload)
                 .link(NodeKind::LogFragment(fr.offset))
                 .explain(format!(
-                    "Source fragment: physical header at file 0x{:x} ({} B header). This payload occupies reassembled offsets [0x{:x}, 0x{:x}).",
+                    "Source fragment: physical header at file 0x{:x} ({} B header). This payload occupies {} of the reassembled record.",
                     fr.offset,
                     fr.header_len,
-                    fr.logical_off,
-                    fr.logical_off + fr.len
+                    Span::new(sp, fr.logical_off, fr.len).range_text()
                 )),
             );
         }
@@ -1056,7 +1070,7 @@ impl LogInspector {
             FragRole::Meta => f.extend(meta_fields(l)),
             FragRole::Full | FragRole::First if mode == LogMode::Wal => {
                 if let Some(cn) = l.decompressed_from {
-                    f.push(Field::new("stream decompression", None, format!("{} -> {} bytes ({})", cn, l.total_len, compression_name(comp as u8))).status(Status::Implicit).explain("Fragment payloads are one compressed stream per record. The fragment rows give the FILE ranges of the compressed payload bytes (their \"-> rec+\" value is the position in the compressed stream). The WriteBatch fields below use rec+ offsets of the DECOMPRESSED WriteBatch, which have no byte-to-byte mapping to file offsets."));
+                    f.push(Field::new("stream decompression", None, format!("{} -> {} bytes ({})", cn, l.total_len, compression_name(comp as u8))).status(Status::Implicit).explain("Fragment payloads are one compressed stream per record. The fragment rows give the FILE ranges of the compressed payload bytes (their \"-> record@…\" range is the position in the compressed stream). The WriteBatch fields below use record+ offsets of the DECOMPRESSED WriteBatch, which have no byte-to-byte mapping to file offsets."));
                 }
                 if comp != 0 && l.decompressed_from.is_none() {
                     f.push(Field::new("WriteBatch", Some(Span::new(sp, 0, data.len() as u64)), format!("{}-compressed stream", compression_name(comp as u8))).status(l.status).explain(l.note.clone()));
@@ -1114,17 +1128,17 @@ impl LogInspector {
             map: record_map(l),
         });
         let first = l.frags.first().map(|fr| NodeKind::LogFragment(fr.offset));
-        let mut loc = vec![
-            WhereLine { text: format!("file {} · stored {} in {} fragment(s)", range(l.start, l.end), bytes_dec_hex(l.end - l.start), l.frag_count), link: None },
-            WhereLine {
-                text: format!(
-                    "reassembled contents {}{}",
-                    bytes_dec_hex(l.total_len),
-                    if l.decompressed_from.is_some() { " (decompressed stream; no byte mapping to file offsets)" } else { " (record offsets map to fragment payload bytes)" }
-                ),
-                link: None,
-            },
-        ];
+        // 0020 §1: one line, the stored file range in its fragments and the derived record space.
+        let mut loc = vec![WhereLine {
+            text: format!(
+                "{} in {} fragment(s) -> {} {}",
+                Span::file(l.start, l.end - l.start).range_text(),
+                l.frag_count,
+                Span::new(sp, 0, data.len() as u64).range_text(),
+                if l.decompressed_from.is_some() { "decompressed (no byte mapping to file offsets)" } else { "reassembled (record offsets map to fragment payload bytes)" }
+            ),
+            link: None,
+        }];
         if let Some(k) = first {
             loc.push(WhereLine { text: format!("first fragment at 0x{:x} ›", l.start), link: Some(Target { node: k, span: None }) });
         }

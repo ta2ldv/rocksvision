@@ -20,24 +20,92 @@ pub enum PageState {
     Cancelled,
 }
 
+/// A page the byte view needs: the caller (`AppState`) issues the read through `JobState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageReq {
+    pub space: Space,
+    pub base: u64,
+}
+
+/// The byte view: offset space, page, load state, one-shot scroll request and the Go-to text
+/// (which describes the position shown, design B3). Fields are private; `app` moves it through
+/// `reveal` / `show_space` / `ensure_visible` and executes the returned `PageReq`.
 #[derive(Clone, Debug)]
 pub struct HexState {
-    pub(super) space: Space,
-    pub(super) space_title: String,
-    pub(super) size: u64,
-    pub(super) page_base: u64,
-    pub(super) load: PageState,
+    space: Space,
+    space_title: String,
+    size: u64,
+    page_base: u64,
+    load: PageState,
     /// One-shot request for the byte view to scroll this offset into view.
-    pub(super) scroll_to: Option<u64>,
+    scroll_to: Option<u64>,
+    goto: String,
 }
 
 impl Default for HexState {
     fn default() -> Self {
-        HexState { space: Space::File, space_title: String::new(), size: 0, page_base: 0, load: PageState::Idle, scroll_to: None }
+        HexState { space: Space::File, space_title: String::new(), size: 0, page_base: 0, load: PageState::Idle, scroll_to: None, goto: String::new() }
     }
 }
 
+/// The Go-to text of an offset the byte view moved to.
+fn goto_text(off: u64) -> String {
+    format!("0x{off:x}")
+}
+
 impl HexState {
+    /// The Go-to field text (follows the position the byte view moves to).
+    pub fn goto(&self) -> &str {
+        &self.goto
+    }
+    /// The pending one-shot scroll request (not taken).
+    pub fn scroll_to(&self) -> Option<u64> {
+        self.scroll_to
+    }
+    pub(super) fn set_goto(&mut self, s: String) {
+        self.goto = s;
+    }
+    pub(super) fn take_scroll(&mut self) -> Option<u64> {
+        self.scroll_to.take()
+    }
+    /// No page (no file open).
+    pub(super) fn idle(&mut self) {
+        self.load = PageState::Idle;
+    }
+
+    /// Moves the byte view to `s`: its space (`title` gives the space's title and size when it
+    /// changes), the page holding `s.offset` (returned when it must be read) and the Go-to text.
+    pub(super) fn reveal(&mut self, s: Span, title: impl FnOnce() -> (String, u64)) -> Option<PageReq> {
+        if s.space != self.space {
+            let (t, size) = title();
+            self.set_space(s.space, size, t);
+        }
+        let need = self.ensure_visible(s.offset).then_some(PageReq { space: s.space, base: self.page_base });
+        self.goto = goto_text(s.offset);
+        need
+    }
+
+    /// Pages the byte view to `base` in its space (page buttons): the page to read; the Go-to
+    /// text follows (B3, 0015 C3).
+    pub(super) fn page_to(&mut self, base: u64) -> PageReq {
+        self.goto = goto_text(base);
+        PageReq { space: self.space, base }
+    }
+
+    /// Shows offset space `space` from its start (button "show block@… (decompressed)"): page
+    /// 0 is always (re)read and Go-to says 0x0.
+    pub(super) fn show_space(&mut self, space: Space, size: u64, title: String) -> PageReq {
+        self.set_space(space, size, title);
+        self.goto = goto_text(0);
+        PageReq { space, base: 0 }
+    }
+
+    /// Parses the Go-to text: decimal, or hex with a `0x` prefix.
+    pub(super) fn parse_offset(t: &str) -> Option<u64> {
+        let t = t.trim();
+        if let Some(h) = t.strip_prefix("0x") { u64::from_str_radix(h, 16).ok() } else { t.parse::<u64>().ok() }
+    }
+
     pub fn space(&self) -> Space {
         self.space
     }
@@ -185,6 +253,43 @@ fn utf8_preview(b: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::interpretations;
+    use super::{HexState, PAGE, PageReq, PageState};
+    use crate::model::{Space, Span};
+
+    /// 0020 §4: `reveal` — same space and visible: no read, Go-to set; another page: PageReq;
+    /// another space: space set + PageReq; an offset past the size still names its page.
+    #[test]
+    fn reveal_table() {
+        let ready = |space: Space, base: u64| {
+            let mut h = HexState::default();
+            h.set_space(space, 3 * PAGE, "t".into());
+            h.begin(1, base);
+            assert!(h.complete(1, space, crate::app::jobs::Outcome::Done((vec![0; 16], 3 * PAGE))));
+            h
+        };
+        let title = || ("Block".to_string(), 500);
+        // Same space, visible page.
+        let mut h = ready(Space::File, 0);
+        assert_eq!(h.reveal(Span::file(0x10, 4), title), None);
+        assert_eq!((h.goto(), h.scroll_to(), h.space()), ("0x10", Some(0x10), Space::File));
+        // Another page of the same space.
+        assert_eq!(h.reveal(Span::file(PAGE + 3, 1), title), Some(PageReq { space: Space::File, base: PAGE }));
+        assert_eq!((h.goto(), h.page_base()), (format!("0x{:x}", PAGE + 3).as_str(), PAGE));
+        // Another space: switched (title + size from the callback), page 0 requested.
+        let mut h = ready(Space::File, 0);
+        assert_eq!(h.reveal(Span::new(Space::Block(7), 0x20, 1), title), Some(PageReq { space: Space::Block(7), base: 0 }));
+        assert_eq!((h.space(), h.space_title(), h.size(), h.load(), h.goto()), (Space::Block(7), "Block", 500, &PageState::Idle, "0x20"));
+        // An offset past the size: its page is still requested (the reply says it is empty).
+        let mut h = ready(Space::File, 0);
+        assert_eq!(h.reveal(Span::file(10 * PAGE, 1), title), Some(PageReq { space: Space::File, base: 10 * PAGE }));
+        // Go-to parsing and show_space.
+        assert_eq!((HexState::parse_offset(" 0x1f "), HexState::parse_offset("31"), HexState::parse_offset("0xzz")), (Some(31), Some(31), None));
+        assert_eq!(h.show_space(Space::Record(9), 40, "R".into()), PageReq { space: Space::Record(9), base: 0 });
+        assert_eq!((h.space(), h.goto()), (Space::Record(9), "0x0"));
+        // Page buttons: the page of the current space, Go-to follows (architect leak 4).
+        assert_eq!(h.page_to(2 * PAGE), PageReq { space: Space::Record(9), base: 2 * PAGE });
+        assert_eq!(h.goto(), format!("0x{:x}", 2 * PAGE));
+    }
 
     /// Every number is one token; separators are never inside a token.
     #[test]

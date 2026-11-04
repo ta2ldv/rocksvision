@@ -10,7 +10,7 @@ use crate::format::log::{is_open_at_eof, is_read_error};
 pub const RECOVERY_LABEL: &str = "RocksVision recovery";
 /// Label of the line citing RocksDB behaviour, shown only with source evidence.
 pub const ENGINE_LABEL: &str = "Engine reference (source-cited)";
-use crate::model::{CheckKind, DecodedValue, Diagnostic, Space, Span, Status, Trust, View};
+use crate::model::{CheckKind, DecodedValue, Diagnostic, RowTally, Span, Status, Trust, View};
 
 /// Text shown when the parser recorded no value for a line.
 pub const NOT_RECORDED: &str = "not recorded by the parser";
@@ -122,9 +122,48 @@ fn is_checksum(c: CheckKind) -> bool {
     matches!(c, CheckKind::Crc32c | CheckKind::XxHash | CheckKind::XxHash64 | CheckKind::Xxh3)
 }
 
-/// "file 0x1a2b..0x1a2f (4 B)" / "block@0x… (decompressed) 0x10..0x14 (4 B)".
+/// "file [0x1a2b,0x1a2f) · 4 B" / "block@0x5c9 [+0x10,+0x14) · 4 B": the one range notation.
 pub fn span_text(s: &Span) -> String {
-    format!("{} 0x{:x}..0x{:x} ({} B)", s.space.label(), s.offset, s.offset.saturating_add(s.len), s.len)
+    s.range_text()
+}
+
+/// Label of the Diagnosis line giving a block checksum in the engine's own form.
+pub const ENGINE_FORM_LABEL: &str = "Engine form";
+
+/// The checksum values as RocksDB reports them, when a context modifier was applied
+/// (format_version ≥ 6): stored = trailer − modifier, computed = without modifier. Source:
+/// RocksDB 10.4.2 table/block_based/reader_common.cc VerifyBlockChecksum (stored −=
+/// ChecksumModifierForContext; the message prints both in decimal). None for other checks,
+/// without a modifier or without both values.
+pub fn engine_form(d: &Diagnostic) -> Option<String> {
+    let m = d.context_modifier?;
+    if !is_checksum(d.check) {
+        return None;
+    }
+    let (Some(DecodedValue::U32(exp)), Some(DecodedValue::U32(obs))) = (&d.expected, &d.observed) else { return None };
+    let (stored, computed) = (obs.wrapping_sub(m), exp.wrapping_sub(m));
+    Some(format!("stored 0x{stored:08x} · computed 0x{computed:08x} (context modifier 0x{m:08x} removed) = {stored} / {computed}"))
+}
+
+/// Derivation of an Invalid/Truncated element (0019 §1): the specific recorded cause from its
+/// diagnostic, e.g. "Invalid: XXH3 checksum mismatch, found when this block was read. Details
+/// in Diagnosis above."; None without a diagnostic (the caller keeps the generic meaning).
+/// `block`: the element is an SST block (its row links to one), else "these bytes".
+pub fn failure_derivation(status: Status, d: Option<&Diagnostic>, block: bool) -> Option<String> {
+    let d = d.filter(|_| is_failure(status))?;
+    let block = block || d.context_modifier.is_some();
+    let when = if block { "found when this block was read" } else { "found when these bytes were read" };
+    let what = match d.check {
+        CheckKind::Crc32c => "CRC32c checksum mismatch,".to_string(),
+        CheckKind::XxHash => "xxHash32 checksum mismatch,".to_string(),
+        CheckKind::XxHash64 => "xxHash64 checksum mismatch,".to_string(),
+        CheckKind::Xxh3 => "XXH3 checksum mismatch,".to_string(),
+        // Review N1: bytes cut by the end of file (a record left open keeps its own label).
+        CheckKind::Truncation if diag_check_label(d) == check_label(CheckKind::Truncation) => "cut off by the end of file,".to_string(),
+        _ => format!("{} failed", diag_check_label(d)),
+    };
+    let when = if what.ends_with(',') { when.to_string() } else { when.replacen("found ", "", 1) };
+    Some(format!("{}: {what} {when}. Details in Diagnosis above.", status.label()))
 }
 
 /// Display form of a typed expected/observed value (checksums and codes in hex).
@@ -148,10 +187,30 @@ pub fn value_text(v: &DecodedValue) -> String {
 }
 
 fn at(s: &Span) -> String {
-    match s.space {
-        Space::File => format!("file 0x{:x}", s.offset),
-        _ => format!("0x{:x} of {}", s.offset, s.space.label()),
+    s.position_text()
+}
+
+/// Explanation legend of a table view with lazily checked rows (0019 §1): one line per status
+/// that occurs, in the order Present, Invalid, Truncated, Not checked. `None` = Not checked
+/// (no glyph).
+pub fn table_legend(t: &RowTally) -> Vec<(Option<Status>, &'static str)> {
+    let mut v = Vec::new();
+    if t.present > 0 {
+        v.push((Some(Status::Present), "Present: checked; no problem found."));
     }
+    if t.invalid > 0 {
+        v.push((Some(Status::Invalid), "Invalid: a check failed when this block was read. Select the row for its Diagnosis."));
+    }
+    if t.truncated > 0 {
+        v.push((Some(Status::Truncated), "Truncated: the file ends before this block does. Select the row for its Diagnosis."));
+    }
+    if t.not_checked > 0 {
+        v.push((None, "Not checked: not read yet; checked when you open the block or expand its group."));
+    }
+    if t.other > 0 {
+        v.push((None, "Other (Unknown, Resource limit): checked, but neither ✔ nor ✖ can be claimed. Select the row for its statement."));
+    }
+    v
 }
 
 /// The trust line (spec §12.4) from the parser's trust and check.
@@ -184,6 +243,9 @@ pub fn diagnosis(status: Status, d: Option<&Diagnostic>) -> Diagnosis {
             }
             line("Expected", d.expected.as_ref().map(value_text).unwrap_or_else(|| NOT_AVAILABLE.into()), None);
             line("Observed", d.observed.as_ref().map(value_text).unwrap_or_else(|| NOT_AVAILABLE.into()), None);
+            if let Some(e) = engine_form(d) {
+                line(ENGINE_FORM_LABEL, e, None);
+            }
             line("Finding", if d.note.is_empty() { NOT_RECORDED.into() } else { d.note.clone() }, None);
             line("Decoded content", trust_text(d), None);
             line(RECOVERY_LABEL, if d.recovery.is_empty() { NOT_RECORDED.into() } else { d.recovery.to_string() }, None);
@@ -295,7 +357,7 @@ pub fn node_failures(view: &View, node_status: Option<Status>, node_diag: Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::NodeKind;
+    use crate::model::{NodeKind, Space};
     use std::path::PathBuf;
 
     fn fx(rel: &str) -> PathBuf {
@@ -324,6 +386,63 @@ mod tests {
 
     /// Field-level grid of a block checksum mismatch: check, span link, expected ≠ observed,
     /// trust and the reader's actual recovery.
+    /// 0019 §2c: the engine form of a block checksum with a context modifier. Numbers from the
+    /// 0017 corrupt block #100 (RocksDB reported stored = 3862634852, computed = 2307332483).
+    /// Omitted without a modifier, for non-checksum checks and without both values.
+    #[test]
+    fn engine_form_removes_the_context_modifier() {
+        let d = |m: u32| {
+            Diagnostic::new(CheckKind::Xxh3, Some(Span::file(0x6390c, 4078)), Trust::Untrusted, "r", "Block checksum MISMATCH")
+                .values(Some(DecodedValue::U32(0x8e833287)), Some(DecodedValue::U32(0xeb373a68)))
+                .modifier(m)
+        };
+        let with = d(0x04fc1904);
+        assert_eq!(engine_form(&with).as_deref(), Some("stored 0xe63b2164 · computed 0x89871983 (context modifier 0x04fc1904 removed) = 3862634852 / 2307332483"));
+        let g = diagnosis(Status::Invalid, Some(&with));
+        let labels: Vec<_> = g.lines.iter().map(|l| l.label).collect();
+        assert_eq!(&labels[..5], &["Check", "Bytes", "Expected", "Observed", ENGINE_FORM_LABEL], "directly below Observed");
+        assert_eq!(label(&g, "Bytes").text, "file [0x6390c,0x648fa) · 4078 B");
+        assert_eq!(label(&g, "Expected").text, "0x8e833287", "Expected/Observed unchanged");
+        assert_eq!(engine_form(&d(0)), None, "modifier 0 (format_version < 6): Expected/Observed already are the engine values");
+        assert!(!diagnosis(Status::Invalid, Some(&d(0))).lines.iter().any(|l| l.label == ENGINE_FORM_LABEL));
+        let mut other = with.clone();
+        other.check = CheckKind::Magic;
+        assert_eq!(engine_form(&other), None);
+        let mut one = with.clone();
+        one.expected = None;
+        assert_eq!(engine_form(&one), None);
+        // Derivation: specific cause, generic template for other checks, None without a diag.
+        assert_eq!(failure_derivation(Status::Invalid, Some(&with), false).as_deref(), Some("Invalid: XXH3 checksum mismatch, found when this block was read. Details in Diagnosis above."));
+        let s = Diagnostic::new(CheckKind::RestartCount, None, Trust::Partial, "r", "n");
+        assert_eq!(failure_derivation(Status::Invalid, Some(&s), true).as_deref(), Some("Invalid: Restart point count failed when this block was read. Details in Diagnosis above."));
+        assert_eq!(failure_derivation(Status::Truncated, Some(&s), false).as_deref(), Some("Truncated: Restart point count failed when these bytes were read. Details in Diagnosis above."));
+        assert_eq!(failure_derivation(Status::Invalid, None, true), None);
+        let cut = Diagnostic::new(CheckKind::Truncation, Some(Span::file(0x10, 8)), Trust::Untrusted, "r", "short read");
+        assert_eq!(failure_derivation(Status::Truncated, Some(&cut), true).as_deref(), Some("Truncated: cut off by the end of file, found when this block was read. Details in Diagnosis above."));
+        assert_eq!(failure_derivation(Status::Present, Some(&with), true), None);
+    }
+
+    /// 0019 §2c on a real fv6 file: the engine "computed" equals the raw checksum RocksVision
+    /// computes over payload + type byte (trailer view), "stored" = trailer − modifier.
+    #[test]
+    fn engine_form_matches_the_raw_computed_checksum() {
+        let p = fx("tests/fixtures/corrupt/sst-bitflip-data-block.sst");
+        let mut s = crate::sst::SstInspector::open(crate::io::RangeReader::open(&p).unwrap());
+        let l = s.layout(&|| false);
+        let h = l.items[0].handle();
+        let b = s.block(h, crate::model::BlockKind::Data);
+        let d = b.diags.iter().find(|d| is_checksum(d.check)).expect("checksum diagnostic");
+        assert_eq!(d.context_modifier, Some(b.modifier));
+        let e = engine_form(d).expect("engine form");
+        let (stored, computed) = (b.stored_checksum.wrapping_sub(b.modifier), b.computed_checksum.unwrap());
+        assert!(e.starts_with(&format!("stored 0x{stored:08x} · computed 0x{computed:08x} ")) && e.ends_with(&format!(" = {stored} / {computed}")), "{e}");
+        // A clean fv6 block has no diagnostic, hence no engine line.
+        let mut z = crate::sst::SstInspector::open(crate::io::RangeReader::open(&fx("examples/files/sst-zstd/sst-zstd.sst")).unwrap());
+        let zl = z.layout(&|| false);
+        let zb = z.block(zl.items[0].handle(), crate::model::BlockKind::Data);
+        assert!(zb.diags.iter().all(|d| engine_form(d).is_none()));
+    }
+
     #[test]
     fn checksum_field_diagnosis_has_every_line() {
         for f in ["tests/fixtures/corrupt/sst-bitflip-data-block.sst", "examples/files/corrupt-sst-checksum-flip"] {

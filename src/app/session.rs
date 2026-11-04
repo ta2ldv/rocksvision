@@ -1,39 +1,22 @@
 //! Document session: the open folder (listing) and file, the file generation, the lazy tree,
-//! the current view and the view requested, navigation history, the hex page state, the
-//! change-on-disk stat result and the path/go-to inputs. Owns the generation: closing or
-//! switching the file bumps it, and replies of an older generation are dropped by `AppState`.
-//! Mutators are visible to `app` only.
+//! the current view, the navigation (history + the view request in flight, `Navigation`), the
+//! byte view (`HexState`, incl. the Go-to text), the change-on-disk stat result and the path
+//! input. Owns the generation: closing or switching the file bumps it and resets all of the
+//! above together; replies of an older generation are dropped by `AppState`. Mutators are
+//! visible to `app` only.
 
 use super::hex::HexState;
 use super::jobs::ViewTarget;
-use super::selection::SelSnapshot;
+use super::navigation::{HistEntry, HistoryOp, Navigation, PendingSel, ViewReply};
 use crate::discover::{DirEntry, FileKind};
 use crate::limits::LIMITS;
 use crate::model::*;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+pub use super::navigation::Here;
+
 pub const FILE_SPACE_TITLE: &str = "File offsets (physical bytes as stored)";
-
-/// One history step: the view, its selection, the byte-view position (space + the offset
-/// shown) and the Go-to text, restored together by Back.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HistEntry {
-    pub kind: NodeKind,
-    pub sel: SelSnapshot,
-    pub hex_space: Space,
-    pub hex_at: u64,
-    pub goto: String,
-}
-
-/// Where the user is (what Back restores): selection, byte-view space and offset, Go-to text.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Here {
-    pub sel: SelSnapshot,
-    pub hex_space: Space,
-    pub hex_at: u64,
-    pub goto: String,
-}
 
 #[derive(Clone, Debug)]
 pub struct TreeNode {
@@ -52,13 +35,20 @@ pub struct TreeNode {
     pub role: ChildRole,
     /// Group check coverage (`Child::checked`); updated from the members when they load.
     pub checked: Option<(u64, u64)>,
+    /// Table view node: status counts of its rows (`Child::tally`), refreshed whenever its
+    /// view is shown (0019 §1).
+    pub tally: Option<RowTally>,
 }
 
 impl TreeNode {
     /// No status glyph (design A3): a group none of whose members was checked yet, or whose
-    /// checked members are clean while not all were checked.
+    /// checked members are clean while not all were checked; a table view node while one of
+    /// its rows is not checked and none failed.
     pub fn unchecked(&self) -> bool {
-        group_glyph(self.status, self.checked).is_none()
+        match &self.tally {
+            Some(t) => t.glyph().is_none(),
+            None => group_glyph(self.status, self.checked).is_none(),
+        }
     }
     /// Label with the group coverage after its head ("Data blocks #0–#63 · not checked ·
     /// [0x0,0x3f780) · 64 blocks"); the same string as the dump and the card title.
@@ -103,13 +93,11 @@ pub struct DocumentSession {
     sel_node: Option<usize>,
     view: Option<View>,
     view_kind: Option<NodeKind>,
-    /// View request in flight and its job id (replies are matched by id).
-    pending_view: Option<(ViewTarget, u64)>,
-    history: Vec<HistEntry>,
+    /// History and the view request in flight (0020 §1).
+    nav: Navigation,
     /// One-shot request for the tree to scroll this node into view (a reveal).
     tree_scroll: Option<usize>,
     hex: HexState,
-    goto: String,
     status_msg: String,
 }
 
@@ -134,11 +122,9 @@ impl DocumentSession {
             sel_node: None,
             view: None,
             view_kind: None,
-            pending_view: None,
-            history: Vec::new(),
+            nav: Navigation::default(),
             tree_scroll: None,
             hex: HexState::default(),
-            goto: String::new(),
             status_msg: "Open a RocksDB data folder or a single WAL / SST / MANIFEST / CURRENT file.".into(),
         }
     }
@@ -194,8 +180,14 @@ impl DocumentSession {
     pub fn view_kind(&self) -> Option<&NodeKind> {
         self.view_kind.as_ref()
     }
+    /// History and the view request in flight.
+    pub fn navigation(&self) -> &Navigation {
+        &self.nav
+    }
+    /// The view requested and not answered yet (`Navigation::pending_target`; kept here for the
+    /// integration tests in tests/*.rs).
     pub fn pending_view(&self) -> Option<&ViewTarget> {
-        self.pending_view.as_ref().map(|p| &p.0)
+        self.nav.pending_target()
     }
     /// Index of a loaded tree node of this kind (the first one at its canonical place).
     pub fn node_of(&self, k: &NodeKind) -> Option<usize> {
@@ -211,14 +203,8 @@ impl DocumentSession {
         let ok = |x: &usize| self.nodes[*x].role != ChildRole::Absent;
         if forward { list[pos + 1..].iter().find(|x| ok(x)).copied() } else { list[..pos].iter().rev().find(|x| ok(x)).copied() }
     }
-    pub fn can_go_back(&self) -> bool {
-        !self.history.is_empty()
-    }
     pub fn hex(&self) -> &HexState {
         &self.hex
-    }
-    pub fn goto(&self) -> &str {
-        &self.goto
     }
     pub fn status_msg(&self) -> &str {
         &self.status_msg
@@ -230,6 +216,11 @@ impl DocumentSession {
     pub(super) fn row(&self, row: Option<usize>) -> Option<&Row> {
         self.view.as_ref().and_then(|v| row.and_then(|i| v.rows.get(i)))
     }
+    /// The current view describes offset space `space` (the file always; a derived space only
+    /// while its view is shown): the byte view may stay in it / be restored to it.
+    pub fn describes_space(&self, space: Space) -> bool {
+        space == Space::File || self.view.as_ref().is_some_and(|v| v.spaces.iter().any(|s| s.space == space))
+    }
     /// Title and size of an offset space (the file, or a derived space of the current view).
     pub fn space_title(&self, space: Space) -> (String, u64) {
         if space == Space::File {
@@ -240,7 +231,7 @@ impl DocumentSession {
         {
             return (s.title.clone(), s.size);
         }
-        (space.label(), self.hex.size)
+        (space.label(), self.hex.size())
     }
     /// A change-on-disk check is due (interval elapsed, file opened, no check in flight).
     pub(super) fn stat_due(&self, stat_pending: bool) -> bool {
@@ -270,9 +261,6 @@ impl DocumentSession {
     pub(super) fn set_status_msg(&mut self, s: impl Into<String>) {
         self.status_msg = s.into();
     }
-    pub(super) fn set_goto(&mut self, s: String) {
-        self.goto = s;
-    }
     pub(super) fn set_dir_note(&mut self, s: impl Into<String>) {
         self.dir_note = s.into();
     }
@@ -293,12 +281,10 @@ impl DocumentSession {
         self.sel_node = None;
         self.view = None;
         self.view_kind = None;
-        self.pending_view = None;
-        self.history.clear();
+        self.nav.reset();
         self.tree_scroll = None;
+        // A new file starts at page 0 with the Go-to placeholder (design B3).
         self.hex = HexState::default();
-        // A new file starts with the Go-to placeholder (design B3).
-        self.goto.clear();
     }
 
     /// File chosen (after `close`): label "opening…" until the decoder answers.
@@ -398,6 +384,7 @@ impl DocumentSession {
             contains: c.contains,
             role: c.role,
             checked: c.checked,
+            tally: c.tally,
         });
         self.nodes.len() - 1
     }
@@ -487,66 +474,43 @@ impl DocumentSession {
         self.nodes.push(n);
     }
     #[cfg(test)]
+    pub(super) fn set_test_view(&mut self, kind: NodeKind, view: View) {
+        self.view_kind = Some(kind);
+        self.view = Some(view);
+    }
+    #[cfg(test)]
     pub(super) fn set_test_file(&mut self, p: PathBuf, stat: (u64, Option<SystemTime>)) {
         self.file = Some(p);
         self.file_stat = Some(stat);
     }
 
-    /// Records the view request `req`; with `history` (the current selection and byte-view
-    /// position) the current view is pushed on the history so Back restores all of it. Returns
-    /// true when an entry was pushed (see `undo_push`).
-    pub(super) fn request_view(&mut self, t: ViewTarget, req: u64, history: Option<Here>) -> bool {
-        let mut pushed = false;
-        if let (Some(Here { sel, hex_space, hex_at, goto }), Some(kind)) = (history, self.view_kind.clone()) {
-            let e = HistEntry { kind, sel, hex_space, hex_at, goto };
-            if self.history.last() != Some(&e) {
-                self.history.push(e);
-                pushed = true;
+    /// Records view request `req` with the navigation (history op and the selection to apply on
+    /// arrival); the view shown now is the history entry of a push and arms the overtake guard.
+    pub(super) fn begin_view(&mut self, req: u64, t: ViewTarget, hist: HistoryOp, pending: Option<PendingSel>, epoch_now: u64) {
+        self.nav.begin(req, t, hist, pending, epoch_now, self.view.is_some(), self.view_kind.as_ref());
+    }
+    /// Back: the previous history entry.
+    pub(super) fn back(&mut self) -> Option<HistEntry> {
+        self.nav.back()
+    }
+    /// The guards of a view reply (`Navigation::on_view_reply`).
+    pub(super) fn on_view_reply(&mut self, req: u64, located: bool, epoch_now: u64) -> ViewReply {
+        self.nav.on_view_reply(req, located, epoch_now)
+    }
+
+    /// Installs an accepted view. A table view node follows the counts of the table just shown
+    /// (blocks checked since the tree was listed, e.g. one opened and found Invalid before
+    /// Back); every view also carries the tallies of the file's other table view nodes (review
+    /// S2), so Back to the layout table refreshes "Data blocks via index" too.
+    pub(super) fn show_view(&mut self, kind: NodeKind, view: View) {
+        for (k, t) in view.tally.map(|t| (kind.clone(), t)).into_iter().chain(view.tallies.iter().cloned()) {
+            for n in self.nodes.iter_mut().filter(|n| n.kind == k && n.role == ChildRole::View) {
+                n.tally = Some(t);
+                n.status = t.glyph().unwrap_or(Status::Unknown);
             }
-            if self.history.len() > LIMITS.history {
-                self.history.remove(0);
-            }
         }
-        self.pending_view = Some((t, req));
-        pushed
-    }
-
-    /// A view request that pushed its source entry was dropped (overtaken): remove the entry.
-    pub(super) fn undo_push(&mut self) {
-        self.history.pop();
-    }
-
-    /// A Back whose view was dropped (overtaken): its entry goes back on the stack.
-    pub(super) fn push_back(&mut self, e: HistEntry) {
-        self.history.push(e);
-        if self.history.len() > LIMITS.history {
-            self.history.remove(0);
-        }
-    }
-
-    pub(super) fn pop_history(&mut self) -> Option<HistEntry> {
-        self.history.pop()
-    }
-
-    /// Applies a view reply if it answers the view request in flight (by job id). Returns true
-    /// if it was applied.
-    pub(super) fn accept_view(&mut self, req: u64, kind: NodeKind, view: View) -> bool {
-        if self.pending_view.as_ref().map(|p| p.1) != Some(req) {
-            return false;
-        }
-        self.pending_view = None;
         self.view_kind = Some(kind);
         self.view = Some(view);
-        true
-    }
-
-    /// The located byte had no structure: the request is answered without a new view.
-    pub(super) fn drop_pending(&mut self, req: u64) -> bool {
-        if self.pending_view.as_ref().map(|p| p.1) != Some(req) {
-            return false;
-        }
-        self.pending_view = None;
-        true
     }
 
     /// Selects a tree node (None = the file root). Returns the node kind to show.

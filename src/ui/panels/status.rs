@@ -1,14 +1,21 @@
-//! Status bar: exactly one line (spec §5). From the left: the selection (never truncated), the
-//! message/job/search state (with Cancel), the file label; the hidden-panel hint is right-aligned.
-//! Widths come from `layout::status_widths`: the hint is truncated (then dropped) first, then
-//! the message, then the file label; every truncated segment shows its full text on hover.
+//! Status bar: exactly one line (spec §5). Segment order (0020 UI ruling F1): the one transient
+//! notice (zoom, Reset View, copy), the file-changed warning, the selection, the job/search state
+//! (with Cancel), "kind · file"; the hidden-panel hint is right-aligned. Widths come from
+//! `layout::status_widths`: the notice and the warning keep their width while the bar holds them;
+//! the hint is truncated (then dropped) first, then the search segment, the selection and the
+//! file label are elided in that order; every elided segment shows its full text on hover.
 
-use crate::app::provenance;
 use crate::app::{Action, AppState};
 use crate::model::Status;
-use crate::ui::layout::{LAYOUT, status_widths};
+use crate::ui::layout::{LAYOUT, StatusWidths, nb_units, status_widths};
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
+
+/// Id of the planned and wanted widths of the notice and search segments of the last frame
+/// (`[notice, notice wanted, search, search wanted]`, tests).
+pub fn notice_width_id() -> egui::Id {
+    egui::Id::new("status_notice_widths")
+}
 
 /// `hidden`: (name, how to show it) of panels the user collapsed.
 pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, String)]) -> Vec<Action> {
@@ -16,39 +23,13 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
     tok.paint_chrome(ui, ui.clip_rect());
     let doc = st.session();
     let find = st.search();
-    // Mirror of the Explanation "Where": file range(s) first, then the derived offset.
-    let sel = if st.selection().is_structure() && st.selection().anchor().is_none() {
-        // The whole structure: "selection: structure Physical blocks · file [0x0,0x37d00)".
-        let name =
-            doc.sel_node().and_then(|i| doc.nodes().get(i)).filter(|n| Some(&n.kind) == doc.view_kind()).map(|n| n.label.clone()).or_else(|| doc.view().map(|v| v.title.clone())).unwrap_or_default();
-        match st.selection().span() {
-            Some(s) if s.space == crate::model::Space::File => format!("selection: structure {name} · file [0x{:x},0x{:x})", s.offset, s.offset + s.len),
-            Some(s) => format!("selection: structure {name} · {}", provenance::status_text(doc.view(), &s)),
-            None => format!("selection: structure {name}"),
-        }
-    } else if let (Some(at), Some(f)) = (st.selection().shown(), st.selected_field()) {
-        // A field without bytes: what the byte view shows instead (design B5).
-        provenance::byteless_status(&f.name, &at)
-    } else {
-        st.selection().span().map(|s| format!("selection: {}", provenance::status_text(doc.view(), &s))).unwrap_or_default()
-    };
-    let mut msg: Vec<String> = Vec::new();
-    if doc.file().is_some() && doc.changed() {
-        msg.push("⚠ file changed on disk since open — reopen to refresh".into());
-    }
-    if !st.jobs().copy_note().is_empty() {
-        msg.push(st.jobs().copy_note().to_string());
-    }
-    if !find.query().is_empty() && !find.row_matches().is_empty() {
-        let cur = st.row_match_position().map(|i| i.to_string()).unwrap_or("–".into());
-        msg.push(format!("Rows {cur} / {} (current table)", find.row_matches().len()));
-    } else if !find.status().is_empty() {
-        msg.push(find.status().to_string());
-    }
-    if !st.prefs().notice().is_empty() {
-        msg.push(st.prefs().notice().to_string());
-    }
-    let msg = msg.join("  ·  ");
+    // Mirror of the Explanation "Where" (one classifier, `app::explanation`); count and unit
+    // joined for the screen only (ruling 6).
+    let sel = nb_units(&crate::app::explanation::selection_status(doc, st.selection()));
+    let notice = nb_units(st.prefs().notice());
+    let warn = if doc.file().is_some() && doc.changed() { "⚠ file changed on disk since open — reopen to refresh".to_string() } else { String::new() };
+    // Same state as the banner above the table (`SearchState::status_segment`, 0019 §4).
+    let search = find.status_segment(st.row_match_position()).unwrap_or_default();
     let file = match doc.file() {
         Some(p) => kind_and_name(doc.file_label(), &p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
         None => doc.status_msg().to_string(),
@@ -74,21 +55,34 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
         } else {
             0.0
         };
-        let fixed = busy_w + 6.0 * gap + 2.0 * w("·");
-        let (mw, fw, hw) = status_widths(ui.available_width() - fixed, w(&sel), w(&msg), w(&file), w(&hint), LAYOUT.status_min_glyphs * cw);
+        // Fixed parts: busy widgets, item gaps and up to four "·" separators.
+        let fixed = busy_w + 10.0 * gap + 4.0 * w("·");
+        let want = StatusWidths { notice: w(&notice), warn: w(&warn), sel: w(&sel), search: w(&search), file: w(&file), hint: w(&hint) };
+        let plan = status_widths(ui.available_width() - fixed, want, LAYOUT.status_min_glyphs * cw);
+        ui.ctx().data_mut(|d| d.insert_temp(notice_width_id(), [plan.notice, want.notice, plan.search, want.search]));
         let seg = |ui: &mut egui::Ui, text: &str, width: f32, warn: bool| {
             if width <= 0.0 || text.is_empty() {
-                return;
+                return false;
             }
             ui.allocate_ui_with_layout(egui::vec2(width, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // Status colour only on a flat data fill, never directly on chrome.
                 let t = if warn { RichText::new(text).color(tok.status(Status::Unsupported)).background_color(tok.p.data) } else { RichText::new(text).color(tok.p.text) };
                 ui.add(egui::Label::new(t).truncate()).on_hover_text(text);
             });
+            true
         };
-        if !sel.is_empty() {
-            ui.add(egui::Label::new(RichText::new(&sel).color(tok.p.text)).extend());
+        let dot = |ui: &mut egui::Ui| {
             ui.label(RichText::new("·").color(tok.p.text_muted));
+        };
+        // Left of the selection: notice, then the warning, each followed by a separator.
+        if seg(ui, &notice, plan.notice, false) {
+            dot(ui);
+        }
+        if seg(ui, &warn, plan.warn, true) {
+            dot(ui);
+        }
+        if seg(ui, &sel, plan.sel, false) {
+            dot(ui);
         }
         if let Some((d, t)) = find.progress() {
             ui.label("Searching file bytes");
@@ -108,15 +102,14 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
                 acts.push(Action::CancelJobs);
             }
         }
-        let warn = doc.file().is_some() && doc.changed();
-        seg(ui, &msg, mw, warn);
-        if (!msg.is_empty() || busy) && fw > 0.0 {
-            ui.label(RichText::new("·").color(tok.p.text_muted));
+        let shown_search = seg(ui, &search, plan.search, false);
+        if (shown_search || busy) && plan.file > 0.0 {
+            dot(ui);
         }
-        seg(ui, &file, fw, false);
-        if hw > 0.0 {
+        seg(ui, &file, plan.file, false);
+        if plan.hint > 0.0 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.allocate_ui_with_layout(egui::vec2(hw, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.allocate_ui_with_layout(egui::vec2(plan.hint, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add(egui::Label::new(RichText::new(&hint).color(tok.p.text_muted)).truncate()).on_hover_text(&hint_full);
                 });
             });

@@ -14,6 +14,8 @@ pub enum CopyKind {
     Hex,
     Offset,
     RowTsv,
+    /// The open file's path (`Action::CopyFilePath`).
+    FilePath,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

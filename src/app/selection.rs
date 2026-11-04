@@ -5,7 +5,45 @@
 //! older epoch is recognisably stale. Reveal/scroll requests are single-use and never change
 //! the selection. Mutators are visible to `app` only.
 
-use crate::model::Span;
+use super::actions::RowMove;
+use crate::limits::LIMITS;
+use crate::model::{Space, Span, View};
+
+/// `]` / `[`: the next / previous field of `view` after `cur` in span order (File first, then
+/// derived spaces by origin; ties by row); clamps at both ends. None without fields.
+pub fn next_field(view: &View, cur: Option<usize>, forward: bool) -> Option<usize> {
+    let mut order: Vec<(usize, Span)> = view.rows.iter().enumerate().filter_map(|(i, r)| r.field.span.map(|s| (i, s))).collect();
+    let space_key = |s: &Span| match s.space {
+        Space::File => 0u64,
+        Space::Block(o) | Space::Record(o) => o.saturating_add(1),
+    };
+    order.sort_by_key(|(i, s)| (space_key(s), s.offset, *i));
+    if order.is_empty() {
+        return None;
+    }
+    let pos = cur.and_then(|r| order.iter().position(|(i, _)| *i == r));
+    let next = match (pos, forward) {
+        (Some(p), true) => (p + 1).min(order.len() - 1),
+        (Some(p), false) => p.saturating_sub(1),
+        (None, true) => 0,
+        (None, false) => order.len() - 1,
+    };
+    Some(order[next].0)
+}
+
+/// Row keys: the row after move `m` from `cur` in a table of `n > 0` rows (no selection: the
+/// first row, except End).
+pub fn row_after(m: RowMove, cur: Option<usize>, n: usize) -> usize {
+    let last = n.saturating_sub(1);
+    match m {
+        RowMove::Up => cur.map(|c| c.saturating_sub(1)).unwrap_or(0),
+        RowMove::Down => cur.map(|c| (c + 1).min(last)).unwrap_or(0),
+        RowMove::PageUp => cur.map(|c| c.saturating_sub(LIMITS.page_rows)).unwrap_or(0),
+        RowMove::PageDown => cur.map(|c| c.saturating_add(LIMITS.page_rows).min(last)).unwrap_or(0),
+        RowMove::Home => 0,
+        RowMove::End => last,
+    }
+}
 
 /// What is selected.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -173,10 +211,12 @@ impl SelectionState {
         self.scroll_row = Some((row, !matches!(origin, SelOrigin::Row | SelOrigin::Keyboard)));
     }
 
-    /// Replaces the byte range, keeping the row (byte-search hit).
-    pub(super) fn set_span(&mut self, span: Option<Span>) {
-        let target = self.target.clone();
-        self.set(target, span, Vec::new(), SelOrigin::Search, None);
+    /// A byte-search hit that no field holds (`provenance::hit_target`): bytes of the structure
+    /// shown (`structure`) or a raw range. No row stays selected and no byte counts as clicked.
+    pub(super) fn select_hit(&mut self, span: Span, structure: bool, note: String) {
+        let target = if structure { SelTarget::Structure } else { SelTarget::Raw };
+        self.set(target, Some(span), Vec::new(), SelOrigin::Search, Some(note));
+        self.anchor = None;
     }
 
     /// A structure range without a single field (header, trailer, padding, compressed bytes…).
@@ -207,8 +247,16 @@ impl SelectionState {
 
     /// Raw range from the anchor to `off` (Shift+click); the anchor stays.
     pub(super) fn extend_raw(&mut self, span: Span) {
-        let note = format!("Raw range [0x{:x},0x{:x}): not a single field", span.offset, span.offset + span.len);
+        let note = format!("Raw range {}: not a single field", span.range_text());
         self.set(SelTarget::Raw, Some(span), Vec::new(), SelOrigin::Hex, Some(note));
+    }
+
+    /// Shift+click at `off` of `space`: a raw range from the anchor (the last clicked byte),
+    /// else from the selected range's start, else the byte itself.
+    pub(super) fn extend_to(&mut self, space: Space, off: u64) {
+        let from = self.anchor.filter(|a| a.space == space).or(self.span.filter(|s| s.space == space)).map(|s| s.offset).unwrap_or(off);
+        let (a, b) = (from.min(off), from.max(off).saturating_add(1));
+        self.extend_raw(Span::new(space, a, b - a));
     }
 
     /// No row and no range (new view, closed file).

@@ -1,44 +1,29 @@
-//! Application state (egui-independent): a coordinator of five focused components with private
-//! fields — `DocumentSession` (folder/file, generation, tree, view, history, hex page),
-//! `SelectionState` (row/range + selection epoch), `SearchState`, `JobState` (worker, request
-//! ids, copy gate) and `ViewPreferences` (theme, zoom, layout toggles). Panels read them through
-//! `&` getters; the only mutators are `apply(Action)`, `poll()` (job replies) and `tick()`
-//! (plus the documented test shims `select_raw`/`do_copy`).
+//! Application state (egui-independent): a coordinator of focused components with private
+//! fields — `DocumentSession` (folder/file, generation, tree, view, `Navigation`, `HexState`),
+//! `SelectionState` (row/range + selection epoch), `SearchState` (query, row matches, typed byte
+//! search), `JobState` (worker, request ids, copy gate) and `ViewPreferences` (theme, zoom,
+//! layout toggles, the one transient notice). AppState dispatches actions, issues jobs, routes
+//! replies to the component that guards them and executes the components' plans
+//! (`navigation::plan_arrival`, `clipboard::plan`, `HexState::reveal`). Panels read the
+//! components through `&` getters; the only mutators are `apply(Action)`, `poll()` (job replies)
+//! and `tick()` (plus the documented test shims `select_raw`/`do_copy`).
 
 use super::actions::{Action, CopyKind, Effect, Panel, RowMove};
-use super::hex::PageState;
-use super::job_state::{CopyReply, JobState};
+use super::clipboard::{self, CopyInput, CopyPlan};
+use super::hex::{HexState, PageReq, PageState};
+use super::job_state::JobState;
 use super::jobs::{self, CopyJob, Outcome, Request, Response, SelectHint, Tagged, ViewTarget, Worker};
-use super::provenance::{self, exact_file_ranges, field_at};
+use super::navigation::{Arrival, Here, HistoryOp, Navigation, PendingSel, ViewReply, plan_arrival};
+use super::provenance::{self, HitTarget, exact_file_ranges, field_at};
 use super::search::SearchState;
-use super::selection::{SelOrigin, SelectionState};
-use super::session::{DocumentSession, Here, HistEntry};
-use super::view_prefs::ViewPreferences;
+use super::selection::{self, SelOrigin, SelectionState};
+use super::session::DocumentSession;
+use super::view_prefs::{COPY_NOTICE_SECS, NoticeOwner, ViewPreferences};
 use crate::limits::LIMITS;
 use crate::model::*;
 use std::path::PathBuf;
 
-/// Selection to apply when an async view arrives — only if the selection epoch is still the
-/// one recorded at the request (a newer user choice always wins).
-#[derive(Clone, Debug)]
-struct PendingSel {
-    epoch: u64,
-    origin: SelOrigin,
-    anchor: Option<Span>,
-    hint: Option<SelectHint>,
-    /// Origin of a navigation, for the structure card ("Referenced from").
-    via: Option<String>,
-    /// Back: the saved selection, byte-view position and Go-to text to restore as they were.
-    restore: Option<Here>,
-}
-
-impl PendingSel {
-    fn new(epoch: u64, origin: SelOrigin, anchor: Option<Span>, hint: Option<SelectHint>) -> Self {
-        PendingSel { epoch, origin, anchor, hint, via: None, restore: None }
-    }
-}
-
-pub use super::job_state::{PendingCopy, copy_accepted};
+pub use super::clipboard::{PendingCopy, bytes_copy_text, copy_accepted};
 pub use super::session::{FILE_SPACE_TITLE, TreeNode};
 pub use super::view_prefs::{CENTER_SPLIT_DEFAULT, ZoomFit, ZoomPolicy};
 
@@ -58,67 +43,17 @@ pub struct ScrollRequest {
     pub tree: Option<usize>,
 }
 
-/// Clipboard text of exact decoded bytes: valid UTF-8 → the text itself (real newlines);
-/// otherwise a lossless escaped form (a backslash becomes two, bytes that are not UTF-8
-/// become `\xNN`). Bounded by the copy cap (the note says so).
-pub fn bytes_copy_text(b: &ValueBytes, what: &str) -> (String, String) {
-    let cap = if b.total > b.data.len() as u64 { format!("; first {} of {} bytes, {} KiB copy cap", b.data.len(), b.total, LIMITS.copy_cap / 1024) } else { String::new() };
-    if let Ok(s) = std::str::from_utf8(&b.data) {
-        return (s.to_string(), format!("Copied {what} ({} bytes, UTF-8 text{cap})", b.data.len()));
-    }
-    let mut out = String::with_capacity(b.data.len() * 2);
-    for chunk in b.data.utf8_chunks() {
-        out.push_str(&chunk.valid().replace('\\', "\\\\"));
-        for x in chunk.invalid() {
-            out.push_str(&format!("\\x{x:02x}"));
-        }
-    }
-    (out, format!("Copied {what} (escaped, {} bytes{cap})", b.data.len()))
-}
-
 pub struct AppState {
     doc: DocumentSession,
     sel: SelectionState,
     find: SearchState,
     jobs: JobState,
     view_prefs: ViewPreferences,
-    pending_sel: Option<PendingSel>,
-    /// Ownership of the view request in flight. Recorded whenever a view is already shown; a
-    /// reply whose epoch is no longer current (newer selection, navigation or Back) is discarded
-    /// entirely — neither the view nor the selection is replaced, and the history is put back as
-    /// it was. A file change is covered by the generation.
-    view_owner: Option<ViewOwner>,
-}
-
-/// The view request in flight: its job id, the selection epoch at the request and what it did
-/// to the history (undone when the reply is dropped as overtaken).
-#[derive(Debug)]
-struct ViewOwner {
-    req: u64,
-    epoch: u64,
-    history: HistoryChange,
-}
-
-#[derive(Debug)]
-enum HistoryChange {
-    None,
-    /// The request pushed the source view (Navigate, tree click): pop it again.
-    Pushed,
-    /// Back popped this entry: push it back.
-    Popped(Box<HistEntry>),
 }
 
 impl AppState {
     pub fn new(worker: Worker) -> Self {
-        AppState {
-            doc: DocumentSession::new(),
-            sel: SelectionState::new(),
-            find: SearchState::new(),
-            jobs: JobState::new(worker),
-            view_prefs: ViewPreferences::new(),
-            pending_sel: None,
-            view_owner: None,
-        }
+        AppState { doc: DocumentSession::new(), sel: SelectionState::new(), find: SearchState::new(), jobs: JobState::new(worker), view_prefs: ViewPreferences::new() }
     }
 
     /// Test helper: a state with an idle worker, for UI tests (panels never name `app::jobs`).
@@ -143,6 +78,10 @@ impl AppState {
     }
     pub fn prefs(&self) -> &ViewPreferences {
         &self.view_prefs
+    }
+    /// History and the view request in flight.
+    pub fn navigation(&self) -> &Navigation {
+        self.doc.navigation()
     }
 
     pub fn selected_field(&self) -> Option<&Field> {
@@ -173,28 +112,31 @@ impl AppState {
                 let p = PathBuf::from(self.doc.path_input().trim());
                 self.open_path(p);
             }
-            Action::SetSearch(s) => self.find.set_query(s, self.doc.view()),
-            Action::SetSearchHex(b) => self.find.set_hex(b),
+            // 0020 §5: a new query, Clear and Cancel stop the running byte search; its late
+            // replies are ignored by request id (`SearchState::on_*`).
+            Action::SetSearch(s) => {
+                self.cancel_byte_search();
+                self.find.set_query(s, self.doc.view());
+            }
+            Action::SetSearchHex(b) => {
+                self.cancel_byte_search();
+                self.find.set_hex(b, self.doc.view());
+            }
             Action::SearchNext => self.search_step(false),
             Action::SearchPrev => self.search_step(true),
             Action::ClearSearch => {
+                self.cancel_byte_search();
                 self.find.clear();
-                self.jobs.cancel_search();
             }
-            Action::CancelSearch => {
-                self.jobs.cancel_search();
-                self.find.set_progress(None);
-                self.find.set_status("Byte search cancelled");
-            }
+            Action::CancelSearch => self.cancel_byte_search(),
             Action::Copy(k) => self.copy(k),
             Action::CopyRow(i, k) => {
                 self.select_row(i);
                 self.copy(k);
             }
             Action::CopyFilePath => {
-                if let Some(p) = self.doc.file() {
-                    let t = p.display().to_string();
-                    self.copy_text(t, "Copied file path");
+                if self.doc.file().is_some() {
+                    self.copy(CopyKind::FilePath);
                 }
             }
             Action::ZoomIn => self.view_prefs.zoom_in(),
@@ -227,10 +169,10 @@ impl AppState {
             Action::ShowHelp => self.view_prefs.set_show_help(true),
             Action::CloseHelp => self.view_prefs.set_show_help(false),
             Action::SelectRoot => {
-                // A newer target: an in-flight Locate's pending selection must not reach Root.
-                self.pending_sel = None;
+                // A newer target: the request replaces any in flight, so an in-flight Locate's
+                // pending selection cannot reach Root.
                 if let Some(k) = self.doc.select_node(None) {
-                    self.request_view(k, true);
+                    self.request(ViewTarget::Node(k), true, false, None);
                 }
             }
             Action::SelectNode(i) => {
@@ -250,17 +192,14 @@ impl AppState {
             }
             Action::CollapseSelectedNode => self.doc.collapse_selected(),
             Action::Back => {
-                // The previous view with its exact selection and byte-view position.
-                if let Some(h) = self.doc.pop_history() {
+                // The previous view with its exact selection and byte-view position; overtaken
+                // before it arrives, the entry goes back on the stack (`Navigation`).
+                if let Some(h) = self.doc.back() {
                     self.doc.select_loaded(&h.kind);
                     let mut p = PendingSel::new(self.sel.epoch(), h.sel.origin, None, None);
                     p.restore = Some(Here { sel: h.sel.clone(), hex_space: h.hex_space, hex_at: h.hex_at, goto: h.goto.clone() });
-                    self.pending_sel = Some(p);
-                    self.request_view(h.kind.clone(), false);
-                    // Overtaken before it arrives: the entry goes back on the stack.
-                    if let Some(o) = self.view_owner.as_mut() {
-                        o.history = HistoryChange::Popped(Box::new(h));
-                    }
+                    let t = ViewTarget::Node(h.kind.clone());
+                    self.request_with(t, HistoryOp::Popped(h), false, Some(p));
                 }
             }
             Action::SelectRow(i) => self.select_row(i),
@@ -281,27 +220,20 @@ impl AppState {
             Action::ToggleAllColumns => self.view_prefs.toggle_all_columns(),
             // The Go-to text follows whatever the byte pane moves to (B3, 0015 C3).
             Action::HexPage(base) => {
-                self.load_hex_page(self.doc.hex().space, base);
-                self.doc.set_goto(format!("0x{base:x}"));
+                let p = self.doc.hex_mut().page_to(base);
+                self.load_page(p);
             }
             Action::HexShowSpace(space) => {
                 let (t, size) = self.doc.space_title(space);
-                self.doc.hex_mut().set_space(space, size, t);
-                self.load_hex_page(space, 0);
-                self.doc.set_goto("0x0".into());
+                let p = self.doc.hex_mut().show_space(space, size, t);
+                self.load_page(p);
             }
-            Action::SetGoto(s) => self.doc.set_goto(s),
+            Action::SetGoto(s) => self.doc.hex_mut().set_goto(s),
             Action::GotoOffset => self.goto_offset(),
             Action::HexClick(off) => self.hex_click(off),
-            Action::HexShiftClick(off) => {
-                let space = self.doc.hex().space;
-                // Extends from the anchor (the last clicked byte), else from the range start.
-                let from = self.sel.anchor().filter(|a| a.space == space).or(self.sel.span().filter(|s| s.space == space)).map(|s| s.offset).unwrap_or(off);
-                let (a, b) = (from.min(off), from.max(off) + 1);
-                self.sel.extend_raw(Span::new(space, a, b - a));
-            }
+            Action::HexShiftClick(off) => self.sel.extend_to(self.doc.hex().space(), off),
             Action::SelectSpan(span) => self.select_span(span),
-            Action::HexRetry => self.load_hex_page(self.doc.hex().space, self.doc.hex().page_base),
+            Action::HexRetry => self.load_hex_page(self.doc.hex().space(), self.doc.hex().page_base()),
             Action::CancelJobs => self.cancel_jobs(),
         }
         Vec::new()
@@ -316,8 +248,8 @@ impl AppState {
                 self.doc.mark_stat_started();
                 self.jobs.stat(self.doc.generation(), p);
             }
-        } else if self.doc.hex().load != PageState::Idle {
-            self.doc.hex_mut().load = PageState::Idle;
+        } else if *self.doc.hex().load() != PageState::Idle {
+            self.doc.hex_mut().idle();
         }
     }
 
@@ -326,7 +258,7 @@ impl AppState {
     pub fn take_scroll_request(&mut self) -> ScrollRequest {
         let hex_ready = self.doc.file().is_some() && self.doc.hex().page().map(|p| !p.is_empty()).unwrap_or(false);
         let row = if self.doc.view().is_some() { self.sel.take_scroll_row() } else { None };
-        let hex = if hex_ready && self.view_prefs.show_hex() { self.doc.hex_mut().scroll_to.take() } else { None };
+        let hex = if hex_ready && self.view_prefs.show_hex() { self.doc.hex_mut().take_scroll() } else { None };
         let tree = if self.view_prefs.show_left() { self.doc.take_tree_scroll() } else { None };
         ScrollRequest { row, hex, tree }
     }
@@ -346,10 +278,10 @@ impl AppState {
             Some("Opening…")
         } else if self.jobs.scanning() {
             Some("Scanning folder…")
-        } else if self.jobs.decoding() || self.doc.pending_view().is_some() {
+        } else if self.jobs.decoding() || self.navigation().pending_target().is_some() {
             Some("Decoding…")
-        } else if self.jobs.pending_copy().is_some() {
-            Some("Copying…")
+        } else if self.jobs.clipboard().pending().is_some() {
+            Some(clipboard::COPYING)
         } else if self.doc.hex().is_loading() {
             Some("Reading bytes…")
         } else {
@@ -370,56 +302,46 @@ impl AppState {
         self.jobs.scan(self.doc.generation(), dir, auto_open);
     }
 
+    /// Ends the file session (new generation: no view, history, request in flight or page).
     fn close_file(&mut self) {
         self.doc.close();
-        self.view_owner = None;
         self.jobs.cancel_file_jobs();
         self.jobs.cancel_search();
         self.sel.clear();
-        self.find.set_hit(None);
+        // The query stays; byte-search results and row matches described the old file.
+        self.find.forget_bytes();
         self.find.clear_matches();
-        self.find.set_progress(None);
     }
 
     fn open_file(&mut self, p: PathBuf) {
         self.close_file();
-        self.pending_sel = None;
         self.doc.begin_open(p.clone());
         self.jobs.decode(self.doc.generation(), Request::Open(p));
-        self.request_view(NodeKind::Root, false);
+        self.request(ViewTarget::Node(NodeKind::Root), false, false, None);
         // A new file's byte view starts at 0x0 (no scroll position kept from the previous file).
         let _ = self.doc.hex_mut().ensure_visible(0);
         self.load_hex_page(Space::File, 0);
-    }
-
-    fn request_view(&mut self, k: NodeKind, push_history: bool) {
-        self.request(ViewTarget::Node(k), push_history, false);
     }
 
     /// The current selection, byte-view position and Go-to text (what Back restores).
     fn here(&self) -> Here {
         let hex = self.doc.hex();
         let at = self.sel.span().or(self.sel.shown()).filter(|s| s.space == hex.space()).map(|s| s.offset).unwrap_or(hex.page_base());
-        Here { sel: self.sel.snapshot(), hex_space: hex.space(), hex_at: at, goto: self.doc.goto().to_string() }
+        Here { sel: self.sel.snapshot(), hex_space: hex.space(), hex_at: at, goto: hex.goto().to_string() }
     }
 
-    /// Issues a view request; `reveal` also asks for the canonical tree path.
-    fn request(&mut self, t: ViewTarget, push_history: bool, reveal: bool) {
-        let h = push_history.then(|| self.here());
-        self.request_with(t, h, reveal);
+    /// Issues a view request; `push_history` pushes the current view (Back returns to it);
+    /// `reveal` also asks for the canonical tree path; `pending` is selected on arrival.
+    fn request(&mut self, t: ViewTarget, push_history: bool, reveal: bool, pending: Option<PendingSel>) {
+        let hist = if push_history { HistoryOp::Push(self.here()) } else { HistoryOp::None };
+        self.request_with(t, hist, reveal, pending);
     }
 
-    fn request_with(&mut self, t: ViewTarget, history: Option<Here>, reveal: bool) {
+    /// The decode request and its navigation record (guarded by the epoch read now, after any
+    /// selection change the request itself made).
+    fn request_with(&mut self, t: ViewTarget, hist: HistoryOp, reveal: bool, pending: Option<PendingSel>) {
         let req = self.jobs.decode(self.doc.generation(), Request::View { target: t.clone(), reveal });
-        let pushed = self.doc.request_view(t, req, history);
-        // Without a view (file just opened) nothing newer can be overtaken: the view must arrive.
-        let history = if pushed { HistoryChange::Pushed } else { HistoryChange::None };
-        self.view_owner = self.doc.view().is_some().then(|| ViewOwner { req, epoch: self.sel.epoch(), history });
-    }
-
-    /// The view reply `req` was overtaken by a newer selection (its epoch is no longer current).
-    fn view_overtaken(&self, req: u64) -> bool {
-        self.view_owner.as_ref().is_some_and(|o| o.req == req && o.epoch != self.sel.epoch())
+        self.doc.begin_view(req, t, hist, pending, self.sel.epoch());
     }
 
     /// What is selected now, in words (the origin of a navigation): "entry 2 of Index block
@@ -437,8 +359,7 @@ impl AppState {
     fn navigate(&mut self, target: NodeKind, span: Option<Span>) {
         let mut p = PendingSel::new(self.sel.epoch(), SelOrigin::Navigate, None, Some(SelectHint { at: None, span }));
         p.via = self.describe_here();
-        self.pending_sel = Some(p);
-        self.request(ViewTarget::Node(target), true, true);
+        self.request(ViewTarget::Node(target), true, true, Some(p));
         if span.is_some() {
             self.show_span(span);
         }
@@ -447,8 +368,8 @@ impl AppState {
     /// A tree click / structure step: the node's view with the whole structure selected (same
     /// path for both).
     fn open_structure(&mut self, k: NodeKind) {
-        self.pending_sel = Some(PendingSel::new(self.sel.epoch(), SelOrigin::Tree, None, None));
-        self.request_view(k, true);
+        let p = PendingSel::new(self.sel.epoch(), SelOrigin::Tree, None, None);
+        self.request(ViewTarget::Node(k), true, false, Some(p));
     }
 
     fn toggle_node(&mut self, i: usize) {
@@ -464,7 +385,7 @@ impl AppState {
             Space::File => match self.doc.file().map(|p| p.to_path_buf()) {
                 Some(p) => self.jobs.page(g, p, base, LIMITS.hex_page_bytes),
                 None => {
-                    self.doc.hex_mut().load = PageState::Idle;
+                    self.doc.hex_mut().idle();
                     return;
                 }
             },
@@ -473,29 +394,34 @@ impl AppState {
         self.doc.hex_mut().begin(req, base);
     }
 
-    /// Moves the hex view to the selected span (switching space / page as needed); the Go-to
+    fn load_page(&mut self, p: PageReq) {
+        self.load_hex_page(p.space, p.base);
+    }
+
+    /// Moves the byte view to `s` (space, page, Go-to text: `HexState::reveal`) and reads the
+    /// page if it is not the one shown.
+    fn reveal(&mut self, s: Span) {
+        let title = self.doc.space_title(s.space);
+        if let Some(p) = self.doc.hex_mut().reveal(s, || title) {
+            self.load_page(p);
+        }
+    }
+
+    /// Moves the byte view to the selected span (switching space / page as needed); the Go-to
     /// text follows the offset shown (design B3).
     fn show_span(&mut self, span: Option<Span>) {
         if let Some(s) = span {
-            if s.space != self.doc.hex().space {
-                let (t, size) = self.doc.space_title(s.space);
-                self.doc.hex_mut().set_space(s.space, size, t);
-            }
-            if self.doc.hex_mut().ensure_visible(s.offset) {
-                let base = self.doc.hex().page_base;
-                self.load_hex_page(s.space, base);
-            }
-            self.doc.set_goto(format!("0x{:x}", s.offset));
+            self.reveal(s);
         }
     }
 
     /// Cancel button / Esc: cancels every job in flight and leaves no spinner behind.
     fn cancel_jobs(&mut self) {
         let (copy, scan, resolve) = self.jobs.cancel_all();
-        self.find.set_progress(None);
+        self.find.cancel();
         self.doc.hex_mut().cancel();
         if copy {
-            self.jobs.set_copy_note("Copy cancelled");
+            self.copy_notice(clipboard::COPY_CANCELLED);
         }
         if scan {
             self.doc.set_dir_note("Folder scan cancelled");
@@ -521,6 +447,7 @@ impl AppState {
     fn apply_response(&mut self, t: Tagged<Response>) -> Option<String> {
         let mut clip = None;
         let current = t.generation == self.doc.generation();
+        let job = t.job;
         match t.msg {
             // Path resolve and folder scans are matched by request id (they span generations).
             Response::Resolved { req, path, outcome } => {
@@ -563,65 +490,20 @@ impl AppState {
             Response::Opened { label, children, file_len, mtime } => self.doc.opened(label, children, file_len, mtime),
             Response::OpenFailed(e) => self.doc.open_failed(e),
             Response::Children { node, children, error } => self.doc.children_arrived(node as usize, children, error),
-            Response::View { req, kind, view, reveal, select, .. } => {
-                if self.view_overtaken(req) {
-                    // A newer selection was made since the request: the reply is stale and is
-                    // discarded entirely (no view, no selection, no tree reveal).
-                    if self.doc.drop_pending(req) {
-                        self.pending_sel = None;
-                        // The history as it was before the request (Back keeps its level).
-                        match self.view_owner.take().map(|o| o.history) {
-                            Some(HistoryChange::Pushed) => self.doc.undo_push(),
-                            Some(HistoryChange::Popped(h)) => self.doc.push_back(*h),
-                            _ => {}
-                        }
-                        // The tree follows the view that stays (a tree click may have moved it).
-                        if let Some(k) = self.doc.view_kind().cloned() {
-                            self.doc.select_loaded(&k);
-                        }
-                    }
-                    return None;
-                }
-                let Some(kind) = kind else {
-                    // Nothing located (or a superseded request): the raw selection stays.
-                    if self.doc.drop_pending(req) {
-                        self.pending_sel = None;
-                        self.doc.set_status_msg("No known structure holds this byte");
-                    }
-                    return None;
-                };
-                // Keep the hex space only if the new view still describes it.
-                let hex_space = self.doc.hex().space;
-                let keep_space = hex_space == Space::File || view.spaces.iter().any(|s| s.space == hex_space);
-                let extent = view.extent;
-                if self.doc.accept_view(req, kind.clone(), *view) {
-                    // A pending selection applies only if nothing was selected since the request.
-                    let pending = self.pending_sel.take().filter(|p| p.epoch == self.sel.epoch());
-                    self.sel.clear();
-                    self.find.clear_matches();
-                    if let Some(r) = reveal {
-                        self.doc.reveal(r.path, &kind);
-                    }
-                    if !keep_space {
-                        let len = self.doc.file_len();
-                        self.doc.hex_mut().set_space(Space::File, len, FILE_SPACE_TITLE.into());
-                        self.load_hex_page(Space::File, 0);
-                        self.doc.set_goto("0x0".into());
-                    }
-                    match pending {
-                        Some(p) => self.apply_pending(p, select, extent),
-                        // A plain node view moves the byte view to the structure's start.
-                        None => {
-                            if let Some(e) = extent {
-                                self.show_span(Some(Span::file(e.offset, 1)));
-                            }
-                        }
-                    }
-                    if !self.find.query().is_empty() {
-                        self.find.update_matches(self.doc.view());
+            Response::View { req, kind, view, reveal, select, .. } => match (self.doc.on_view_reply(req, kind.is_some(), self.sel.epoch()), kind) {
+                (ViewReply::Accepted { pending }, Some(kind)) => self.view_arrived(kind, *view, reveal.map(|r| r.path), select, pending),
+                // A newer selection was made since the request: the reply is discarded entirely
+                // (no view, no selection, no tree reveal); the tree follows the view that stays
+                // (a tree click may have moved it).
+                (ViewReply::Overtaken, _) => {
+                    if let Some(k) = self.doc.view_kind().cloned() {
+                        self.doc.select_loaded(&k);
                     }
                 }
-            }
+                // Nothing located: the raw selection stays.
+                (ViewReply::NothingLocated, _) => self.doc.set_status_msg("No known structure holds this byte"),
+                _ => {}
+            },
             Response::Page { req, space, outcome, .. } => {
                 let size = match (space, &outcome) {
                     (Space::File, Outcome::Done((_, size))) => Some(*size),
@@ -634,21 +516,12 @@ impl AppState {
                     self.doc.set_file_len(size);
                 }
             }
-            Response::Copied { req, sel, outcome } => match self.jobs.copy_reply(req, sel, self.sel.epoch()) {
-                CopyReply::Accepted => {
-                    let note = match outcome {
-                        Outcome::Done((text, note)) => {
-                            clip = Some(text);
-                            note
-                        }
-                        Outcome::Failed(e) => format!("Copy failed: {e}"),
-                        Outcome::Cancelled => "Copy cancelled".into(),
-                    };
-                    self.jobs.set_copy_note(note);
+            Response::Copied { req, sel, outcome } => {
+                if let Some(r) = self.jobs.clipboard_mut().on_reply(req, sel, self.sel.epoch(), outcome) {
+                    clip = r.text;
+                    self.copy_notice(r.note);
                 }
-                CopyReply::Stale => self.jobs.set_copy_note("Discarded a stale copy (selection changed); clipboard unchanged"),
-                CopyReply::Ignored => {}
-            },
+            }
             Response::Stat { req, outcome } => {
                 if self.jobs.take_stat(req) {
                     match outcome {
@@ -659,28 +532,101 @@ impl AppState {
                     }
                 }
             }
-            Response::SearchProgress { done, total } => self.find.set_progress(Some((done, total))),
+            Response::SearchProgress { done, total } => self.find.on_progress(job, done, total),
             Response::SearchHit { off, len } => {
-                self.find.set_progress(None);
-                self.find.set_hit(Some(off));
-                self.find.set_status(format!("Bytes: match at file 0x{off:x} (physical bytes)"));
-                let span = Some(Span::file(off, len));
-                self.sel.set_span(span);
-                self.show_span(span);
-                self.select_row_for(Space::File, off);
+                if let Some(span) = self.find.on_hit(job, off, len) {
+                    self.show_span(Some(span));
+                    // One decision (field / structure bytes / raw range); never a row the hit
+                    // is not in (0020 D2).
+                    match provenance::hit_target(self.doc.view(), &span) {
+                        HitTarget::Field(i) => self.select_field_row(i, SelOrigin::Hex, Some(Span::file(off, 1))),
+                        HitTarget::Structure => {
+                            let what = self.doc.view().map(|v| v.title.clone()).unwrap_or_default();
+                            self.sel.select_hit(span, true, format!("Byte-search match in {what}; not a single field."));
+                        }
+                        HitTarget::Raw => self.sel.select_hit(span, false, "Byte-search match outside the structure shown; no field of the current table covers these bytes.".into()),
+                    }
+                }
             }
-            Response::SearchDone { found: _, cancelled } => {
-                self.find.set_progress(None);
-                self.find.set_status(if cancelled { "Byte search cancelled" } else { "Bytes: no further match in the physical file bytes (compressed contents are not searched)" });
-            }
+            Response::SearchDone { found: _, cancelled } => self.find.on_done(job, cancelled),
         }
         clip
+    }
+
+    /// An accepted view: installed, selection replaced (by the pending one if it is still
+    /// current), tree revealed, byte view kept only if the new view still describes its space.
+    fn view_arrived(&mut self, kind: NodeKind, view: View, reveal: Option<Vec<(NodeKind, Vec<Child>)>>, select: Option<SelectHint>, pending: Option<Box<PendingSel>>) {
+        let extent = view.extent;
+        self.doc.show_view(kind.clone(), view);
+        let keep_space = self.doc.describes_space(self.doc.hex().space());
+        self.sel.clear();
+        self.find.clear_matches();
+        if let Some(path) = reveal {
+            self.doc.reveal(path, &kind);
+        }
+        if !keep_space {
+            let len = self.doc.file_len();
+            let p = self.doc.hex_mut().show_space(Space::File, len, crate::app::FILE_SPACE_TITLE.into());
+            self.load_page(p);
+        }
+        match pending {
+            Some(p) => {
+                if let Some(v) = self.doc.view() {
+                    let a = plan_arrival(*p, select, v, extent);
+                    self.arrive(a);
+                }
+            }
+            // A plain node view moves the byte view to the structure's start.
+            None => {
+                if let Some(e) = extent {
+                    self.show_span(Some(Span::file(e.offset, 1)));
+                }
+            }
+        }
+        if !self.find.query().is_empty() {
+            self.find.update_matches(self.doc.view());
+        }
+    }
+
+    /// Executes the arrival plan of a view (`navigation::plan_arrival`).
+    fn arrive(&mut self, a: Arrival) {
+        match a {
+            Arrival::Restore(Here { sel, hex_space: space, hex_at: at, goto }) => {
+                // Back: the exact previous selection, in the byte space and position it had, and
+                // the Go-to text (design B7) — restored only with the byte view it describes.
+                self.sel.restore(sel);
+                if self.doc.describes_space(space) {
+                    self.reveal(Span::new(space, at, 1));
+                    self.doc.hex_mut().set_goto(goto);
+                }
+            }
+            Arrival::Field { row, origin, anchor } => self.select_field_row(row, origin, anchor),
+            Arrival::Structure { span, note, origin, anchor, reveal } => {
+                self.sel.select_structure(span, note, origin, anchor);
+                if reveal {
+                    self.show_span(Some(span));
+                }
+            }
+            Arrival::Whole { extent, note, origin, via } => {
+                self.sel.select_whole(extent, note, origin, via);
+                if let Some(e) = extent {
+                    self.show_span(Some(Span::file(e.offset, 1)));
+                }
+            }
+        }
+    }
+
+    /// Stops the running byte search (worker and state).
+    fn cancel_byte_search(&mut self) {
+        self.jobs.cancel_search();
+        self.find.cancel();
     }
 
     // ---------------- search ----------------
 
     fn search_step(&mut self, backward: bool) {
-        if self.find.query().is_empty() {
+        // Empty query or invalid hex: Next/Prev do nothing (and are disabled).
+        if !self.find.can_step() {
             return;
         }
         // 1) decoded rows of the current table only
@@ -690,19 +636,14 @@ impl AppState {
         }
         // 2) physical bytes of the file (bounded chunked background search; not decompressed)
         let Some(p) = self.doc.file().map(|p| p.to_path_buf()) else { return };
-        match jobs::parse_query(self.find.query(), self.find.hex_mode()) {
-            Ok(needle) => {
-                let from = match (self.find.hit(), backward) {
-                    (Some(h), false) => h + 1,
-                    (Some(h), true) => h,
-                    (None, false) => self.sel.span().filter(|s| s.space == Space::File).map(|s| s.offset).unwrap_or(0),
-                    (None, true) => u64::MAX,
-                };
-                self.find.set_status("Bytes: searching the physical file bytes…");
-                self.find.set_progress(Some((0, 1)));
-                self.jobs.search(self.doc.generation(), p, needle, from, backward);
+        let sel_off = self.sel.span().filter(|s| s.space == Space::File).map(|s| s.offset);
+        match self.find.next_byte_search(sel_off, backward) {
+            Ok(q) => {
+                // The worker supersedes any running search; its id guards the replies.
+                let req = self.jobs.search(self.doc.generation(), p, q.needle, q.from, q.backward);
+                self.find.started(req);
             }
-            Err(e) => self.find.set_status(e),
+            Err(e) => self.find.set_invalid(e),
         }
     }
 
@@ -720,37 +661,31 @@ impl AppState {
     }
 
     /// Selects field row `i` with its span and exact file ranges. A byte-view click keeps the
-    /// byte view where it is (`anchor` = the clicked byte); other origins move it: to the file
-    /// range when the field maps exactly to file bytes (file offset is the primary location),
-    /// else to the field's own space.
+    /// byte view where it is (`anchor` = the clicked byte); other origins move it
+    /// (`provenance::reveal_for_field`): to the file range when the field maps exactly to file
+    /// bytes (file offset is the primary location), else to the field's own space; a field
+    /// without bytes shows the enclosing structure's first byte (design B1–B6: no span, nothing
+    /// filled or outlined, no history entry; without an honest enclosing range the view stays).
     fn select_field_row(&mut self, i: usize, origin: SelOrigin, anchor: Option<Span>) {
-        self.jobs.set_copy_note("");
+        self.view_prefs.clear_notice(NoticeOwner::Copy);
         let span = self.doc.row(Some(i)).and_then(|r| r.field.span);
         let extra: Vec<Span> = span.filter(|s| s.space != Space::File).map(|s| exact_file_ranges(self.doc.view(), &s)).unwrap_or_default();
         self.sel.select_field(i, span, extra.clone(), origin, anchor);
         if origin == SelOrigin::Hex {
             return;
         }
+        let at = provenance::reveal_for_field(self.doc.view(), span, &extra, self.doc.hex().space());
         if span.is_none() {
-            // No bytes of its own (design B1–B6): the byte view shows the first byte of the
-            // enclosing structure; no span is created, nothing is filled or outlined, no
-            // history entry. Without an honest enclosing range the byte view stays.
-            let at = provenance::byteless_reveal(self.doc.view(), self.doc.hex().space());
             self.sel.set_shown(at);
-            self.show_span(at);
-            return;
         }
-        match extra.first() {
-            Some(f) if self.doc.hex().space == Space::File || self.doc.hex().space != span.map(|s| s.space).unwrap_or(Space::File) => self.show_span(Some(*f)),
-            _ => self.show_span(span),
-        }
+        self.show_span(at);
     }
 
     /// A byte click: the narrowest field of the current table holding the byte (the clicked
     /// byte stays outlined); otherwise the structure holding it is located (bounded worker
     /// request) and its view opens with the field — or the structure — selected.
     fn hex_click(&mut self, off: u64) {
-        let space = self.doc.hex().space;
+        let space = self.doc.hex().space();
         let byte = Span::new(space, off, 1);
         if let Some(i) = self.doc.view().and_then(|v| field_at(v, space, off)) {
             self.select_field_row(i, SelOrigin::Hex, Some(byte));
@@ -766,98 +701,13 @@ impl AppState {
         }
         let before = self.here();
         self.sel.click_raw(byte, "Locating the structure that holds this byte…");
-        self.pending_sel = Some(PendingSel::new(self.sel.epoch(), SelOrigin::Hex, Some(byte), None));
-        self.request_with(ViewTarget::Locate { space, off }, Some(before), true);
-    }
-
-    /// Applies the selection of an arrived view (navigation or located byte): the narrowest
-    /// field at the byte, else the row with exactly the span, else the structure range. A
-    /// navigation without a span moves the byte view to the structure (`extent`).
-    fn apply_pending(&mut self, p: PendingSel, select: Option<SelectHint>, extent: Option<Span>) {
-        if let Some(Here { sel, hex_space: space, hex_at: at, goto }) = p.restore {
-            // Back: the exact previous selection, in the byte space and position it had, and
-            // the Go-to text (design B7).
-            self.sel.restore(sel);
-            let known = space == Space::File || self.doc.view().is_some_and(|v| v.spaces.iter().any(|s| s.space == space));
-            if known {
-                if space != self.doc.hex().space() {
-                    let (t, size) = self.doc.space_title(space);
-                    self.doc.hex_mut().set_space(space, size, t);
-                }
-                if self.doc.hex_mut().ensure_visible(at) {
-                    let base = self.doc.hex().page_base();
-                    self.load_hex_page(space, base);
-                }
-                // Restored only with the byte view it describes.
-                self.doc.set_goto(goto);
-            }
-            return;
-        }
-        let hint = select.or(p.hint).unwrap_or(SelectHint { at: None, span: None });
-        let Some(view) = self.doc.view() else { return };
-        if let Some((space, off)) = hint.at
-            && let Some(i) = field_at(view, space, off)
-        {
-            self.select_field_row(i, p.origin, p.anchor);
-            return;
-        }
-        if let Some(s) = hint.span {
-            if let Some(i) = view.rows.iter().position(|r| r.field.span == Some(s)) {
-                self.select_field_row(i, p.origin, p.anchor);
-                return;
-            }
-            let compressed = view.spaces.iter().find(|sp| matches!(&sp.map, SpaceMap::Compressed { file, .. } if file.offset <= s.offset && s.offset < file.offset + file.len.max(1)));
-            let note = match compressed {
-                Some(sp) => format!(
-                    "Compressed contents of {} [0x{:x},0x{:x}): stored bytes have no byte-to-byte mapping to decompressed fields. Open the decompressed view to select a field ({}).",
-                    view.title,
-                    s.offset,
-                    s.offset + s.len,
-                    sp.space.label()
-                ),
-                None => format!("{} [0x{:x},0x{:x}): structure bytes, not a single field.", view.title, s.offset, s.offset + s.len),
-            };
-            self.sel.select_structure(s, note, p.origin, p.anchor);
-            if p.origin != SelOrigin::Hex {
-                self.show_span(Some(s));
-            }
-            return;
-        }
-        if let Some(a) = p.anchor {
-            // Located, but no field of that view holds the byte: the structure is the answer.
-            let s = extent.unwrap_or(a);
-            self.sel.select_structure(s, format!("{}: the clicked byte is part of this structure, not of a single field.", view.title), p.origin, Some(a));
-        } else {
-            // Navigation without a target row, tree click, structure step: the whole structure
-            // (never "Nothing selected"); the byte view shows its first byte.
-            let note = "The whole structure is selected (no single field). Select a row or a byte for a field.".to_string();
-            self.sel.select_whole(extent, note, p.origin, p.via);
-            if let Some(e) = extent {
-                self.show_span(Some(Span::file(e.offset, 1)));
-            }
-        }
+        let p = PendingSel::new(self.sel.epoch(), SelOrigin::Hex, Some(byte), None);
+        self.request_with(ViewTarget::Locate { space, off }, HistoryOp::Push(before), true, Some(p));
     }
 
     /// `]` / `[`: the next / previous field of the current table in span order (one step).
     fn step_field(&mut self, forward: bool) {
-        let Some(v) = self.doc.view() else { return };
-        let mut order: Vec<(usize, Span)> = v.rows.iter().enumerate().filter_map(|(i, r)| r.field.span.map(|s| (i, s))).collect();
-        let space_key = |s: &Span| match s.space {
-            Space::File => 0u64,
-            Space::Block(o) | Space::Record(o) => 1 + o,
-        };
-        order.sort_by_key(|(i, s)| (space_key(s), s.offset, *i));
-        if order.is_empty() {
-            return;
-        }
-        let pos = self.sel.row().and_then(|r| order.iter().position(|(i, _)| *i == r));
-        let next = match (pos, forward) {
-            (Some(p), true) => (p + 1).min(order.len() - 1),
-            (Some(p), false) => p.saturating_sub(1),
-            (None, true) => 0,
-            (None, false) => order.len() - 1,
-        };
-        let row = order[next].0;
+        let Some(row) = self.doc.view().and_then(|v| selection::next_field(v, self.sel.row(), forward)) else { return };
         self.select_field_row(row, SelOrigin::Keyboard, None);
     }
 
@@ -880,16 +730,7 @@ impl AppState {
         if n == 0 {
             return;
         }
-        let cur = self.sel.row();
-        let t = match m {
-            RowMove::Up => cur.map(|c| c.saturating_sub(1)).unwrap_or(0),
-            RowMove::Down => cur.map(|c| (c + 1).min(n - 1)).unwrap_or(0),
-            RowMove::PageUp => cur.map(|c| c.saturating_sub(LIMITS.page_rows)).unwrap_or(0),
-            RowMove::PageDown => cur.map(|c| (c + LIMITS.page_rows).min(n - 1)).unwrap_or(0),
-            RowMove::Home => 0,
-            RowMove::End => n - 1,
-        };
-        self.select_row(t);
+        self.select_row(selection::row_after(m, self.sel.row(), n));
     }
 
     /// Selects the narrowest field holding the offset (byte view stays). Returns false if none.
@@ -932,21 +773,23 @@ impl AppState {
     }
 
     fn goto_offset(&mut self) {
-        let t = self.doc.goto().trim().to_string();
-        let parsed = if let Some(h) = t.strip_prefix("0x") { u64::from_str_radix(h, 16).ok() } else { t.parse::<u64>().ok() };
-        let size = self.doc.hex().size;
+        let parsed = HexState::parse_offset(self.doc.hex().goto());
+        let size = self.doc.hex().size();
+        let sp = self.doc.hex().space();
         match parsed {
             Some(off) if off < size.max(1) => {
-                let sp = self.doc.hex().space;
                 if !self.select_row_for(sp, off) {
                     self.sel.click_raw(Span::new(sp, off, 1), "No field in the current table covers this offset.");
                 }
                 if self.doc.hex_mut().ensure_visible(off) {
-                    let base = self.doc.hex().page_base;
+                    let base = self.doc.hex().page_base();
                     self.load_hex_page(sp, base);
                 }
             }
-            Some(off) => self.doc.set_status_msg(format!("offset {off} is outside the current space ({size} bytes)")),
+            Some(off) => {
+                let all = Span::new(sp, 0, size).range_text();
+                self.doc.set_status_msg(format!("offset {off} is outside the current space ({all})"))
+            }
             None => self.doc.set_status_msg("enter a decimal offset or 0x-prefixed hex"),
         }
     }
@@ -956,65 +799,30 @@ impl AppState {
         self.copy(k);
     }
 
-    /// Starts a copy job for the current selection. The clipboard is written when the result
-    /// arrives, and only if the selection is still the one it was requested for.
+    /// Starts a copy job for the current selection (`clipboard::plan`). The clipboard is
+    /// written when the result arrives, and only if the selection is still the one it was
+    /// requested for (`ClipboardState`).
     fn copy(&mut self, k: CopyKind) {
-        let row = self.doc.row(self.sel.row()).cloned();
-        let g = self.doc.generation();
-        let epoch = self.sel.epoch();
-        let text = |text: String, note: String| Ok(CopyJob::Text { text, note });
-        let job: Result<CopyJob, String> = match (k, row) {
-            (CopyKind::Hex, _) => match self.sel.span() {
-                None => Err("Nothing selected to copy".into()),
-                Some(s) => {
-                    let len = s.len.min(LIMITS.copy_cap);
-                    if s.space == Space::File {
-                        match self.doc.file() {
-                            Some(p) => Ok(CopyJob::FileHex { path: p.to_path_buf(), off: s.offset, len, requested: s.len }),
-                            None => Err("No file open".into()),
-                        }
-                    } else {
-                        self.jobs.copy_bytes(g, epoch, s.space, s.offset, len, s.len);
-                        self.jobs.set_copy_note("Copying…");
-                        return;
-                    }
+        let input = CopyInput { kind: k, row: self.doc.row(self.sel.row()), span: self.sel.span(), view: self.doc.view(), file: self.doc.file() };
+        let (g, epoch) = (self.doc.generation(), self.sel.epoch());
+        match clipboard::plan(input) {
+            Ok(plan) => {
+                match plan {
+                    CopyPlan::Text { text, note } => self.jobs.copy(g, epoch, CopyJob::Text { text, note }),
+                    CopyPlan::FileHex { path, off, len, requested } => self.jobs.copy(g, epoch, CopyJob::FileHex { path, off, len, requested }),
+                    CopyPlan::DerivedHex { space, off, len, requested } => self.jobs.copy_bytes(g, epoch, space, off, len, requested),
+                };
+                // The file path is copied without a "Copying…" step (as before).
+                if k != CopyKind::FilePath {
+                    self.copy_notice(clipboard::COPYING);
                 }
-            },
-            (CopyKind::Value, Some(r)) => match &r.field.value_bytes {
-                Some(b) => {
-                    let (t, note) = bytes_copy_text(b, "value");
-                    text(t, note)
-                }
-                None => {
-                    let n = r.field.value.chars().count();
-                    text(r.field.value.clone(), format!("Copied value ({n} chars, displayed text)"))
-                }
-            },
-            (CopyKind::Key, Some(r)) => match &r.field.key_bytes {
-                Some(b) => {
-                    let (t, note) = bytes_copy_text(b, "key");
-                    text(t, note)
-                }
-                None => Err("This row has no key".into()),
-            },
-            (CopyKind::Offset, _) => match self.sel.span() {
-                Some(s) => text(format!("{} 0x{:x}..0x{:x} ({} bytes)", s.space.label(), s.offset, s.offset + s.len, s.len), "Copied offset range".into()),
-                None => Err("No byte range selected".into()),
-            },
-            (CopyKind::RowTsv, Some(r)) => text(r.cells.join("\t"), format!("Copied row ({} columns, TSV; cells are the table previews)", r.cells.len())),
-            (_, None) => Err("No row selected".into()),
-        };
-        match job {
-            Ok(job) => {
-                self.jobs.copy(g, epoch, job);
-                self.jobs.set_copy_note("Copying…");
             }
-            Err(e) => self.jobs.set_copy_note(e),
+            Err(e) => self.copy_notice(e),
         }
     }
 
-    /// Clipboard text that needs no read still goes through the copy gate.
-    fn copy_text(&mut self, text: String, note: &str) {
-        self.jobs.copy(self.doc.generation(), self.sel.epoch(), CopyJob::Text { text, note: note.into() });
+    /// A copy message in the one transient status notice, timed (0020 UI ruling F1).
+    fn copy_notice(&mut self, text: impl Into<String>) {
+        self.view_prefs.notify(NoticeOwner::Copy, text, std::time::Instant::now(), Some(COPY_NOTICE_SECS));
     }
 }

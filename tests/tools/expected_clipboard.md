@@ -1,4 +1,4 @@
-# Expected clipboard strings (v3 FINAL: v2 table + section "v3 (final)" below, rules read from src at FREEZE B) - v2 part from src at FREEZE B1; compare byte-for-byte with `pbpaste`/`clipsave` (clipsave writes the exact bytes)
+# Expected clipboard strings (v4: Copy Offset notation of 0.1.3, section "v4" at the end; v3 FINAL: v2 table + section "v3 (final)" below, rules read from src at FREEZE B) - v2 part from src at FREEZE B1; compare byte-for-byte with `pbpaste`/`clipsave` (clipsave writes the exact bytes)
 Sources (read-only): `AppState::do_copy` + `bytes_copy_text` (app/state.rs), `jobs::hex_copy_text`, `present/common.rs`, `present/sst.rs`,
 dump rows (`--dump` prints the row cells joined by " | "; Copy row joins them with TAB). No copy adds a trailing newline of its own.
 TAB = 0x09. In the row-TSV cells, `\n` = backslash + n (the display preview). Value/Key copy = the real bytes when valid UTF-8,
@@ -10,9 +10,9 @@ otherwise an escaped form (`\` -> `\\`, non-UTF-8 byte -> `\xNN`), bounded by th
 | Copy value | `MANIFEST-000005` + real LF = 16 bytes, last byte 0x0a (`pbpaste | xxd` ends `...3035 0a`) | Copied value (16 bytes, UTF-8 text) |
 | Copy key | disabled in the menu (row has no key); if forced: "This row has no key", clipboard unchanged | - |
 | Copy hex (max 64 KiB) | `4d 41 4e 49 46 45 53 54 2d 30 30 30 30 30 35 0a` | Copied 16 bytes as hex |
-| Copy offset | `file 0x0..0x10 (16 bytes)` | Copied offset range |
+| Copy offset | `file [0x0,0x10) · 16 B` (0.1.3 range notation, see "v4" below; the 0.1.2 form `file 0x0..0x10 (16 bytes)` is gone) | Copied offset range |
 | Copy row (TSV) | `contents` TAB `0x0` TAB `16` TAB `MANIFEST-000005\n` TAB `text line + \n` TAB `4d 41 4e 49 46 45 53 54 2d 30 30 30 30 30 35 0a` TAB `✔ Present` (7 cells; literal backslash-n inside) | Copied row (7 columns, TSV; cells are the table previews) |
-Row 2 "referenced MANIFEST" (no value_bytes): Copy value = `MANIFEST-000005` (15 chars, no LF), note "Copied value (15 chars, displayed text)"; hex `4d 41 4e 49 46 45 53 54 2d 30 30 30 30 30 35`; offset `file 0x0..0xf (15 bytes)`.
+Row 2 "referenced MANIFEST" (no value_bytes): Copy value = `MANIFEST-000005` (15 chars, no LF), note "Copied value (15 chars, displayed text)"; hex `4d 41 4e 49 46 45 53 54 2d 30 30 30 30 30 35`; offset `file [0x0,0xf) · 15 B`.
 
 ## sst-zstd/data.sst, Data block @0x0 (decompressed), row 0 (entry 0)
 | item | exact clipboard |
@@ -20,8 +20,8 @@ Row 2 "referenced MANIFEST" (no value_bytes): Copy value = `MANIFEST-000005` (15
 | Copy value | the 148-byte value `value-000000:` + 3 x `The quick brown fox jumps over the lazy dog. ` (ends with one space, no newline); note "Copied value (148 bytes, UTF-8 text)" |
 | Copy key | the INTERNAL key, 18 bytes: `key-000000` + 7 control bytes `01 00 00 00 00 00 00 00` (8 trailer bytes: 0x01 then seven NULs) - valid UTF-8, copied raw; note "Copied key (18 bytes, UTF-8 text)". TO CONFIRM: macOS pasteboard may cut/strip at the NUL bytes; if `clipsave` shows fewer than 18 bytes record the actual bytes (`xxd`) as a finding |
 | Copy hex | 170 bytes, space-separated lowercase: `00 12 94 01 6b 65 79 2d 30 30 30 30 30 30 01 00 00 00 00 00 00 00 76 61 6c 75 65 2d ...` (509 chars; SHA-256 of the string `0223cd9578fcf6df0758ff8e1cf1f6bae120240fc32f7370fff30fc90ddf0532`) |
-| Copy offset | `block@0x0 (decompressed) 0x0..0xaa (170 bytes)` |
-| Copy row (TSV) | `0` TAB `blk+0x0` TAB `R` TAB `0` TAB `18` TAB `148` TAB `"key-000000"` TAB `0` TAB `1 Value (Put)` TAB `"value-000000:The quick brown fox jumps over the lazy dog. The qu … (+84 B)"` TAB `✔ Present` (11 cells) |
+| Copy offset | the old `block@0x0 (decompressed) 0x0..0xaa (170 bytes)` form is gone; see section "v4 (Copy Offset, 0.1.3)" below (examples/files/sst-zstd/sst-zstd.sst) |
+| Copy row (TSV) | `0` TAB `block+0x0` TAB `R` TAB `0` TAB `18` TAB `148` TAB `"key-000000"` TAB `0` TAB `1 Value (Put)` TAB `"value-000000:The quick brown fox jumps over the lazy dog. The qu … (+84 B)"` TAB `✔ Present` (11 cells) |
 SHA-256 of the clipsave'd bytes: value (148 B) `d72e28f4c1bb776771f6d2451ba50844c397baf9a43a6a7738b975dc3fd67422`; key (18 B) `cec99885c2ffc7326030dfef014358f313b21841bea062eaf298a40b93428418` (`shasum -a 256 <clipsave>.txt`).
 Hex string: `python3 -c "v=b'value-000000:'+b'The quick brown fox jumps over the lazy dog. '*3; e=bytes([0,18,0x94,1])+b'key-000000'+bytes([1]+[0]*7)+v; print(' '.join('%02x'%b for b in e))"`
 
@@ -53,4 +53,14 @@ Confirmed reading = A: bytes 00 01 02 are valid UTF-8 (stay raw), `ff` and `fe` 
 ### 3. 64 KiB caps: wal-fragmented, op Put `big-100k` (102400 bytes, byte[i] = 'a' + (i mod 26)), the op's `value` FIELD row (span = the 102400 value bytes)
 - Copy hex: exactly 196607 characters (65536*3-1), starts `61 62 63`, ends `6e 6f 70` (byte 65535 = 'a'+15 = 0x70), no trailing space/newline; SHA-256 `c9e375d36fa5979d54ca513423ccacd7d7de07e308b61c09f372379e1fbb2a23`; note exactly `Copied 65536 of 102400 bytes as hex (truncated: 64 KiB copy cap / end of data)`. Uncapped would be 307199 chars = FAIL.
 - Copy value: first 65536 bytes (valid UTF-8 `abc...`), 65536 bytes, SHA-256 `62b3a2ef06cf977623a5936a8fa653e3caecbf69b5f393ebdfe5022affc5331f`; note exactly `Copied value (65536 bytes, UTF-8 text; first 65536 of 102400 bytes, 64 KiB copy cap)`.
-- Copy offset for the same selection: `file 0x<start>..0x<end> (102400 bytes)` (uncapped range text, note `Copied offset range`).
+- Copy offset for the same selection: `file [0x<start>,0x<end>) · 102400 B` (uncapped range text, note `Copied offset range`).
+
+## v4 (Copy Offset, 0.1.3) - range notation, bound to the real clipboard text by `copy_offset_equals_the_documented_clipboard_examples` (tests/v013_regressions.rs)
+Notation: half-open `[a,b)` hex range in the space of the selection, then ` · n B`. File space: nothing else. Derived spaces (`block@0x<off>`, `record@0x<off>`, offsets with `+`) add `= file [c,d)` only when the selected bytes are ONE exact file range, and the provenance qualifier last (`exact` for an exact block mapping, `reassembled` for a record, `decompressed` for a block). A decompressed block names its compressed container instead (no file bytes of its own). A reassembled record selection that needs more than one file range (across a fragment boundary) has NO `= file ...` part. The test reads each line below (the line must start with `| Copy offset - ` and contain its `[tag]`) and compares the back-ticked string literally. TSV: never a trailing newline.
+| item | exact clipboard |
+|---|---|
+| Copy offset - [file] sst-zstd.sst, raw selection 0x10+4 (Go to / byte click) | `file [0x10,0x14) · 4 B` |
+| Copy offset - [block] sst-zstd.sst, Data block @0x0 decompressed view, entry 0 (first row) | `block@0x0 [+0x0,+0x6d) · 109 B · decompressed · compressed container file [0x0,0x63)` |
+| Copy offset - [record-one-range] wal-plain/000004.log, record 0, count field | `record@0x0 [+0x8,+0xc) · 4 B = file [0xf,0x13) · reassembled` |
+| Copy offset - [record-across-fragments] tests/fixtures/wal-fragmented/000004.log (the examples/files copy has no record@0x5eec), record@0x5eec, first field crossing a fragment boundary | `record@0x5eec [+0xc,+0x19019) · 102413 B · reassembled` |
+GUI use: after `clipclear`, Copy Offset, `clipsave NAME`, the file must equal the string byte-for-byte (`shasum -a 256`).

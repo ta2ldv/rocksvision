@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 
-/// Runs one search on its own thread; it stops when `search_id` moves past its own id.
+/// Runs one search on its own thread; it stops when `search_id` moves past its own id. Returns
+/// that id; every reply carries it as `Tagged::job`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spawn(search_id: Arc<AtomicU64>, tx: Sender<Tagged<Response>>, wake: Arc<dyn Fn() + Send + Sync>, generation: u64, path: PathBuf, needle: Vec<u8>, from: u64, backward: bool) {
+pub(super) fn spawn(search_id: Arc<AtomicU64>, tx: Sender<Tagged<Response>>, wake: Arc<dyn Fn() + Send + Sync>, generation: u64, path: PathBuf, needle: Vec<u8>, from: u64, backward: bool) -> u64 {
     let my = search_id.fetch_add(1, Ordering::SeqCst) + 1;
     thread::spawn(move || {
         let res = search_file(&path, &needle, from, backward, &|| search_id.load(Ordering::Relaxed) != my, &|d, t| {
-            let _ = tx.send(Tagged { generation, msg: Response::SearchProgress { done: d, total: t } });
+            let _ = tx.send(Tagged { generation, job: my, msg: Response::SearchProgress { done: d, total: t } });
             wake();
         });
         let msg = match res {
@@ -23,9 +24,10 @@ pub(super) fn spawn(search_id: Arc<AtomicU64>, tx: Sender<Tagged<Response>>, wak
             Some(None) => Response::SearchDone { found: false, cancelled: false },
             None => Response::SearchDone { found: false, cancelled: true },
         };
-        let _ = tx.send(Tagged { generation, msg });
+        let _ = tx.send(Tagged { generation, job: my, msg });
         wake();
     });
+    my
 }
 
 /// Bounded chunked search. Returns None if cancelled, Some(None) if not found.

@@ -161,7 +161,9 @@ pub fn map(k: &Keys, st: &AppState, menu_owns_accelerators: bool) -> Vec<Action>
             (k.cmd_f, Action::FocusSearch),
             (k.cmd_g, Action::SearchNext),
             (k.shift_cmd_g, Action::SearchPrev),
-            (k.cmd_plus, Action::ZoomIn),
+            // Gated like the native menu item (review N1): a Zoom In that cannot zoom never
+            // rewrites the chosen zoom.
+            (k.cmd_plus && st.can_zoom_in(), Action::ZoomIn),
             (k.cmd_minus, Action::ZoomOut),
             (k.cmd_0, Action::ZoomReset),
             (k.shift_cmd_r, Action::ResetView),
@@ -201,6 +203,29 @@ mod tests {
         let mut a = st();
         a.apply(Action::ZoomIn);
         assert!((a.prefs().zoom() - 1.1).abs() < 1e-4, "one press = +10 %: {}", a.prefs().zoom());
+    }
+
+    /// Review N1: chosen 160 % clamped to 100 % by a small window; Ctrl+= (no native menu) is
+    /// gated by `can_zoom_in` like the menu item, so the chosen zoom (and app.ron) stays 160 %
+    /// and the window's return still restores it.
+    #[test]
+    fn zoom_in_key_at_the_layout_limit_keeps_the_chosen_zoom() {
+        use crate::app::ZoomFit;
+        let at = |w: f32, h: f32, z: f32| Action::LayoutFit(ZoomFit { at_zoom: z, avail_w: w / z, avail_h: h / z, need_w: 875.0, need_h: 560.0 });
+        let mut s = st();
+        s.apply(Action::SetZoom(1.6));
+        s.apply(at(900.0, 700.0, 1.6));
+        s.apply(at(900.0, 700.0, 1.6));
+        assert_eq!((s.prefs().zoom(), s.prefs().chosen_zoom(), s.can_zoom_in()), (1.0, 1.6, false));
+        let k = Keys { cmd_plus: true, ..Default::default() };
+        let acts = map(&k, &s, false);
+        assert!(acts.is_empty(), "Zoom In at the limit is not dispatched: {acts:?}");
+        for a in acts {
+            s.apply(a);
+        }
+        assert_eq!((s.prefs().chosen_zoom(), s.prefs().persisted().zoom), (1.6, 1.6));
+        s.apply(at(1400.0, 900.0, 1.0));
+        assert!((s.prefs().zoom() - 1.6).abs() < 1e-3, "the window's return restores 160 %: {}", s.prefs().zoom());
     }
 
     /// `]`/`[` step fields, Shift steps structures; one action per press; nothing while a text

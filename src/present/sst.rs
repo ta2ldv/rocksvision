@@ -1,7 +1,7 @@
 //! SST presentation: lazy tree children and views (tables, explanations, derived-space titles)
 //! built from the typed state of `sst::SstInspector`.
 
-use super::common::{Location, bytes_dec_hex, error_view, explained, field_row, of_fields, range, size_row, st_cell, with_error_diag};
+use super::common::{Location, error_view, explained, field_row, of_fields, range, range_len, size_row, st_cell, with_error_diag};
 use crate::format::codec::compression_name;
 use crate::format::ikey::{MAX_SEQUENCE, ikey_meaning, split_ikey, value_type_name as tag_name};
 use crate::limits::{COMPRESSION_SAMPLE, LIST_CHECK_BYTES, RESTARTS_LISTED, SST_DATA_PAGE as DATA_PAGE, SST_TREE_CHILDREN as TREE_CHILD_CAP};
@@ -45,14 +45,32 @@ fn space_info(b: &Block) -> Vec<SpaceInfo> {
         vec![SpaceInfo {
             space: Space::Block(b.handle.offset),
             size: b.data.len() as u64,
-            // "stored" = on-disk extent incl. trailer; "contents" = stored payload; "decompressed"
-            // = decompressed length (one definition per word everywhere).
-            title: format!("Block-local offsets ({} block @0x{:x}: {} B compressed contents -> {} B decompressed)", compression_name(b.ctype), b.handle.offset, b.handle.size, b.data.len()),
+            // "stored" = on-disk extent incl. trailer; "payload" = stored bytes before the
+            // trailer; "decompressed" = decompressed length (one definition per word everywhere).
+            title: format!("Block-local offsets ({} block @0x{:x}: {} B compressed payload -> {} B decompressed)", compression_name(b.ctype), b.handle.offset, b.handle.size, b.data.len()),
             map: SpaceMap::Compressed { file: Span::file(b.handle.offset, b.handle.size), codec: compression_name(b.ctype).to_string() },
         }]
     } else {
         Vec::new()
     }
+}
+
+/// Meaning line of a physical structure row (0020 §2), in the one range notation; the whole range
+/// is on the Where line. A block: "payload file [0x6390c,0x648f5) · 4073 B · trailer
+/// [0x648f5,0x648fa) · 5 B"; a structure without a block trailer (Footer): "53 B, no block
+/// trailer".
+fn structure_meaning(start: u64, end: u64, payload: u64, trailer: u64) -> String {
+    if trailer > 0 {
+        let p = start + payload;
+        format!("payload {} · trailer {}", Span::file(start, payload).range_text(), range_len(p, end))
+    } else {
+        format!("{} B, no block trailer", end - start)
+    }
+}
+
+/// Meaning line of an unaccounted gap row (0020 §2).
+fn gap_meaning(start: u64, end: u64) -> String {
+    format!("unaccounted {} · no known structure covers these bytes", Span::file(start, end - start).range_text())
 }
 
 /// "Physical layout: 7 structures in file order (Footer last) · 0 unaccounted gaps · data
@@ -507,11 +525,15 @@ impl SstInspector {
                 Child::new(format!("Data blocks: {} ({})", l.listed_text(), l.note.clone().unwrap_or_default()), NodeKind::SstDataBlocks { skip: 0 }).role(ChildRole::Absent).status(Status::Limited),
             );
         }
-        v.push(Child::new("Physical layout table (file order)", NodeKind::SstLayout).role(ChildRole::View).leaf());
+        // View nodes claim the worst status of their rows, none while a row is not checked
+        // (0019 §1; updated from the view when it is shown).
+        let (all, data) = self.layout_tallies(&l);
+        v.push(Child::new("Physical layout table (file order)", NodeKind::SstLayout).role(ChildRole::View).leaf().tally(all));
         if self.index_handle().is_some() {
             // The listed count when the index walk is complete; otherwise a lower bound only.
             let n = if l.data_complete { l.data_listed.to_string() } else { format!("≥{}", l.data_declared.unwrap_or(0).max(l.data_listed)) };
-            v.push(Child::new(format!("Data blocks via index ({n})"), NodeKind::SstDataBlocks { skip: 0 }).role(ChildRole::View));
+            // Counts the listed blocks (an incomplete index walk has its own Limited node).
+            v.push(Child::new(format!("Data blocks via index ({n})"), NodeKind::SstDataBlocks { skip: 0 }).role(ChildRole::View).tally(data));
         }
         let unknown_meta = self.meta().is_err();
         let absent =
@@ -552,7 +574,21 @@ impl SstInspector {
 
     // ---------------- views ----------------
 
+    /// The view of node `k`, carrying the current row tallies of both table view nodes (review
+    /// S2): a block checked by this view (opened, Back) updates "Physical layout table" and
+    /// "Data blocks via index" in the tree at once. Cache only; the layout and its tallies are
+    /// kept (`layout_tallies`), so this costs O(1) per view.
     pub fn view(&mut self, k: &NodeKind, cancel: &dyn Fn() -> bool) -> View {
+        let mut v = self.view_of(k, cancel);
+        if self.footer().is_ok() {
+            let l = self.layout(cancel);
+            let (all, data) = self.layout_tallies(&l);
+            v.tallies = vec![(NodeKind::SstLayout, all), (NodeKind::SstDataBlocks { skip: 0 }, data)];
+        }
+        v
+    }
+
+    fn view_of(&mut self, k: &NodeKind, cancel: &dyn Fn() -> bool) -> View {
         match k {
             NodeKind::Root => self.root_view(cancel),
             NodeKind::SstFooter => match self.footer().cloned() {
@@ -596,12 +632,21 @@ impl SstInspector {
                 self.block_check(Handle { offset: *off, size: *size });
                 v
             }
-            NodeKind::SstDataBlocks { skip } => self.data_blocks_view(*skip, cancel),
+            NodeKind::SstDataBlocks { skip } => {
+                let mut v = self.data_blocks_view(*skip, cancel);
+                if *skip == 0 {
+                    // All listed data blocks, not only this page (the tree node stands for all).
+                    let l = self.layout(cancel);
+                    v.tally = Some(self.layout_tallies(&l).1);
+                }
+                v
+            }
             NodeKind::SstLayout => {
                 let l = self.layout(cancel);
                 let entries: Vec<Entry> = l.with_all_gaps();
                 let mut v = self.layout_table("Physical layout (file order)", &l, &entries, 0);
                 v.notes.insert(0, layout_coverage(&l).into());
+                v.tally = Some(self.layout_tallies(&l).0);
                 v
             }
             NodeKind::SstLayoutGroup { first, count } => {
@@ -609,7 +654,7 @@ impl SstInspector {
                 let entries = l.group(*first as usize, *count as usize);
                 let mut v = self.layout_table(&format!("Layout group: items {}..{} (file order)", first, first + count - 1), &l, &entries, l.end_before(*first as usize));
                 if let (Some(a), Some(z)) = (l.items.get(*first as usize), l.items.get((first + count - 1) as usize)) {
-                    v.location = vec![WhereLine { text: format!("file {} · {count} structures", range(a.start, z.end())), link: None }];
+                    v.location = vec![WhereLine { text: format!("{} · {count} structures", Span::file(a.start, z.end() - a.start).range_text()), link: None }];
                     v.extent = Some(Span::file(a.start, z.end() - a.start));
                 }
                 v
@@ -674,15 +719,19 @@ impl SstInspector {
                 _ => "-".into(),
             };
             let trailer_cell = if trailer > 0 { range(start + contents, end) } else { "-".into() };
-            let fld =
-                Field::new(structure.clone(), (!invalid).then(|| Span::file(start, end - start)), format!("{} · contents {} · trailer {trailer_cell}", range(start, end), bytes_dec_hex(contents)))
-                    .kind(K::StructureRef)
-                    .status(chk.status)
-                    .not_checked(chk.not_checked)
-                    .check_note(chk.note)
-                    .diag(chk.diag)
-                    .link(node)
-                    .explain("Physical structure in file order; double-click (or Enter) to go to it.");
+            let meaning = match *e {
+                Entry::Gap { start, end } => gap_meaning(start, end),
+                Entry::Group { count, .. } => format!("{count} structures in {}", Span::file(start, end - start).range_text()),
+                _ => structure_meaning(start, end, contents, trailer),
+            };
+            let fld = Field::new(structure.clone(), (!invalid).then(|| Span::file(start, end - start)), meaning)
+                .kind(K::StructureRef)
+                .status(chk.status)
+                .not_checked(chk.not_checked)
+                .check_note(chk.note)
+                .diag(chk.diag)
+                .link(node)
+                .explain("Physical structure in file order; double-click (or Enter) to go to it.");
             rows.push(Row {
                 cells: vec![n.to_string(), format!("0x{start:x}"), format!("0x{end:x}"), (end - start).to_string(), contents.to_string(), trailer_cell, gap, codec, structure, chk.cell],
                 field: fld,
@@ -695,7 +744,7 @@ impl SstInspector {
                 col(R::Offset, "Start"),
                 col(R::Offset, "End (excl.)"),
                 col(R::Len, "Stored"),
-                col(R::Len, "Contents"),
+                col(R::Len, "Payload"),
                 col(R::Size, "Trailer"),
                 col(R::Len, "Gap before"),
                 col(R::Kind, "Codec"),
@@ -785,11 +834,10 @@ impl SstInspector {
                     Entry::Item(i) => {
                         let it = &l.items[i];
                         let codec = if it.trailer > 0 { self.block_ctype(it.handle()).map(|c| format!(" · {}", compression_name(c))).unwrap_or_default() } else { String::new() };
-                        let tr = if it.trailer > 0 { format!(" · trailer {}", range(it.start + it.size, it.end())) } else { String::new() };
                         (
                             self.item_label(it),
                             Some(Span::file(it.start, it.end() - it.start)),
-                            format!("{} · contents {}{tr}{codec}", range(it.start, it.end()), bytes_dec_hex(it.size)),
+                            format!("{}{codec}", structure_meaning(it.start, it.end(), it.size, it.trailer)),
                             Self::item_node(it),
                             self.item_check(it),
                             false,
@@ -803,7 +851,7 @@ impl SstInspector {
                         (
                             with_coverage(&label, Some(cov)),
                             Some(Span::file(a, z - a)),
-                            format!("{} · {count} structures", range(a, z)),
+                            format!("{count} structures in {}", Span::file(a, z - a).range_text()),
                             NodeKind::SstLayoutGroup { first: first as u64, count: count as u64 },
                             chk,
                             true,
@@ -812,7 +860,7 @@ impl SstInspector {
                     Entry::Gap { start, end } => (
                         format!("Unaccounted bytes {}", range(start, end)),
                         Some(Span::file(start, end - start)),
-                        format!("{} B no handle names", end - start),
+                        gap_meaning(start, end),
                         NodeKind::SstGap { start, end },
                         plain(Status::Unknown),
                         false,
@@ -822,7 +870,7 @@ impl SstInspector {
                         (
                             format!("{} · handle beyond footer/file", self.item_label(it)),
                             None,
-                            format!("{} · beyond the footer at 0x{:x}", range(it.start, it.end()), l.footer_off),
+                            format!("{} · beyond the footer at file 0x{:x}", Span::file(it.start, it.end() - it.start).range_text(), l.footer_off),
                             Self::item_node(it),
                             plain(Status::Invalid),
                             false,
@@ -1039,7 +1087,7 @@ impl SstInspector {
                 col(R::Status, "Status"),
             ],
         };
-        let prefix = if b.compressed { "blk+" } else { "" };
+        let prefix = if b.compressed { "block+" } else { "" };
         for e in &es {
             let off_cell = if b.compressed { format!("{prefix}0x{:x}", e.off) } else { format!("0x{:x}", b.handle.offset + e.off as u64) };
             let val = &b.data[e.value_off..e.value_off + e.value_len];
@@ -1294,10 +1342,9 @@ impl SstInspector {
                     .enc("fixed32 LE")
                     .status(b.checksum_status)
                     .explain(format!(
-                        "{} over file bytes [0x{:x}, 0x{:x}] (block + type byte). Computed {comp}. Context modifier = base 0x{base:08x} ^ (lo32(off)+hi32(off)) = 0x{:08x}; stored − modifier = 0x{:08x} -> {}.",
+                        "{} over {} (payload + type byte). Computed {comp}. Context modifier = base 0x{base:08x} ^ (lo32(off)+hi32(off)) = 0x{:08x}; stored − modifier = 0x{:08x} -> {}.",
                         footer::checksum_name(ct),
-                        h.offset,
-                        h.offset + h.size,
+                        Span::file(h.offset, h.size + 1).range_text(),
                         b.modifier,
                         b.stored_checksum.wrapping_sub(b.modifier),
                         b.checksum_status.label()
@@ -1311,7 +1358,7 @@ impl SstInspector {
                 Field::new("decompressed", None, format!("{} bytes", b.data.len()))
                     .status(if b.ok() { Status::Implicit } else { Status::Invalid })
                     .diag(b.error_diagnostic().cloned())
-                    .explain("Derived bytes with their own block-local offset space (blk+). No file bytes of their own."),
+                    .explain("Derived bytes with their own block-local offset space (block+, BLOCK+ in the byte view). No file bytes of their own."),
             );
         }
         if let Some((s, e)) = &b.error {

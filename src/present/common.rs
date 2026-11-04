@@ -42,8 +42,9 @@ pub fn span_cells(span: &Option<Span>) -> (String, String) {
         Some(s) => {
             let prefix = match s.space {
                 Space::File => "",
-                Space::Block(_) => "blk+",
-                Space::Record(_) => "rec+",
+                // Same words as the byte view's offset header BLOCK+ / RECORD+ (review N4).
+                Space::Block(_) => "block+",
+                Space::Record(_) => "record+",
             };
             (format!("{prefix}0x{:x}", s.offset), s.len.to_string())
         }
@@ -51,14 +52,14 @@ pub fn span_cells(span: &Option<Span>) -> (String, String) {
     }
 }
 
-/// "[0x0,0x59)": a half-open file range.
+/// "[0x0,0x59)": a half-open file range (`model::range_text`, the one range notation).
 pub fn range(a: u64, b: u64) -> String {
-    format!("[0x{a:x},0x{b:x})")
+    range_text(Space::File, a, b)
 }
 
-/// "89 B (0x59)": a byte count in decimal and hex.
-pub fn bytes_dec_hex(n: u64) -> String {
-    format!("{n} B (0x{n:x})")
+/// "[0x0,0x59) · 89 B": a file range with its length (the space is named by the caller).
+pub fn range_len(a: u64, b: u64) -> String {
+    format!("{} · {} B", range(a, b), b.saturating_sub(a))
 }
 
 /// Explanation of the file length row: metadata, not bytes of the file.
@@ -99,29 +100,37 @@ impl Location {
     pub fn lines(&self) -> Vec<WhereLine> {
         let line = |text: String| WhereLine { text, link: None };
         let stored = self.end.saturating_sub(self.start);
-        let mut v = vec![line(format!("file {} · stored {}", range(self.start, self.end), bytes_dec_hex(stored)))];
+        // 0020 §1: one Where line. "stored" only when the stored bytes differ from what is read
+        // (compressed): "file [0x5c9,0x7a2) · 473 B stored -> block@0x5c9 [+0x0,+0x4c0) · 1216 B
+        // decompressed" (ASCII arrow: U+2192 does not render in the bundled fonts, theme::UI_GLYPHS).
+        let whole = Span::file(self.start, stored).range_text();
+        let mut v = vec![line(match self.decompressed {
+            Some(n) => format!("{whole} stored -> {} decompressed", Span::new(Space::Block(self.start), 0, n).range_text()),
+            None => whole,
+        })];
+        // Ranges in the one notation (0019 §2); the space is named once per line. The stored
+        // range before the trailer is the "payload" (never "contents": that word is kept for
+        // decompressed contents).
         let mut parts = Vec::new();
         if let Some((a, b)) = self.header {
-            parts.push(format!("header {} = {} B", range(a, b), b - a));
+            parts.push(format!("header file {}", range_len(a, b)));
         }
+        // 0020 UI ruling 1: exactly the layout-row Meaning form, "payload file [a,b) · n B ·
+        // trailer [c,d) · 5 B" (no ", last byte": the half-open bracket already says it).
         if let Some((a, b)) = self.contents {
-            let last = if b > a { format!(", last byte 0x{:x}", b - 1) } else { String::new() };
-            parts.push(format!("{} {} = {}{last}", if self.header.is_some() { "payload" } else { "contents" }, range(a, b), bytes_dec_hex(b - a)));
+            parts.push(format!("payload {}{}", if parts.is_empty() { "file " } else { "" }, range_len(a, b)));
         }
         if let Some((a, b)) = self.trailer {
-            parts.push(format!("trailer {} = {} B", range(a, b), b - a));
+            parts.push(format!("trailer {}", range_len(a, b)));
         }
         if !parts.is_empty() {
             v.push(line(parts.join(" · ")));
         }
-        if let Some(n) = self.decompressed {
-            v.push(line(format!("decompressed {} (block-local offsets, not file bytes)", bytes_dec_hex(n))));
-        }
         match (&self.gap, &self.next) {
-            (Some(g), Some((at, _))) => v
-                .push(WhereLine {
-                    text: format!("gap {} before the next structure ›", range(self.end, *at)), link: Some(Target { node: g.clone(), span: Some(Span::file(self.end, at - self.end)) })
-                }),
+            (Some(g), Some((at, _))) => v.push(WhereLine {
+                text: format!("gap file {} before the next structure ›", range_len(self.end, *at)),
+                link: Some(Target { node: g.clone(), span: Some(Span::file(self.end, at - self.end)) }),
+            }),
             (None, Some((at, k))) => v.push(WhereLine { text: format!("next structure at 0x{at:x} ›"), link: Some(Target { node: k.clone(), span: None }) }),
             _ if self.end >= self.eof => v.push(line(format!("ends at end of file (0x{:x})", self.eof))),
             _ => {}

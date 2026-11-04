@@ -17,8 +17,18 @@ pub struct LayoutDefaults {
     pub right_default: f32,
     pub right_min: f32,
     pub right_max: f32,
+    /// Floor of the Explanation width when it is squeezed above 100 % (0020 §8). The zoom
+    /// ceiling's minimum layout uses the same floor, so the squeeze reaches 8 B/row at every
+    /// ceiling. Below it Navigation shrinks instead.
+    pub right_squeeze_min: f32,
     /// Center column inner margin (each side) of the records and bytes areas.
     pub center_margin: [f32; 2],
+    /// Inner margin (x, y) of the toolbar and side-panel frames (`panels::panel_frame`).
+    pub panel_margin: [f32; 2],
+    /// Stroke width of framed bars and chips.
+    pub frame_stroke: f32,
+    /// Inner margin (x, y) of status chips and the byte-view mode chip (`panels::chip_frame`).
+    pub chip_margin: [f32; 2],
     /// Width a side panel's resize separator takes (line + grab tolerance), per panel.
     pub separator: f32,
     /// Records table body rows that stay visible at the minimum height / zoom ceiling, below
@@ -73,7 +83,14 @@ pub const LAYOUT: &LayoutDefaults = &LayoutDefaults {
     right_default: 320.0,
     right_min: 200.0,
     right_max: 520.0,
+    // 0020 §8: raised from 200 toward the advised 240 only as far as 1400×900 keeps its 160 %
+    // ceiling with ≥ 8 B/row: the minimum layout needs 864.5 + (floor − 200) pt and 1400/1.6 =
+    // 875 pt, so the floor may be at most 210.5 pt; 208 leaves 2.5 pt for measurement rounding.
+    right_squeeze_min: 208.0,
     center_margin: [8.0, 4.0],
+    panel_margin: [8.0, 4.0],
+    frame_stroke: 1.0,
+    chip_margin: [4.0, 1.0],
     separator: 4.0,
     records_min_rows: 3.0,
     bytes_min_rows: 3.0,
@@ -103,6 +120,16 @@ pub const LAYOUT: &LayoutDefaults = &LayoutDefaults {
     start_button_width: 140.0,
     status_min_glyphs: 6.0,
 };
+
+/// Height a framed bar adds around its content: top/bottom panel margin + the stroke.
+pub fn panel_pad_h() -> f32 {
+    2.0 * LAYOUT.panel_margin[1] + LAYOUT.frame_stroke
+}
+
+/// Width a chip adds around its label: left/right chip margin + the stroke on both sides.
+pub fn chip_pad_w() -> f32 {
+    2.0 * LAYOUT.chip_margin[0] + 2.0 * LAYOUT.frame_stroke
+}
 
 /// Initial width (points) of a table column by its semantic role. The fill column (first
 /// role with `ColumnRole::fills` in display order) gets the rest, at least `remainder_min`.
@@ -313,6 +340,37 @@ pub fn center_min(m: &HexMetrics) -> f32 {
     m.width(4) + 2.0 * LAYOUT.center_margin[0]
 }
 
+/// Width the center wants at a zoom above 100 % and the zoom ceiling requires (0019 §3): 8
+/// bytes per row plus its margins.
+pub fn center_want(m: &HexMetrics) -> f32 {
+    m.width(8) + 2.0 * LAYOUT.center_margin[0]
+}
+
+/// Effective side-panel widths above 100 % (0019 §3): when the user's widths leave the center
+/// less than `center` (`center_want`), the Explanation panel shrinks first toward its minimum,
+/// then Navigation toward its minimum. `left`/`right`: Some((min, user width)) of a shown panel,
+/// None = collapsed strip of width `strip`. None when no shrinking is needed (the user's widths
+/// apply unchanged).
+pub fn squeeze_panels(window_w: f32, center: f32, strip: f32, left: Option<(f32, f32)>, right: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    let sep = LAYOUT.separator;
+    let used = |p: Option<(f32, f32)>| p.map(|(_, w)| w + sep).unwrap_or(strip);
+    let mut deficit = center - (window_w - used(left) - used(right));
+    if deficit <= 0.0 {
+        return None;
+    }
+    let shrink = |p: Option<(f32, f32)>, deficit: &mut f32| match p {
+        Some((min, w)) => {
+            let nw = (w - *deficit).max(min.min(w));
+            *deficit -= w - nw;
+            nw
+        }
+        None => 0.0,
+    };
+    let r = shrink(right, &mut deficit);
+    let l = shrink(left, &mut deficit);
+    Some((l, r))
+}
+
 /// Maximum widths of the side panels so the center keeps `center_min`: the Explanation panel
 /// shrinks first (it may take only what Navigation leaves), then Navigation (it must leave the
 /// Explanation minimum). `left`/`right`: Some(min, max) of a shown panel, None = collapsed strip
@@ -373,22 +431,69 @@ pub fn diag_side_by_side(avail: f32, label_w: f32, widest_value: f32) -> bool {
 
 // ------------------------------------------------------------------ status bar (spec §5)
 
-/// Widths of (message, file label, hint) next to a selection segment that is never truncated.
-/// Truncation order: hint first (dropped below `min`), then the message (down to `min`), then
-/// the file label.
-pub fn status_widths(avail: f32, sel: f32, msg: f32, file: f32, hint: f32, min: f32) -> (f32, f32, f32) {
-    let rest = (avail - sel).max(0.0);
-    if msg + file + hint <= rest {
-        return (msg, file, hint);
+/// Widths of the status-bar segments, in screen order `notice · warn · selection · search ·
+/// file` plus the right-aligned hidden-panel hint (0020 UI ruling F1). Used for the wanted
+/// (full text) widths and for the planned ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StatusWidths {
+    /// The one transient notice (zoom, Reset View, copy).
+    pub notice: f32,
+    /// "file changed on disk" warning.
+    pub warn: f32,
+    pub sel: f32,
+    /// Search segment ("Rows k / n", "Bytes: …"; the banner above the table repeats it).
+    pub search: f32,
+    /// "kind · file name" (the name is elided from its end).
+    pub file: f32,
+    pub hint: f32,
+}
+
+/// No-break space (U+00A0): egui never breaks a line at it (epaint `RowBreakCandidates::add`).
+pub const NBSP: char = '\u{a0}';
+
+/// Render-layer no-break join of a count and its byte unit (0020 UI ruling 6): "· 8 B" becomes
+/// "· 8\u{a0}B", so a range text such as `file [0xc12,0xc1a) · 8 B` never wraps between the
+/// count and `B`. Only for labels drawn on screen: model, clipboard and dump text keep plain
+/// spaces. Units: B, KiB, MiB, GiB, after a decimal digit and before a non-alphanumeric char.
+pub fn nb_units(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, &ch) in c.iter().enumerate() {
+        let joins = ch == ' '
+            && i > 0
+            && c[i - 1].is_ascii_digit()
+            && ["B", "KiB", "MiB", "GiB"].iter().any(|u| {
+                let u: Vec<char> = u.chars().collect();
+                let end = i + 1 + u.len();
+                end <= c.len() && c[i + 1..end] == u[..] && c.get(end).is_none_or(|n| !n.is_alphanumeric())
+            });
+        out.push(if joins { NBSP } else { ch });
     }
-    let h = rest - msg - file;
-    let hint = if h >= min { h } else { 0.0 };
-    if msg + file + hint <= rest {
-        return (msg, file, hint);
+    out
+}
+
+/// Plans the status-bar widths in `avail`. The notice and the warning keep their full width
+/// whenever the bar is at least that wide (never elided for the others). Then: the hint is
+/// truncated (dropped below `min`) first, then the search segment, the selection and the file
+/// label are elided in that order, each down to `min` (or its own width if smaller).
+pub fn status_widths(avail: f32, want: StatusWidths, min: f32) -> StatusWidths {
+    let notice = want.notice.min(avail.max(0.0));
+    let warn = want.warn.min((avail - notice).max(0.0));
+    let rest = (avail - notice - warn).max(0.0);
+    let mut w = StatusWidths { notice, warn, ..want };
+    if w.sel + w.search + w.file + w.hint <= rest {
+        return w;
     }
-    let m = (rest - file).max(msg.min(min)).min(msg);
-    let f = (rest - m).clamp(0.0, file);
-    (m, f, 0.0)
+    let h = rest - w.sel - w.search - w.file;
+    w.hint = if h >= min { h } else { 0.0 };
+    if w.sel + w.search + w.file + w.hint <= rest {
+        return w;
+    }
+    w.hint = 0.0;
+    w.search = (rest - w.sel - w.file).max(want.search.min(min)).min(want.search);
+    w.sel = (rest - w.search - w.file).max(want.sel.min(min)).min(want.sel);
+    w.file = (rest - w.search - w.sel).clamp(0.0, want.file);
+    w
 }
 
 /// A tree label whose never-cut head (design A5: what, members, coverage, with its glyph) is
@@ -486,9 +591,10 @@ pub struct Measured {
 }
 
 impl Measured {
+    /// Side panels at their minimum + the center at 8 bytes per row (0019 §3; was 4).
     fn panels_w(&self, nav: bool, explain: bool) -> f32 {
         let side = |shown: bool, min: f32| if shown { min + LAYOUT.separator } else { self.strip };
-        side(nav, self.nav_min) + side(explain, self.explain_min) + center_min(&self.hex)
+        side(nav, self.nav_min) + side(explain, self.explain_min) + center_want(&self.hex)
     }
     fn toolbar_h(&self, w: f32) -> f32 {
         let rows = pack_rows(&self.toolbar_groups, self.toolbar_gap, w - 2.0 * LAYOUT.center_margin[0]).len().max(1);
@@ -505,7 +611,7 @@ impl Measured {
     }
     /// Height at window width `w` with the panels at their minimum (the center gets the rest).
     fn height_at(&self, w: f32, nav: bool, explain: bool) -> f32 {
-        let center_w = (w - self.panels_w(nav, explain) + center_min(&self.hex)).max(center_min(&self.hex));
+        let center_w = (w - self.panels_w(nav, explain) + center_want(&self.hex)).max(center_want(&self.hex));
         self.toolbar_h(w) + self.status_h + self.records_min_h + LAYOUT.split_handle + self.bytes_h(center_w) + LAYOUT.layout_margin_h
     }
 
@@ -519,7 +625,7 @@ impl Measured {
     }
 
     /// Acceptance rule (spec §8.2) at a window of `w`×`h` points: every toolbar group fits the
-    /// width, the side panels at their minimum leave the center ≥ 4 bytes per row without
+    /// width, the side panels at their minimum leave the center ≥ 8 bytes per row (0019 §3) without
     /// horizontal scrolling, and the toolbar + status + records minimum + bytes (header, ruler,
     /// three byte rows) fit the height.
     pub fn fits(&self, w: f32, h: f32, nav: bool, explain: bool) -> bool {
@@ -687,13 +793,13 @@ mod tests {
             let sp_y = ui.spacing().item_spacing.y;
             m = Some(Measured {
                 nav_min: LAYOUT.left_min,
-                explain_min: LAYOUT.right_min,
+                explain_min: LAYOUT.right_squeeze_min,
                 strip: tok.header_height(ui),
                 hex: panels::hex::metrics(ui, u64::MAX),
                 toolbar_groups: est.toolbar_groups.clone(),
                 toolbar_gap: ui.spacing().item_spacing.x,
                 toolbar_row_h: est.toolbar_row_h,
-                toolbar_pad_h: 2.0 * 4.0 + 1.0 + line + 2.0 + sp_y,
+                toolbar_pad_h: panel_pad_h() + line + 2.0 + sp_y,
                 status_h: est.status_h,
                 records_min_h: records_min_h(
                     est.toolbar_row_h,
@@ -715,8 +821,8 @@ mod tests {
         let (nw, nh) = m.need(true, true);
         for (w, h) in [(900.0, 560.0), (900.0, 700.0), (1400.0, 900.0)] {
             let c = ZoomPolicy::DEFAULT.ceiling(ZoomFit { at_zoom: 1.0, avail_w: w, avail_h: h, need_w: nw, need_h: nh });
+            eprintln!("shell-like {w}x{h}: ceiling {:.0}% (need {nw:.1}x{nh:.1})", c * 100.0);
             assert!(m.fits(w / c, h / c, true, true));
-            eprintln!("shell-like {w}x{h}: ceiling {:.0}% (need {nw:.0}x{nh:.0})", c * 100.0);
         }
     }
 
@@ -789,6 +895,27 @@ mod tests {
             assert!(body_rows >= 3.0, "zoom {z}: {body_rows} table rows");
             assert!(hex >= hex_min - 0.01, "zoom {z}: bytes below three rows");
         }
+    }
+
+    /// 0019 §3: Explanation shrinks first, then Navigation, never below their minimums; no
+    /// squeeze when the user's widths already leave the center its 8 bytes per row.
+    #[test]
+    fn squeeze_shrinks_explanation_first_then_navigation() {
+        let sep = LAYOUT.separator;
+        // 875 − (260+4) − (320+4) = 287 left for the center; it wants 400: deficit 113.
+        assert_eq!(squeeze_panels(875.0, 400.0, 20.0, Some((180.0, 260.0)), Some((200.0, 320.0))), Some((260.0, 207.0)));
+        // Deficit beyond the Explanation minimum: Navigation gives the rest, down to its minimum.
+        assert_eq!(squeeze_panels(700.0, 400.0, 20.0, Some((180.0, 260.0)), Some((200.0, 320.0))), Some((180.0, 200.0)));
+        assert_eq!(squeeze_panels(1000.0, 400.0, 20.0, Some((180.0, 260.0)), Some((200.0, 320.0))), None);
+        // A collapsed Explanation (strip) leaves Navigation to shrink alone.
+        let s = squeeze_panels(620.0, 400.0, 20.0, Some((180.0, 260.0)), None).unwrap();
+        assert!((s.0 - (620.0 - 400.0 - 20.0 - sep)).abs() < 1e-3, "{s:?}");
+        assert!(center_want(&M) > center_min(&M));
+        // Header compaction: only below the measured full header + table rows.
+        use crate::ui::panels::records::header_compact;
+        assert!(!header_compact(100.0, None, 150.0), "nothing measured yet");
+        assert!(header_compact(299.0, Some(150.0), 150.0));
+        assert!(!header_compact(300.0, Some(150.0), 150.0));
     }
 
     #[test]
@@ -865,17 +992,36 @@ mod tests {
         assert_eq!(pack_rows(&[500.0, 10.0], 10.0, 320.0), vec![0, 1]);
     }
 
-    /// The selection is never truncated; the hint goes first, then the message, then the file.
+    /// 0020 UI ruling 6: only "<digits> <unit>" joins; everything else keeps its spaces.
+    #[test]
+    fn nb_units_joins_count_and_unit_only() {
+        let nb = |s: &str| nb_units(s).replace(NBSP, "~");
+        assert_eq!(nb("file [0xc12,0xc1a) · 8 B"), "file [0xc12,0xc1a) · 8~B");
+        assert_eq!(nb("file [0x0,0x68) · 104 B stored -> block@0x0 [+0x0,+0x143) · 323 B decompressed"), "file [0x0,0x68) · 104~B stored -> block@0x0 [+0x0,+0x143) · 323~B decompressed");
+        assert_eq!(nb("Page 2 of 3 · 65536 B of 150000 B · 64 KiB per page"), "Page 2 of 3 · 65536~B of 150000~B · 64~KiB per page");
+        assert_eq!(nb("2115195 B. Select"), "2115195~B. Select");
+        assert_eq!(nb("0x2 Bytes · 3 Blocks · a B · 4 B,"), "0x2 Bytes · 3 Blocks · a B · 4~B,");
+        assert_eq!(nb_units("selection: none"), "selection: none");
+    }
+
+    /// 0020 UI ruling F1: the notice keeps its width while the bar holds it; the hint goes
+    /// first, then search, then selection, then the file label.
     #[test]
     fn status_budget_truncation_order() {
-        assert_eq!(status_widths(1000.0, 200.0, 300.0, 200.0, 100.0, 48.0), (300.0, 200.0, 100.0));
-        assert_eq!(status_widths(760.0, 200.0, 300.0, 200.0, 100.0, 48.0), (300.0, 200.0, 60.0));
-        assert_eq!(status_widths(730.0, 200.0, 300.0, 200.0, 100.0, 48.0), (300.0, 200.0, 0.0), "hint below the minimum is dropped");
-        assert_eq!(status_widths(600.0, 200.0, 300.0, 200.0, 100.0, 48.0), (200.0, 200.0, 0.0), "message truncates before the file label");
-        let (m, f, h) = status_widths(300.0, 200.0, 300.0, 200.0, 100.0, 48.0);
-        assert_eq!((m, h), (48.0, 0.0));
-        assert!((f - 52.0).abs() < 1e-3);
-        assert_eq!(status_widths(150.0, 200.0, 300.0, 200.0, 100.0, 48.0).2, 0.0);
+        let want = StatusWidths { notice: 250.0, warn: 0.0, sel: 200.0, search: 300.0, file: 200.0, hint: 100.0 };
+        let w = |avail: f32| status_widths(avail, want, 48.0);
+        let t = |notice, sel, search, file, hint| StatusWidths { notice, warn: 0.0, sel, search, file, hint };
+        assert_eq!(w(1250.0), want);
+        assert_eq!(w(1010.0), t(250.0, 200.0, 300.0, 200.0, 60.0));
+        assert_eq!(w(980.0), t(250.0, 200.0, 300.0, 200.0, 0.0), "hint below the minimum is dropped");
+        assert_eq!(w(850.0), t(250.0, 200.0, 200.0, 200.0, 0.0), "search elides first");
+        assert_eq!(w(650.0), t(250.0, 152.0, 48.0, 200.0, 0.0), "then the selection");
+        assert_eq!(w(450.0), t(250.0, 48.0, 48.0, 104.0, 0.0), "then the file label");
+        assert_eq!(w(250.0), t(250.0, 48.0, 48.0, 0.0, 0.0), "the notice keeps its width while the bar holds it");
+        assert_eq!(w(200.0).notice, 200.0, "a bar narrower than the notice: the notice fills it");
+        // The warning keeps its width like the notice; no notice at all leaves the room to the rest.
+        let w2 = status_widths(700.0, StatusWidths { notice: 0.0, warn: 150.0, ..want }, 48.0);
+        assert_eq!((w2.warn, w2.sel, w2.search, w2.file), (150.0, 200.0, 150.0, 200.0));
     }
 
     /// Metrics as the default theme measures them at 100 % (body 14.5 pt, mono 13.5 pt, toolbar
@@ -902,7 +1048,7 @@ mod tests {
         let small = |s: &str| tw(s, 12.0) + bp;
         let hex_groups = [
             group(&[tw("Decompressed block", 12.0) + 8.0, small("show file bytes"), small("Hide bytes")]),
-            group(&[btn("◀ page"), tw("page 1/1 · 0x0..0x10000 of 65536 bytes", 14.5), btn("page ▶")]),
+            group(&[btn("◀ page"), tw("file [0x0,0x10000) of 65536 B", 14.5), btn("page ▶")]),
             group(&[LAYOUT.goto_width, btn("Go to")]),
         ];
         let ctl = sp.interact_size.y.max(line + 2.0 * sp.button_padding.y) + sp.item_spacing.y;
@@ -910,7 +1056,7 @@ mod tests {
         let header_h = ctx.fonts_mut(|f| f.row_height(&FontId::proportional(15.5))) + LAYOUT.header_pad;
         Measured {
             nav_min: LAYOUT.left_min,
-            explain_min: LAYOUT.right_min,
+            explain_min: LAYOUT.right_squeeze_min,
             strip: line + LAYOUT.header_pad,
             hex: HexMetrics { cw, pad: 10.0 + 2.0 * gap, digits: 8 },
             toolbar_groups,

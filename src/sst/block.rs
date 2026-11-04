@@ -121,7 +121,8 @@ pub(super) fn read_block(r: &dyn RangeRead, f: &Footer, h: Handle, cfv: u32, dic
     if b.checksum_status == Status::Invalid {
         b.diags.push(
             Diagnostic::new(checksum_check(f.checksum_type), whole, Trust::Untrusted, "entries are still decoded for inspection but are not trusted", "Block checksum MISMATCH")
-                .values(b.computed_checksum.map(|c| DV::U32(c.wrapping_add(b.modifier))), Some(DV::U32(b.stored_checksum))),
+                .values(b.computed_checksum.map(|c| DV::U32(c.wrapping_add(b.modifier))), Some(DV::U32(b.stored_checksum)))
+                .modifier(b.modifier),
         );
     }
     let mut payload = buf;

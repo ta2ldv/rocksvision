@@ -224,6 +224,9 @@ fn app_components_have_private_fields_and_read_only_pub_api() {
         ("app/job_state.rs", "JobState"),
         ("app/view_prefs.rs", "ViewPreferences"),
         ("app/state.rs", "AppState"),
+        ("app/hex.rs", "HexState"),
+        ("app/navigation.rs", "Navigation"),
+        ("app/clipboard.rs", "ClipboardState"),
     ];
     let mut bad = Vec::new();
     for (rel, name) in comps {
@@ -255,6 +258,72 @@ fn legacy_snapshot_shim_is_removed() {
     let bad: Vec<String> =
         code("").into_iter().filter(|(f, c)| !rel_matches(f, "arch_tests.rs") && (c.contains("LegacyFields") || c.contains("impl std::ops::Deref for AppState"))).map(|(f, _)| f).collect();
     assert!(bad.is_empty(), "legacy shim still referenced: {bad:?}");
+}
+
+/// Production code of the .rs files under `rel`: comment-free (`code`), each file cut at its
+/// first inline `#[cfg(test)] mod … {` module; whole test files (`*_tests.rs`) are skipped.
+fn prod_code(rel: &str) -> Vec<(String, String)> {
+    code(rel)
+        .into_iter()
+        .filter(|(f, _)| !f.ends_with("_tests.rs"))
+        .map(|(f, c)| {
+            let lines: Vec<&str> = c.lines().collect();
+            let cut = (0..lines.len())
+                .find(|&i| lines[i].trim() == "#[cfg(test)]" && lines.get(i + 1).is_some_and(|n| n.trim_start().starts_with("mod ") && n.trim_end().ends_with('{')))
+                .unwrap_or(lines.len());
+            (f, lines[..cut].join("\n"))
+        })
+        .collect()
+}
+
+fn forbid_in_prod(rels: &[&str], needles: &[&str]) {
+    let mut bad = Vec::new();
+    for rel in rels {
+        for (f, c) in prod_code(rel) {
+            bad.extend(needles.iter().filter(|n| c.contains(*n)).map(|n| format!("src/{f} uses {n}")));
+        }
+    }
+    assert!(bad.is_empty(), "forbidden in production code:\n{}", bad.join("\n"));
+}
+
+#[test]
+fn prod_code_cuts_inline_test_modules_only() {
+    let hex = prod_code("app/hex.rs");
+    assert!(hex[0].1.contains("fn reveal(") && !hex[0].1.contains("fn reveal_table"), "inline test module cut");
+    let state = prod_code("app/state.rs");
+    assert!(state[0].1.contains("fn copy_notice"), "a `#[cfg(test)] #[path] mod x;` declaration does not cut the file");
+    assert!(prod_code("app").iter().all(|(f, _)| !f.ends_with("state_tests.rs")));
+}
+
+/// 0020 §6: rendering and the pure app services never do I/O or issue jobs. Data types of
+/// `app::jobs` (Outcome, SelectHint, ViewTarget, parse_query) are allowed; the worker, the I/O
+/// backend and the byte search are not.
+#[test]
+fn rendering_and_pure_services_do_no_io() {
+    require("app/jobs/io_pool.rs", "RangeReader");
+    forbid_in_prod(
+        &["ui/panels", "ui/layout.rs", "ui/menu.rs", "app/provenance.rs", "app/diagnosis.rs", "app/search.rs", "app/explanation.rs", "app/clipboard.rs", "app/navigation.rs"],
+        &["std::fs", "crate::io", "RangeReader", "std::process", "Worker", "JobState", "IoRequest", "IoBackend", "FsBackend", "search_file", "jobs::Request"],
+    );
+}
+
+/// 0020 §6: read-only — no production code creates, writes, renames or removes files; the one
+/// file opener opens for reading.
+#[test]
+fn production_code_never_writes_files() {
+    require("io/file.rs", "OpenOptions::new().read(true)");
+    let mut bad = Vec::new();
+    for (f, c) in prod_code("") {
+        if rel_matches(&f, "arch_tests.rs") {
+            continue;
+        }
+        for n in ["File::create", "fs::write", "remove_file", "fs::rename", "create_dir", ".write(true)", ".append(true)"] {
+            if c.contains(n) {
+                bad.push(format!("src/{f} uses {n}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "file writes in production code:\n{}", bad.join("\n"));
 }
 
 /// Presenters and the UI select behaviour by `FieldKind`/`DecodedValue`, not by display labels

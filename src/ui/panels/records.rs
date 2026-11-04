@@ -5,7 +5,7 @@ use super::{btn, btn_sized, chip, chip_word, status_meaning, status_text, strong
 use crate::app::diagnosis;
 use crate::app::{Action, AppState, CopyKind};
 use crate::model::{ColumnRole, NOT_CHECKED, NodeKind, Status};
-use crate::ui::layout::{LAYOUT, column_width, plan_columns, status_column_width, table_need_h};
+use crate::ui::layout::{LAYOUT, column_width, nb_units, plan_columns, status_column_width, table_need_h};
 use crate::ui::menu;
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
@@ -37,6 +37,30 @@ pub fn overhead_id() -> egui::Id {
     egui::Id::new("records_overhead")
 }
 
+/// egui temp-data key: the header height (incl. full notes) of the last uncompacted frame of
+/// this view (review N2: per view, so a shorter header is not kept compacted by another's).
+fn full_overhead_id(view: Option<&NodeKind>, title: &str) -> egui::Id {
+    egui::Id::new(("records_full_overhead", format!("{view:?}"), title))
+}
+
+/// Header compaction (0019 §3): the pane (`avail`, from its top) is shorter than the full header
+/// measured in the last uncompacted frame + the table's `TABLE_MIN_ROWS` rows. Never before a
+/// full header was measured.
+pub fn header_compact(avail: f32, full_over: Option<f32>, table_need: f32) -> bool {
+    full_over.is_some_and(|f| avail < f + table_need)
+}
+
+/// egui temp-data key: full table body rows visible in the last frame (layout acceptance).
+pub fn rows_visible_id() -> egui::Id {
+    egui::Id::new("records_rows_visible")
+}
+
+/// egui temp-data key: the search banner's rect and the records pane's clip rect of the last
+/// frame (absent without a banner; layout acceptance 0020 §6).
+pub fn banner_rect_id() -> egui::Id {
+    egui::Id::new("records_banner_rect")
+}
+
 /// egui temp-data key: height between the notes and the table (last frame).
 fn post_id() -> egui::Id {
     egui::Id::new("records_post_notes")
@@ -65,7 +89,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
             ui.label(RichText::new("Read-only inspector for RocksDB 10.4.2 WAL, SST, MANIFEST and CURRENT files.").color(tok.p.text_muted));
             ui.add_space(12.0);
             if doc.file().is_some() {
-                if doc.pending_view().is_some() {
+                if st.navigation().pending_target().is_some() {
                     ui.spinner();
                 }
             } else {
@@ -87,9 +111,17 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
         return acts;
     };
     let mut go_back = false;
-    ui.horizontal_wrapped(|ui| {
-        if btn(ui, tok, "◀ Back").on_hover_text(format!("Back ({})", menu::back_key(menu::KeyLabels::HOST))).clicked() && doc.can_go_back() {
-            go_back = true;
+    // 0019 §3: below its wanted height (full header + `TABLE_MIN_ROWS` rows, from the last
+    // uncompacted frame) the header takes at most four text lines: one elided title line, the
+    // first location line, the collapsed notes and one banner line; tooltips keep the full text.
+    let sp_y = ui.spacing().item_spacing.y;
+    let table_need = table_need_h(tok.header_height(ui), tok.row_height(ui), sp_y, ui.spacing().scroll.allocated_width(), TABLE_MIN_ROWS);
+    let full_id = full_overhead_id(doc.view_kind(), &view.title);
+    let full_over = ui.ctx().data(|d| d.get_temp::<f32>(full_id));
+    let compact = header_compact(ui.available_height(), full_over, table_need);
+    let title_row = |ui: &mut egui::Ui, go_back: &mut bool| {
+        if btn(ui, tok, "◀ Back").on_hover_text(format!("Back ({})", menu::back_key(menu::KeyLabels::HOST))).clicked() && st.navigation().can_go_back() {
+            *go_back = true;
         }
         if let Some(s) = view.status {
             match view.status_word {
@@ -97,31 +129,79 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
                 None => chip(ui, tok, s),
             }
         }
-        ui.heading(&view.title);
+        if !compact {
+            ui.heading(&view.title);
+        }
         // A view without a status of its own still names the failures inside it, e.g. the
         // WAL root "✂ 1 truncated" (details: Explanation with nothing selected).
-        if view.status.is_none() {
+        if let (None, Some(t)) = (view.status, view.tally) {
+            // Table of lazily checked structures (0019 §1): "✖ 1 invalid · ✔ 515 present · 4
+            // not checked"; "not checked" has no glyph and no status colour.
+            for (i, (s, text)) in t.parts().into_iter().enumerate() {
+                if i > 0 {
+                    ui.label(RichText::new("·").color(tok.p.text_muted));
+                }
+                match s {
+                    Some(s) => status_text(ui, tok, s, &text),
+                    None => {
+                        ui.label(RichText::new(text).color(tok.p.text));
+                    }
+                }
+            }
+        } else if view.status.is_none() {
             let tree = doc.sel_node().and_then(|i| doc.nodes().get(i));
             let fails = diagnosis::node_failures(view, tree.map(|n| n.status), tree.and_then(|n| n.diag.as_deref()));
             if let Some((s, text)) = diagnosis::failure_counts(&fails) {
                 status_text(ui, tok, s, &format!("{} {text}", s.symbol()));
             }
         }
-        if doc.pending_view().is_some() {
+        if st.navigation().pending_target().is_some() {
             ui.spinner();
         }
-    });
+        if compact {
+            // The title takes what is left of the one line.
+            ui.add(egui::Label::new(RichText::new(&view.title).heading()).truncate()).on_hover_text(&view.title);
+        }
+    };
+    if compact {
+        ui.horizontal(|ui| title_row(ui, &mut go_back));
+    } else {
+        ui.horizontal_wrapped(|ui| title_row(ui, &mut go_back));
+    }
+    // 0020 §6: the search banner has a reserved line directly below the title, outside the
+    // scrolling notes, so it never scrolls away; it is elided to one line (full text in the
+    // tooltip) only in the compacted header. Banner and status bar come from one state (0019 §4).
+    let banner = find.banner();
+    match &banner {
+        Some(b) => {
+            let label = egui::Label::new(RichText::new(b).small().color(tok.p.text));
+            let r = if compact { ui.add(label.truncate()).on_hover_text(b) } else { ui.add(label.wrap()) };
+            ui.ctx().data_mut(|d| d.insert_temp(banner_rect_id(), [r.rect, ui.clip_rect()]));
+        }
+        None => ui.ctx().data_mut(|d| d.remove::<[egui::Rect; 2]>(banner_rect_id())),
+    }
     // Location header: file range, stored size, contents/trailer, next structure or gap (links).
-    for w in &view.location {
+    // Compact: the first line only, elided, the others in its tooltip. Count and unit are joined
+    // for the screen (0020 UI ruling 6).
+    if compact && let Some(first) = view.location.first() {
+        let all = view.location.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("\n");
+        let r = ui.add(egui::Label::new(RichText::new(nb_units(&first.text)).small().monospace().color(tok.p.text)).truncate().sense(egui::Sense::click())).on_hover_text(all);
+        if let Some(t) = &first.link
+            && r.clicked()
+        {
+            acts.push(Action::Navigate { target: t.node.clone(), span: t.span });
+        }
+    }
+    for w in view.location.iter().filter(|_| !compact) {
         match &w.link {
             Some(t) => {
-                let r = ui.add(egui::Label::new(RichText::new(&w.text).small().color(tok.p.accent_text).underline()).sense(egui::Sense::click()).wrap());
+                let r = ui.add(egui::Label::new(RichText::new(nb_units(&w.text)).small().color(tok.p.accent_text).underline()).sense(egui::Sense::click()).wrap());
                 if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Go to this structure (Back returns)").clicked() {
                     acts.push(Action::Navigate { target: t.node.clone(), span: t.span });
                 }
             }
             None => {
-                ui.add(egui::Label::new(RichText::new(&w.text).small().monospace().color(tok.p.text)).wrap());
+                ui.add(egui::Label::new(RichText::new(nb_units(&w.text)).small().monospace().color(tok.p.text)).wrap());
             }
         }
     }
@@ -129,20 +209,22 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     // least `TABLE_MIN_ROWS` rows (900×700 acceptance). At narrow heights the subtitle notes
     // collapse to one line; the tooltip has the full text.
     let small_h = ui.text_style_height(&egui::TextStyle::Small);
-    let sp_y = ui.spacing().item_spacing.y;
-    let table_need = table_need_h(tok.header_height(ui), tok.row_height(ui), sp_y, ui.spacing().scroll.allocated_width(), TABLE_MIN_ROWS);
     // Natural height of the notes (and the search line) at this width; the part between the
     // notes and the table (separator, LSM boxes, column toggle) as measured last frame.
     let small = egui::TextStyle::Small.resolve(ui.style());
     let wrap_w = ui.available_width();
-    let search_line = !find.row_matches().is_empty() || (!find.query().is_empty() && find.hit().is_none() && find.progress().is_none());
-    let notes_h: f32 =
-        view.notes.iter().map(|n| ui.fonts_mut(|f| f.layout(n.text.clone(), small.clone(), tok.p.text, wrap_w).size().y) + sp_y).sum::<f32>() + if search_line { small_h + sp_y } else { 0.0 };
+    let notes_h: f32 = view.notes.iter().map(|n| ui.fonts_mut(|f| f.layout(n.text.clone(), small.clone(), tok.p.text, wrap_w).size().y) + sp_y).sum::<f32>();
     let post = ui.ctx().data(|d| d.get_temp::<f32>(post_id())).unwrap_or(tok.row_height(ui) + 8.0);
     let fixed = ui.cursor().top() - top_y;
-    ui.ctx().data_mut(|d| d.insert_temp(overhead_id(), fixed + notes_h + post));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(overhead_id(), fixed + notes_h + post);
+        // Only an uncompacted frame measures the full header (the compaction threshold).
+        if !compact {
+            d.insert_temp(full_id, fixed + notes_h + post);
+        }
+    });
     // Narrow height: the full notes would leave the table fewer than TABLE_MIN_ROWS rows.
-    let narrow = ui.available_height() - notes_h - post < table_need;
+    let narrow = compact || ui.available_height() - notes_h - post < table_need;
     let notes_max = (ui.available_height() - post - table_need).max(small_h + 4.0);
     if narrow && !view.notes.is_empty() {
         let worst = view.notes.iter().find_map(|n| n.status);
@@ -157,17 +239,6 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
             // Problem notes carry their status and use that status color.
             let col = n.status.map(|s| tok.status(s)).unwrap_or(tok.p.text_muted);
             ui.add(egui::Label::new(RichText::new(&n.text).small().color(col)).wrap());
-        }
-        if !find.row_matches().is_empty() {
-            let n = find.row_matches().len();
-            let (rows, verb) = if n == 1 { ("row", "matches") } else { ("rows", "match") };
-            ui.small(format!("Rows: {n} {rows} of the current table {verb} \"{}\" (decoded cells; Prev/Next to step)", find.query()));
-        } else if !find.query().is_empty() && find.hit().is_none() && find.progress().is_none() {
-            ui.small(if find.hex_mode() {
-                "Hex query: Enter searches the physical file bytes (not decompressed)."
-            } else {
-                "No row of the current table matches — Enter searches the physical file bytes (not decompressed)."
-            });
         }
     });
     let after_notes = ui.cursor().top();
@@ -215,13 +286,16 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
         ui.separator();
     }
     // Columns that fit: Raw hex, then Encoding, then Len hide first; Status may become
-    // icon-only; Offset keeps 10 monospace characters. "+N columns" brings them back.
+    // icon-only; Offset keeps 10 monospace characters, 14 in tables with derived offsets
+    // ("record+0x1ffff", review N4). "+N columns" brings them back.
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
     let mono_w = ui.fonts_mut(|f| f.glyph_width(&mono, '0'));
+    let derived = view.rows.iter().any(|r| r.field.span.is_some_and(|s| s.space != crate::model::Space::File));
+    let offset_chars = if derived { 14.0 } else { 10.0 };
     // Status keeps its widest word ("Not checked", "✂ Truncated" …) at every zoom (C2 GUI-1).
     let status_w = status_column_width(widest_status_word(ui));
     let width_of = |r: ColumnRole| match r {
-        ColumnRole::Offset => column_width(r).max(10.0 * mono_w + 8.0),
+        ColumnRole::Offset => column_width(r).max(offset_chars * mono_w + 8.0),
         ColumnRole::Status => status_w,
         _ => column_width(r),
     };
@@ -281,6 +355,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     let header_font = tok.header_font();
     let post_now = ui.cursor().top() - after_notes;
     ui.ctx().data_mut(|d| d.insert_temp(post_id(), post_now));
+    // Full body rows the table shows in this frame (zoom acceptance, 0019 §3).
+    let hbar = if need > ui.available_width() { ui.spacing().scroll.allocated_width() } else { 0.0 };
+    let sp_y = ui.spacing().item_spacing.y;
+    let body_rows = ((ui.available_height() - header_h - sp_y - hbar) / (row_h + sp_y)).floor().max(0.0);
+    ui.ctx().data_mut(|d| d.insert_temp(rows_visible_id(), body_rows));
     egui::ScrollArea::horizontal().id_salt(("tblh", &salt, epoch)).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
         ui.set_width(table_w);
         let bg = ui.available_rect_before_wrap();

@@ -14,7 +14,7 @@ use crate::app::hex::{HexState, PageState};
 use crate::app::provenance;
 use crate::app::{Action, AppState, Panel};
 use crate::limits::LIMITS;
-use crate::model::{Space, SpaceInfo, Span, Status};
+use crate::model::{Space, SpaceInfo, Span, Status, range_text};
 use crate::ui::layout::{HexMetrics, LAYOUT, PACK_SLACK, ascii_col, byte_at, byte_col, choose_bytes_per_row, hex_header_lines, hex_row_chars, offset_digits};
 use crate::ui::menu::{self, MenuCmd};
 use crate::ui::theme::Tokens;
@@ -40,11 +40,13 @@ pub struct HexMemory {
     /// Pointer press position of the current press (egui clears `press_origin` in the release
     /// frame, where `clicked()` fires).
     pub press: Option<egui::Pos2>,
+    /// Full byte rows the area showed in the last frame (layout acceptance, 0019 §3).
+    pub rows_visible: f32,
 }
 
 impl Default for HexMemory {
     fn default() -> Self {
-        HexMemory { hover: None, hscroll: 0.0, bytes_per_row: LIMITS.hex_bytes_per_row, groups: [260.0, 330.0, 230.0], line_h: 26.0, press: None }
+        HexMemory { hover: None, hscroll: 0.0, bytes_per_row: LIMITS.hex_bytes_per_row, groups: [260.0, 330.0, 230.0], line_h: 26.0, press: None, rows_visible: 0.0 }
     }
 }
 
@@ -59,7 +61,7 @@ pub fn metrics(ui: &egui::Ui, size: u64) -> HexMetrics {
 /// only, so the ceiling never depends on the open file, the selected node or the space size:
 /// A = widest chip + widest space button ("show block@0x<16 digits> (decompressed)" /
 /// "show record@… (reassembled)" / "show file bytes") + Hide bytes; B = the paging label with
-/// 16-digit offsets, a 15-digit page count and a 20-digit size; C = Go-to field + Go to. Row
+/// the widest space name, 16-digit offsets and a 20-digit size; C = Go-to field + Go to. Row
 /// planning keeps using the live widths in `HexMemory::groups`.
 pub fn ceiling_groups(ui: &egui::Ui) -> [f32; 3] {
     let gap = ui.spacing().item_spacing.x;
@@ -75,13 +77,13 @@ pub fn ceiling_groups(ui: &egui::Ui) -> [f32; 3] {
     let (hb, db) = (widest("0123456789abcdef", egui::TextStyle::Button), widest("0123456789", egui::TextStyle::Body));
     let hl = widest("0123456789abcdef", egui::TextStyle::Body);
     let button = |s: &str| width(s, egui::TextStyle::Button) + pad;
-    // Mode chip: label + frame margin (4 pt each side) + 1 pt stroke each side.
-    let chip = ["File bytes", "Decompressed block", "Reassembled record"].iter().map(|s| width(s, egui::TextStyle::Body)).fold(0.0, f32::max) + 2.0 * 4.0 + 2.0;
+    // Mode chip: label + chip margin and stroke on both sides (`chip_frame`).
+    let chip = ["File bytes", "Decompressed block", "Reassembled record"].iter().map(|s| width(s, egui::TextStyle::Body)).fold(0.0, f32::max) + crate::ui::layout::chip_pad_w();
     let h16 = run(hb, 16);
     let space_btn = [format!("show block@0x{h16} (decompressed)"), format!("show record@0x{h16} (reassembled)"), "show file bytes".to_string()].iter().map(|s| button(s)).fold(0.0, f32::max);
     let a = chip + space_btn + button("Hide bytes") + 2.0 * gap;
-    let (p15, h16l, d20) = (run(db, 15), run(hl, 16), run(db, 20));
-    let b = button("◀ page") + width(&format!("page {p15}/{p15} · 0x{h16l}..0x{h16l} of {d20} bytes"), egui::TextStyle::Body) + button("page ▶") + 2.0 * gap;
+    let (h16l, d20) = (run(hl, 16), run(db, 20));
+    let b = button("◀ page") + width(&format!("record@0x{h16l} [+0x{h16l},+0x{h16l}) of {d20} B"), egui::TextStyle::Body) + button("page ▶") + 2.0 * gap;
     // TextEdit draws its default 4 pt frame margins outside `desired_width`.
     let c = LAYOUT.goto_width + 2.0 * 4.0 + button("Go to") + gap;
     [a, b, c]
@@ -167,7 +169,7 @@ fn header(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut HexMemory, a
             for g in (0..n_groups).filter(|g| lines[*g] == line) {
                 let r = ui.horizontal(|ui| match g {
                     0 => group_space(ui, st, tok, acts),
-                    1 => mem.groups[1] = group_paging(ui, hex.page_base(), hex.size(), acts),
+                    1 => mem.groups[1] = group_paging(ui, hex.space(), hex.page_base(), hex.size(), acts),
                     _ => group_goto(ui, st, acts),
                 });
                 // Paging plans its line with the wide width (it falls back to compact itself).
@@ -191,11 +193,7 @@ fn group_space(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Ac
         Space::Block(o) => ("Decompressed block", p.hex_derived_space, format!("Decompressed block @0x{o:x} – offsets are not file offsets\n{CHIP_DERIVED_TIP}\n{}", hex.space_title())),
         Space::Record(o) => ("Reassembled record", p.hex_derived_space, format!("Reassembled record @0x{o:x} – offsets are not file offsets\n{CHIP_DERIVED_TIP}\n{}", hex.space_title())),
     };
-    egui::Frame::new()
-        .fill(p.data)
-        .stroke(egui::Stroke::new(1.0, tint))
-        .inner_margin(egui::Margin::symmetric(4, 1))
-        .corner_radius(tok.w.rounding)
+    super::chip_frame(tok, Some(tint))
         .show(ui, |ui| {
             ui.add(egui::Label::new(RichText::new(word).color(tint).strong()).extend().selectable(false));
         })
@@ -216,52 +214,61 @@ fn group_space(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Ac
     hide_button(ui, acts);
 }
 
-/// Texts of the paging group B for the page at `base` of a `size`-byte space with `page`-byte
-/// pages: the wide label, the compact label, and the tooltips that keep every detail.
+/// Texts of the paging group B for the page at `base` of a `size`-byte `space` with `page`-byte
+/// pages: the labels in elision order and the tooltips that keep every detail. Ranges use the
+/// one range notation (`model::range_text`, 0020 §3).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PagingText {
-    /// "page 2/3 · 0x10000..0x20000 of 150000 bytes"
-    pub wide: String,
-    /// "2/3"
-    pub compact: String,
-    /// "Page 2 of 3 · 0x10000..0x20000 of 150000 bytes · 64 KiB per page"
+    /// Labels, widest first (0020 §3 elision order): "file [0x10000,0x20000) of 150000 B" →
+    /// "file [0x10000,0x20000)" → "[0x10000,0x20000)" → "0x10000…". Never elided inside the
+    /// bracket; the last one is truncated only if even it does not fit.
+    pub labels: [String; 4],
+    /// "Page 2 of 3 · file [0x10000,0x20000) · 65536 B of 150000 B · 64 KiB per page"
     pub tip: String,
-    /// "Previous page (0x0..0x10000)"; None on the first page.
+    /// "Previous page (file [0x0,0x10000))"; None on the first page.
     pub prev: Option<(u64, String)>,
-    /// "Next page (0x20000..0x24a10)"; None on the last page.
+    /// "Next page (file [0x20000,0x249f0))"; None on the last page.
     pub next: Option<(u64, String)>,
 }
 
-pub fn paging_text(base: u64, size: u64, page: u64) -> PagingText {
+pub fn paging_text(space: Space, base: u64, size: u64, page: u64) -> PagingText {
     let pages = size.div_ceil(page).max(1);
     let cur = base / page;
     let end = |b: u64| b.saturating_add(page).min(size);
-    let range = format!("0x{base:x}..0x{:x}", end(base));
-    let per = if page.is_multiple_of(1024) { format!("{} KiB", page / 1024) } else { format!("{page} bytes") };
+    let bracket = range_text(space, base, end(base));
+    let named = |a: u64| format!("{} {}", space.name(), range_text(space, a, end(a)));
+    let start = match space {
+        Space::File => format!("0x{base:x}…"),
+        _ => format!("+0x{base:x}…"),
+    };
+    let per = if page.is_multiple_of(1024) { format!("{} KiB", page / 1024) } else { format!("{page} B") };
     PagingText {
-        wide: format!("page {}/{pages} · {range} of {size} bytes", cur + 1),
-        compact: format!("{}/{pages}", cur + 1),
-        tip: format!("Page {} of {pages} · {range} of {size} bytes · {per} per page", cur + 1),
-        prev: (cur > 0).then(|| (base - page, format!("Previous page (0x{:x}..0x{:x})", base - page, base))),
-        next: (cur + 1 < pages).then(|| (base + page, format!("Next page (0x{:x}..0x{:x})", base + page, end(base + page)))),
+        labels: [format!("{} of {size} B", named(base)), named(base), bracket, start],
+        tip: format!("Page {} of {pages} · {} of {size} B · {per} per page", cur + 1, Span::new(space, base, end(base) - base).range_text()),
+        prev: (cur > 0).then(|| (base - page, format!("Previous page ({})", named(base - page)))),
+        next: (cur + 1 < pages).then(|| (base + page, format!("Next page ({})", named(base + page)))),
     }
 }
 
-/// Group B: "◀ page · page 1/3 · 0x0..0x10000 of 150000 bytes · page ▶" when it fits the rest of
-/// its header line, otherwise the compact "◀ · 1/3 · ▶" (chosen per frame from the measured wide
-/// width; the label never wraps and the full text is in the tooltips). Both buttons are always
-/// shown (disabled at the ends). Returns the wide width, which plans the header lines.
-fn group_paging(ui: &mut egui::Ui, base: u64, size: u64, acts: &mut Vec<Action>) -> f32 {
-    let t = paging_text(base, size, LIMITS.hex_page_bytes);
+/// Group B: "◀ page · file [0x0,0x10000) of 150000 B · page ▶" when it fits the rest of its
+/// header line, otherwise "◀ · <label> · ▶" with the widest label of `PagingText::labels` that
+/// fits (chosen per frame; the label never wraps and the full text is in the tooltips). Both
+/// buttons are always shown (disabled at the ends). Returns the wide width, which plans the
+/// header lines.
+fn group_paging(ui: &mut egui::Ui, space: Space, base: u64, size: u64, acts: &mut Vec<Action>) -> f32 {
+    let t = paging_text(space, base, size, LIMITS.hex_page_bytes);
     let pad = 2.0 * ui.spacing().button_padding.x;
     let color = ui.visuals().text_color();
     let width = |s: &str, style: egui::TextStyle| {
         let font = style.resolve(ui.style());
         ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font, color).size().x)
     };
-    let wide_w = width("◀ page", egui::TextStyle::Button) + width(&t.wide, egui::TextStyle::Body) + width("page ▶", egui::TextStyle::Button) + 2.0 * pad + 2.0 * ui.spacing().item_spacing.x;
+    let gaps = pad + 2.0 * ui.spacing().item_spacing.x;
+    let wide_w = width("◀ page", egui::TextStyle::Button) + width(&t.labels[0], egui::TextStyle::Body) + width("page ▶", egui::TextStyle::Button) + pad + gaps;
     let compact = wide_w + PACK_SLACK > ui.available_width();
-    let (prev, label, next) = if compact { ("◀", &t.compact, "▶") } else { ("◀ page", &t.wide, "page ▶") };
+    let glyphs = 2.0 * LAYOUT.glyph_button[0].max(width("▶", egui::TextStyle::Button) + pad);
+    let label = if compact { t.labels[1..].iter().find(|l| glyphs + width(l, egui::TextStyle::Body) + gaps + PACK_SLACK <= ui.available_width()).unwrap_or(&t.labels[3]) } else { &t.labels[0] };
+    let (prev, next) = if compact { ("◀", "▶") } else { ("◀ page", "page ▶") };
     let next_w = (width(next, egui::TextStyle::Button) + pad).max(LAYOUT.glyph_button[0]);
     let label_text_w = width(label, egui::TextStyle::Body);
     let button = |s: &str| egui::Button::new(s).min_size(egui::vec2(LAYOUT.glyph_button[0], LAYOUT.glyph_button[1]));
@@ -272,7 +279,8 @@ fn group_paging(ui: &mut egui::Ui, base: u64, size: u64, acts: &mut Vec<Action>)
         acts.push(Action::HexPage(*to));
     }
     if compact {
-        // Even "n/N" may not fit beside the buttons (huge spaces): elide it, keep "▶" reachable.
+        // Even the last label may not fit beside the buttons (huge spaces): elide it, keep "▶"
+        // reachable.
         let room = (ui.available_width() - next_w - ui.spacing().item_spacing.x - PACK_SLACK).max(0.0);
         let label_w = label_text_w.min(room);
         ui.allocate_ui(egui::vec2(label_w, ui.spacing().interact_size.y), |ui| ui.add(egui::Label::new(label.as_str()).truncate()).on_hover_text(&t.tip));
@@ -290,7 +298,7 @@ fn group_paging(ui: &mut egui::Ui, base: u64, size: u64, acts: &mut Vec<Action>)
 
 /// Group C: Go-to field + Go to.
 fn group_goto(ui: &mut egui::Ui, st: &AppState, acts: &mut Vec<Action>) {
-    let mut goto = st.session().goto().to_string();
+    let mut goto = st.session().hex().goto().to_string();
     let tip = menu::tip("Go to Offset", MenuCmd::GotoOffset);
     let r = ui.add(egui::TextEdit::singleline(&mut goto).hint_text("Go to offset (0x… or decimal)").desired_width(LAYOUT.goto_width).id(egui::Id::new(GOTO_ID))).on_hover_text(tip);
     if r.changed() {
@@ -357,7 +365,7 @@ fn show_bytes(
             return retry.then_some(HexEvent::Retry);
         }
         PageState::Ready(pg) if pg.is_empty() => {
-            let t = if hex.size() == 0 { "File is empty (0 bytes)".to_string() } else { format!("No bytes at 0x{:x} (space is {} bytes)", hex.page_base(), hex.size()) };
+            let t = if hex.size() == 0 { "File is empty (0 B)".to_string() } else { format!("No bytes at {} (space is {} B)", Span::new(hex.space(), hex.page_base(), 1).position_text(), hex.size()) };
             centered(ui, |ui| {
                 ui.label(RichText::new(t).color(p.text_muted));
             });
@@ -402,6 +410,8 @@ fn show_bytes(
     if let Some(s) = tok.grain_shape(strip_rect) {
         ui.painter().set(strip, s);
     }
+    let hbar = if content_w > ui.available_width() { ui.spacing().scroll.allocated_width() } else { 0.0 };
+    mem.rows_visible = ((ui.available_height() - hbar) / row_h).floor().max(0.0);
     let mut area = egui::ScrollArea::both().id_salt("hex_scroll").auto_shrink([false, false]);
     if let Some(t) = scroll_to
         && t >= hex.page_base()
@@ -467,10 +477,11 @@ fn show_bytes(
                 let off = row_off + i;
                 new_hover = Some(off);
                 let b = page[(off - page_base) as usize];
+                // Single positions in the one notation (0019 §2): "file 0x6390c", "block@0x5c9 +0x6d".
+                let pos = Span::new(space, off, 1).position_text();
                 let where_ = match space {
-                    Space::File => format!("offset 0x{off:x} ({off})"),
-                    Space::Block(_) => format!("block offset 0x{off:x} (not a file offset)"),
-                    Space::Record(_) => format!("record offset 0x{off:x} (not a file offset)"),
+                    Space::File => format!("{pos} ({off})"),
+                    _ => format!("{pos} (not a file offset)"),
                 };
                 let resp = resp.clone().on_hover_ui_at_pointer(|ui| {
                     ui.monospace(format!("{where_}\nbyte 0x{b:02x} = {b} = 0b{b:08b} = '{}'", if (0x20..0x7f).contains(&b) { b as char } else { '·' }));
@@ -561,19 +572,26 @@ mod tests {
     #[test]
     fn paging_text_first_middle_last() {
         let p = 65536;
-        let first = paging_text(0, 150000, p);
-        assert_eq!((first.wide.as_str(), first.compact.as_str()), ("page 1/3 · 0x0..0x10000 of 150000 bytes", "1/3"));
-        assert_eq!(first.tip, "Page 1 of 3 · 0x0..0x10000 of 150000 bytes · 64 KiB per page");
+        // 0020 §3: the one range notation; elision drops " of N B", then the space, then the end.
+        let first = paging_text(Space::File, 0, 150000, p);
+        assert_eq!(first.labels, ["file [0x0,0x10000) of 150000 B", "file [0x0,0x10000)", "[0x0,0x10000)", "0x0…"].map(String::from));
+        assert_eq!(first.tip, "Page 1 of 3 · file [0x0,0x10000) · 65536 B of 150000 B · 64 KiB per page");
         assert_eq!(first.prev, None);
-        assert_eq!(first.next, Some((0x10000, "Next page (0x10000..0x20000)".into())));
-        let mid = paging_text(0x10000, 150000, p);
-        assert_eq!(mid.compact, "2/3");
-        assert_eq!(mid.prev, Some((0, "Previous page (0x0..0x10000)".into())));
-        assert_eq!(mid.next, Some((0x20000, "Next page (0x20000..0x249f0)".into())));
-        let last = paging_text(0x20000, 150000, p);
-        assert_eq!((last.compact.as_str(), last.next.is_none()), ("3/3", true));
-        let one = paging_text(0, 16, p);
-        assert_eq!((one.compact.as_str(), one.prev.is_none(), one.next.is_none()), ("1/1", true, true));
+        assert_eq!(first.next, Some((0x10000, "Next page (file [0x10000,0x20000))".into())));
+        let mid = paging_text(Space::File, 0x10000, 150000, p);
+        assert_eq!(mid.labels[0], "file [0x10000,0x20000) of 150000 B");
+        assert_eq!(mid.prev, Some((0, "Previous page (file [0x0,0x10000))".into())));
+        assert_eq!(mid.next, Some((0x20000, "Next page (file [0x20000,0x249f0))".into())));
+        let last = paging_text(Space::File, 0x20000, 150000, p);
+        assert_eq!((last.labels[0].as_str(), last.next.is_none()), ("file [0x20000,0x249f0) of 150000 B", true));
+        assert!(last.tip.starts_with("Page 3 of 3 · file [0x20000,0x249f0) · 18928 B of 150000 B"), "{}", last.tip);
+        let one = paging_text(Space::File, 0, 16, p);
+        assert_eq!((one.labels[0].as_str(), one.prev.is_none(), one.next.is_none()), ("file [0x0,0x10) of 16 B", true, true));
+        // Derived spaces name their space and mark relative offsets.
+        let blk = paging_text(Space::Block(0x5c9), 0, 0x4c0, p);
+        assert_eq!(blk.labels, ["block@0x5c9 [+0x0,+0x4c0) of 1216 B", "block@0x5c9 [+0x0,+0x4c0)", "[+0x0,+0x4c0)", "+0x0…"].map(String::from));
+        let rec = paging_text(Space::Record(0x5eec), 0, 0x20, p);
+        assert_eq!(rec.labels[0], "record@0x5eec [+0x0,+0x20) of 32 B");
     }
 
     /// 0009 item 1: at 4 bytes per row (the center at its minimum = both side panels at the
@@ -587,7 +605,9 @@ mod tests {
                 let ctx = egui::Context::default();
                 let _ = apply_theme(&ctx, t, &mut Vec::new());
                 ctx.set_zoom_factor(z);
-                for size in [102_400u64, 150_000, 10_000_000_000_000_000_000] {
+                for (size, space) in
+                    [(102_400u64, Space::File), (150_000, Space::Block(0xffff_ffff_ffff)), (10_000_000_000_000_000_000, Space::File), (10_000_000_000_000_000_000, Space::Record(u64::MAX))]
+                {
                     let bases = [0, (size / 2) / 65536 * 65536, (size - 1) / 65536 * 65536];
                     for base in bases {
                         for wide_room in [false, true] {
@@ -601,7 +621,7 @@ mod tests {
                                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
                                 let mut acts = Vec::new();
                                 let mut wide = 0.0;
-                                let r = child.horizontal(|ui| wide = group_paging(ui, base, size, &mut acts));
+                                let r = child.horizontal(|ui| wide = group_paging(ui, space, base, size, &mut acts));
                                 let w = r.response.rect.width();
                                 assert!(r.response.rect.right() <= rect.right() + 0.5, "{} z{z} size {size} base {base:#x}: group {w} > center {avail}", t.id);
                                 if wide_room && wide + PACK_SLACK <= avail {

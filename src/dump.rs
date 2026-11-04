@@ -3,7 +3,7 @@
 
 use crate::discover;
 use crate::inspect;
-use crate::model::{Child, ChildRole, NodeKind, View, group_glyph, with_coverage};
+use crate::model::{Child, ChildRole, NodeKind, View, with_coverage};
 use std::io::Write;
 use std::path::Path;
 
@@ -52,10 +52,12 @@ pub fn dump(path: &Path, o: &DumpOpts, out: &mut dyn Write) -> std::io::Result<b
         // Same label as the tree (coverage after the head); a group without a glyph claims no
         // status (design A3/A4).
         let label = with_coverage(&c.label, c.checked);
-        match (group_glyph(c.status, c.checked), c.checked) {
-            (Some(s), _) => writeln!(out, "{ind}+ {label} [{} {}]", s.symbol(), s.label())?,
-            (None, Some((0, _))) => writeln!(out, "{ind}+ {label} [not checked]")?,
-            (None, _) => writeln!(out, "{ind}+ {label} [partly checked]")?,
+        match (c.glyph(), c.checked, c.tally) {
+            (Some(s), _, _) => writeln!(out, "{ind}+ {label} [{} {}]", s.symbol(), s.label())?,
+            (None, Some((0, _)), _) => writeln!(out, "{ind}+ {label} [not checked]")?,
+            (None, _, Some(t)) if t.present + t.other == 0 => writeln!(out, "{ind}+ {label} [not checked]")?,
+            (None, _, Some(t)) if t.not_checked == 0 => writeln!(out, "{ind}+ {label} [no status: {} other]", t.other)?,
+            (None, _, _) => writeln!(out, "{ind}+ {label} [partly checked]")?,
         }
         if c.role == ChildRole::Reference {
             // A link to a structure printed at its canonical place (file order), not a copy.

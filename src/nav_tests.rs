@@ -191,21 +191,25 @@ fn compressed_sst_provenance() {
     let row = v.rows.iter().find(|r| r.field.span.is_some_and(|s| s.space == Space::Block(off))).expect("entry in block space");
     let w = where_lines(Some(&v), &row.field.span.unwrap());
     assert!(w[0].starts_with(&format!("Contained in compressed block: file [0x{off:x},0x{:x})", off + size)) && w[0].ends_with("no byte-to-byte mapping to file offsets"), "{w:?}");
-    assert!(w[1].starts_with(&format!("Decompressed block offset: blk@0x{off:x} +0x")), "{w:?}");
+    assert!(w[1].starts_with(&format!("block@0x{off:x} [+0x")), "{w:?}");
     assert!(field_at(&v, Space::File, off + 1).is_none(), "no file byte maps into the decompressed block");
     let (node, at, span) = i.locate(Space::File, off + 1, &never).unwrap();
     assert_eq!((node, at, span), (NodeKind::SstBlock { off, size, kind }, None, Some(Span::file(off, size))));
-    // Location header keeps stored and decompressed lengths apart.
-    assert!(v.location.iter().any(|l| l.text.starts_with("decompressed ")) && v.location[0].text.starts_with(&format!("file [0x{off:x},")), "{:?}", v.location);
+    // Location header keeps stored and decompressed lengths apart, on one line (0020 §1).
+    let dec0 = v.spaces[0].size;
+    assert_eq!(v.location[0].text, format!("file [0x{off:x},0x{:x}) · {} B stored -> block@0x{off:x} [+0x0,+0x{dec0:x}) · {dec0} B decompressed", off + size + 5, size + 5), "{:?}", v.location);
+    assert!(!v.location.iter().any(|l| l.text.starts_with("decompressed ")), "{:?}", v.location);
     // One definition per word (0011 fix C / addendum 1): "stored" = extent incl. the trailer,
     // the same N on the title, the tree label and `where:`; "contents" = stored payload;
     // "decompressed" = decompressed length; never "N B contents" for a decompressed length.
     let stored = size + 5;
     let dec = v.spaces[0].size;
     assert_eq!(v.title, format!("Data block @0x{off:x} (stored {stored} B, decompressed {dec} B)"));
-    assert!(v.location[0].text.contains(&format!("stored {stored} B")), "{:?}", v.location);
-    assert!(v.location[1].text.starts_with(&format!("contents [0x{off:x},0x{:x}) = {size} B", off + size)), "{:?}", v.location);
-    assert!(v.spaces[0].title.contains(&format!("{size} B compressed contents -> {dec} B decompressed")), "{}", v.spaces[0].title);
+    assert!(v.location[0].text.contains(&format!("· {stored} B stored")), "{:?}", v.location);
+    // 0019 §2: the stored range before the trailer is the "payload" (one range notation).
+    // 0020 UI ruling 1: exactly the layout-row Meaning form (no ", last byte 0x…").
+    assert_eq!(v.location[1].text, format!("payload file [0x{off:x},0x{:x}) · {size} B · trailer [0x{:x},0x{:x}) · 5 B", off + size, off + size, off + size + 5), "{:?}", v.location);
+    assert!(v.spaces[0].title.contains(&format!("{size} B compressed payload -> {dec} B decompressed")), "{}", v.spaces[0].title);
     let root = i.children(&NodeKind::Root, &never);
     let label = &root.iter().find(|c| c.kind == NodeKind::SstBlock { off, size, kind }).unwrap().label;
     assert!(label.contains(&format!("0x{off:x}, {stored} B)")), "{label}");
@@ -215,7 +219,10 @@ fn compressed_sst_provenance() {
     let mut u = inspect::open(&fx("tests/fixtures/sst-none/data.sst")).unwrap();
     let b = u.children(&NodeKind::SstDataBlocks { skip: 0 }, &never);
     let NodeKind::SstBlock { off, size, kind } = b[0].kind.clone() else { panic!() };
-    assert_eq!(u.view(&NodeKind::SstBlock { off, size, kind }, &never).title, format!("Data block @0x{off:x} (stored {} B)", size + 5));
+    let uv = u.view(&NodeKind::SstBlock { off, size, kind }, &never);
+    assert_eq!(uv.title, format!("Data block @0x{off:x} (stored {} B)", size + 5));
+    // 0020 §1: uncompressed: the plain range, no "stored" suffix (it would repeat the range).
+    assert_eq!(uv.location[0].text, format!("file [0x{off:x},0x{:x}) · {} B", off + size + 5, size + 5));
 }
 
 /// C: declared compression policy and actual block compression are separate root rows; SST

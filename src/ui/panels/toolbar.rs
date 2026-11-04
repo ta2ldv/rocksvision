@@ -118,10 +118,17 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
             if ui.checkbox(&mut hex, "Hex bytes").on_hover_text(HEX_HELP).changed() {
                 acts.push(Action::SetSearchHex(hex));
             }
-            if btn(ui, tok, "Prev").on_hover_text(format!("Previous match ({} / Shift+F3 / Shift+Enter)", menu::shortcut_text(MenuCmd::FindPrev).unwrap_or_default())).clicked() {
+            // Disabled for an empty query or an invalid hex sequence (they would do nothing).
+            let step = st.search().can_step();
+            if ui
+                .add_enabled_ui(step, |ui| btn(ui, tok, "Prev"))
+                .inner
+                .on_hover_text(format!("Previous match ({} / Shift+F3 / Shift+Enter)", menu::shortcut_text(MenuCmd::FindPrev).unwrap_or_default()))
+                .clicked()
+            {
                 acts.push(Action::SearchPrev);
             }
-            if btn(ui, tok, "Next").on_hover_text(format!("Next match ({} / F3 / Enter)", menu::shortcut_text(MenuCmd::FindNext).unwrap_or_default())).clicked() {
+            if ui.add_enabled_ui(step, |ui| btn(ui, tok, "Next")).inner.on_hover_text(format!("Next match ({} / F3 / Enter)", menu::shortcut_text(MenuCmd::FindNext).unwrap_or_default())).clicked() {
                 acts.push(Action::SearchNext);
             }
             if btn(ui, tok, "Clear search").on_hover_text("Clear search text and match highlights. Selection is kept.").clicked() {
@@ -208,7 +215,7 @@ mod tests {
         for _ in 0..frames {
             let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w * z, 900.0 * z))), ..Default::default() };
             crate::ui::test_frame(ctx, input, |ui| {
-                let frame = egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4));
+                let frame = crate::ui::panels::panel_frame(egui::Color32::TRANSPARENT);
                 egui::Panel::top("toolbar").frame(frame).show(ui, |ui| {
                     let right = ui.max_rect().right();
                     let (_, rects) = show_groups(ui, st, &tok, mem, None, false);
@@ -237,15 +244,12 @@ mod tests {
                 let mut c = 0.0;
                 crate::ui::test_frame(&ctx, egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))), ..Default::default() }, |ui| {
                     // The status bar and a hex header line as the shell measures them.
-                    let r = egui::Panel::bottom("status")
-                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, LAYOUT.status_pad as i8)).stroke(egui::Stroke::new(1.0, tok.p.border)))
-                        .resizable(false)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.set_height(ui.text_style_height(&egui::TextStyle::Body) + LAYOUT.status_pad);
-                                ui.label("selection");
-                            });
+                    let r = egui::Panel::bottom("status").frame(crate::ui::panels::status_frame(tok.p.toolbar, tok.p.border)).resizable(false).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.set_height(ui.text_style_height(&egui::TextStyle::Body) + LAYOUT.status_pad);
+                            ui.label("selection");
                         });
+                    });
                     mem.status_h = r.response.rect.height();
                     let line = ui.horizontal(|ui| {
                         let mut s = String::new();

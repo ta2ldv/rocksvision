@@ -75,25 +75,131 @@ pub enum Panel {
 /// Status message shown after Reset View (for `RESET_NOTICE_SECS`).
 pub const RESET_NOTICE: &str = "View reset: panels, split and zoom restored (window size unchanged)";
 pub const RESET_NOTICE_SECS: u64 = 4;
+/// A copy confirmation / copy message is timed like the Reset View notice (0020 UI ruling F1).
+pub const COPY_NOTICE_SECS: u64 = RESET_NOTICE_SECS;
+
+/// Owner of the one transient status-bar notice (0020 UI ruling F1: one at a time, the newest
+/// replaces the older one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeOwner {
+    /// "Zoom reduced to …% to fit window": lives while the clamp is current (untimed).
+    Zoom,
+    /// "Zoom at layout limit (…)": stale after a resize or any zoom command (untimed).
+    ZoomLimit,
+    /// Reset View confirmation (timed).
+    Reset,
+    /// Copy confirmation or copy message ("Copied …", "Copying…", "Nothing selected…"; timed).
+    Copy,
+}
+
+/// The one transient status-bar notice and its owner and expiry.
+#[derive(Debug, Default)]
+struct TransientNotice {
+    text: String,
+    /// When a timed notice disappears (None: until replaced or cleared by its owner's rule).
+    until: Option<Instant>,
+    owner: Option<NoticeOwner>,
+}
+
+impl TransientNotice {
+    fn set(&mut self, owner: NoticeOwner, text: String, until: Option<Instant>) {
+        *self = TransientNotice { text, until, owner: Some(owner) };
+    }
+    /// Clears the notice if `owner` set it (an older notice of another owner was replaced).
+    fn clear_if(&mut self, owner: NoticeOwner) {
+        if self.owner == Some(owner) {
+            *self = TransientNotice::default();
+        }
+    }
+    fn expire(&mut self, now: Instant) {
+        if self.until.is_some_and(|t| now >= t) {
+            *self = TransientNotice::default();
+        }
+    }
+}
+
+/// A window size change above measurement rounding (points).
+const RESIZE_EPS: f32 = 1.0;
+
+/// What one layout measurement does to the effective zoom (`ZoomFitter::observe`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FitOutcome {
+    Keep,
+    /// The window cannot hold the zoom (two consecutive over-fit frames): lower it to this.
+    Reduce(f32),
+    /// The window holds more than the clamped zoom again: raise it (never above the chosen).
+    Raise(f32),
+    /// The window was resized and nothing is clamped or pending.
+    Resized,
+}
+
+/// Transient zoom-fit state: the layout ceiling, the over-fit frame counter and the last
+/// window size. Never persisted.
+#[derive(Debug)]
+struct ZoomFitter {
+    policy: ZoomPolicy,
+    /// Current layout-aware zoom ceiling (recomputed from the UI's `ZoomFit` each frame).
+    ceiling: f32,
+    /// Consecutive frames in which the zoom was clearly above the measured fit (0015 C3: a
+    /// reduction needs two, so one transient frame — resize step, re-measure after a zoom
+    /// change — cannot snap the zoom back).
+    over_frames: u8,
+    /// Window size (points at 100 %, `avail × at_zoom`) of the last layout fit: a change is a
+    /// resize.
+    last_window: Option<(f32, f32)>,
+    /// The zoom the last reduction lowered from, until the window is resized: a Raise back to
+    /// it (or above) is not tried in the same window (review N2: a measurement that differs
+    /// between two zoom levels by more than `ZOOM_FIT_SLACK` would otherwise Raise → Reduce →
+    /// Raise every few frames).
+    reduced_from: Option<f32>,
+}
+
+impl ZoomFitter {
+    fn new(policy: ZoomPolicy) -> Self {
+        ZoomFitter { policy, ceiling: policy.max, over_frames: 0, last_window: None, reduced_from: None }
+    }
+    /// One frame's measurement at effective zoom `zoom` (user's chosen zoom `chosen`). The
+    /// same rule for the first frame and every later one: a restored zoom in a small first
+    /// window is lowered exactly like a resize to that window at that zoom.
+    fn observe(&mut self, zoom: f32, chosen: f32, fit: ZoomFit) -> FitOutcome {
+        let window = (fit.avail_w * fit.at_zoom, fit.avail_h * fit.at_zoom);
+        let resized = self.last_window.is_some_and(|(w, h)| (w - window.0).abs() > RESIZE_EPS || (h - window.1).abs() > RESIZE_EPS);
+        self.last_window = Some(window);
+        if resized {
+            self.reduced_from = None;
+        }
+        self.ceiling = self.policy.ceiling(fit);
+        let over = zoom > self.ceiling + 1e-3 && self.policy.raw_ceiling(fit) < zoom - ZOOM_FIT_SLACK;
+        self.over_frames = if over { self.over_frames.saturating_add(1) } else { 0 };
+        if self.over_frames >= 2 {
+            self.over_frames = 0;
+            self.reduced_from = Some(zoom);
+            return FitOutcome::Reduce(self.ceiling);
+        }
+        let target = chosen.min(self.ceiling);
+        let retry = self.reduced_from.is_some_and(|r| target >= r - 1e-3);
+        if self.over_frames == 0 && zoom < chosen - 1e-3 && self.ceiling > zoom + 1e-3 && !retry {
+            // 0020 UI ruling (zoom return): effective = min(chosen, ceiling).
+            return FitOutcome::Raise(target);
+        }
+        if resized && self.over_frames == 0 { FitOutcome::Resized } else { FitOutcome::Keep }
+    }
+}
 
 #[derive(Debug)]
 pub struct ViewPreferences {
     /// Stable id of the active theme (resolved against the UI registry).
     theme_id: &'static str,
+    /// Effective zoom: min(chosen, layout ceiling), lowered only after two over-fit frames.
     zoom: f32,
-    zoom_policy: ZoomPolicy,
-    /// Current layout-aware zoom ceiling (recomputed from the UI's `ZoomFit` each frame).
-    zoom_ceiling: f32,
-    /// Consecutive frames in which the zoom was clearly above the measured fit (0015 C3: a
-    /// reduction needs two, so one transient frame — resize step, re-measure after a zoom
-    /// change — cannot snap the zoom back).
-    over_frames: u8,
+    /// The user's chosen zoom (persisted). A clamp to the window never changes it; Zoom In /
+    /// Out / Actual Size / SetZoom / Reset View set it (0020 UI ruling, zoom return).
+    chosen_zoom: f32,
+    fitter: ZoomFitter,
     /// Records share of the center column (bytes below); session-only.
     center_split: f32,
-    /// Transient status-bar notice (zoom limit messages, Reset View confirmation).
-    notice: String,
-    /// When a timed notice disappears (None: until replaced).
-    notice_until: Option<Instant>,
+    /// The one transient status-bar notice (zoom, Reset View, copy).
+    notice: TransientNotice,
     show_shortcuts: bool,
     show_about: bool,
     show_help: bool,
@@ -111,12 +217,10 @@ impl ViewPreferences {
         ViewPreferences {
             theme_id: DEFAULT_THEME,
             zoom: 1.0,
-            zoom_policy: ZoomPolicy::DEFAULT,
-            zoom_ceiling: ZoomPolicy::DEFAULT.max,
-            over_frames: 0,
+            chosen_zoom: 1.0,
+            fitter: ZoomFitter::new(ZoomPolicy::DEFAULT),
             center_split: CENTER_SPLIT_DEFAULT,
-            notice: String::new(),
-            notice_until: None,
+            notice: TransientNotice::default(),
             show_shortcuts: false,
             show_about: false,
             show_help: false,
@@ -139,24 +243,33 @@ impl ViewPreferences {
     pub fn theme_id(&self) -> &'static str {
         self.theme_id
     }
+    /// The effective zoom (what egui renders at): min(chosen, layout ceiling).
     pub fn zoom(&self) -> f32 {
         self.zoom
     }
+    /// The user's chosen (persisted) zoom; above `zoom()` while the window clamps it.
+    pub fn chosen_zoom(&self) -> f32 {
+        self.chosen_zoom
+    }
     pub fn zoom_policy(&self) -> ZoomPolicy {
-        self.zoom_policy
+        self.fitter.policy
     }
     pub fn zoom_ceiling(&self) -> f32 {
-        self.zoom_ceiling
+        self.fitter.ceiling
     }
     pub fn center_split(&self) -> f32 {
         self.center_split
     }
+    /// The one transient status-bar notice (zoom, Reset View or copy), or "".
     pub fn notice(&self) -> &str {
-        &self.notice
+        &self.notice.text
+    }
+    pub fn notice_owner(&self) -> Option<NoticeOwner> {
+        self.notice.owner
     }
     /// Time left of a timed notice (the UI repaints then to clear it).
     pub fn notice_remaining(&self) -> Option<Duration> {
-        self.notice_until.map(|t| t.saturating_duration_since(Instant::now()))
+        self.notice.until.map(|t| t.saturating_duration_since(Instant::now()))
     }
     pub fn show_shortcuts(&self) -> bool {
         self.show_shortcuts
@@ -193,73 +306,118 @@ impl ViewPreferences {
     /// Visibility, split and zoom are at their Reset View defaults (panel widths are UI memory
     /// and checked by the shell).
     pub fn is_default_layout(&self) -> bool {
-        self.show_left && self.show_right && self.show_hex && !self.all_columns && (self.zoom - 1.0).abs() < 1e-4 && (self.center_split - CENTER_SPLIT_DEFAULT).abs() < 1e-4
+        self.show_left && self.show_right && self.show_hex && !self.all_columns && (self.chosen_zoom - 1.0).abs() < 1e-4 && (self.center_split - CENTER_SPLIT_DEFAULT).abs() < 1e-4
     }
     /// True if Zoom In would change the zoom (toolbar/menu enabled state).
     pub fn can_zoom_in(&self) -> bool {
-        self.zoom_policy.zoom_in(self.zoom) <= self.zoom_ceiling + 1e-3 && self.zoom < self.zoom_policy.max - 1e-3
+        let p = self.fitter.policy;
+        p.zoom_in(self.zoom) <= self.fitter.ceiling + 1e-3 && self.zoom < p.max - 1e-3
     }
-    /// The persisted subset (theme id + zoom).
+    /// The persisted subset (theme id + the chosen zoom, never the clamped one).
     pub fn persisted(&self) -> Prefs {
-        Prefs { theme: self.theme_id.to_string(), zoom: self.zoom }
+        Prefs { theme: self.theme_id.to_string(), zoom: self.chosen_zoom }
     }
 
-    fn set_notice(&mut self, s: String) {
-        self.notice = s;
-        self.notice_until = None;
+    /// Sets the one transient notice (replaces any older one). `secs`: timed, else untimed.
+    pub(super) fn notify(&mut self, owner: NoticeOwner, text: impl Into<String>, now: Instant, secs: Option<u64>) {
+        self.notice.set(owner, text.into(), secs.map(|s| now + Duration::from_secs(s)));
     }
-    fn clear_notice(&mut self) {
-        self.notice.clear();
-        self.notice_until = None;
+    /// Clears the notice if `owner` set it.
+    pub(super) fn clear_notice(&mut self, owner: NoticeOwner) {
+        self.notice.clear_if(owner);
+    }
+    /// A zoom command or an unclamped zoom makes both zoom notices stale; a Reset View or
+    /// copy notice keeps its timer.
+    fn clear_zoom_notices(&mut self) {
+        self.notice.clear_if(NoticeOwner::Zoom);
+        self.notice.clear_if(NoticeOwner::ZoomLimit);
+    }
+    fn set_reduced_notice(&mut self) {
+        self.notice.set(NoticeOwner::Zoom, format!("Zoom reduced to {:.0}% to fit window", self.zoom * 100.0), None);
     }
     /// Drops a timed notice whose time is up.
     pub(super) fn expire_notice(&mut self, now: Instant) {
-        if self.notice_until.map(|t| now >= t).unwrap_or(false) {
-            self.clear_notice();
-        }
+        self.notice.expire(now);
     }
+    /// A theme change re-measures the layout: a zoom reduced under the old theme may return.
     pub(super) fn set_theme(&mut self, id: &'static str) {
         self.theme_id = id;
+        self.fitter.reduced_from = None;
     }
-    /// Zoom In through the layout-aware ceiling; at the ceiling it is a no-op with a notice.
+    /// A zoom command: the new chosen zoom, shown as is (the next fits clamp it if needed).
+    fn choose_zoom(&mut self, z: f32) {
+        self.fitter.reduced_from = None;
+        self.clear_zoom_notices();
+        self.chosen_zoom = z;
+        self.zoom = z;
+    }
+    /// Zoom In through the layout-aware ceiling (from the effective zoom); at the ceiling it is a
+    /// no-op with a notice, and the effective zoom becomes the chosen one.
     pub(super) fn zoom_in(&mut self) {
-        let next = self.zoom_policy.zoom_in(self.zoom);
-        if next > self.zoom_ceiling + 1e-3 {
-            self.set_notice(format!("Zoom at layout limit ({:.0}%)", self.zoom_ceiling * 100.0));
+        let next = self.fitter.policy.zoom_in(self.zoom);
+        if next > self.fitter.ceiling + 1e-3 {
+            self.chosen_zoom = self.zoom;
+            self.notice.set(NoticeOwner::ZoomLimit, format!("Zoom at layout limit ({:.0}%)", self.fitter.ceiling * 100.0), None);
         } else {
-            self.clear_notice();
-            self.zoom = next;
+            self.choose_zoom(next);
         }
     }
     pub(super) fn zoom_out(&mut self) {
-        self.clear_notice();
-        self.zoom = self.zoom_policy.zoom_out(self.zoom);
+        self.choose_zoom(self.fitter.policy.zoom_out(self.zoom));
     }
     pub(super) fn zoom_reset(&mut self) {
-        self.clear_notice();
-        self.zoom = 1.0f32.min(self.zoom_ceiling);
+        self.choose_zoom(1.0f32.min(self.fitter.ceiling));
     }
     pub(super) fn set_zoom(&mut self, z: f32) {
-        self.zoom = self.zoom_policy.clamp(if z.is_finite() { z } else { 1.0 });
+        self.choose_zoom(self.fitter.policy.clamp(if z.is_finite() { z } else { 1.0 }));
     }
-    /// Recomputes the ceiling from this frame's layout measurements; lowers the zoom if the
-    /// window no longer fits it (resize, theme/font change, panel toggles). Zoom In/A+ use the
-    /// same ceiling (`can_zoom_in` ⇔ `zoom_in` changes the zoom). A reduction needs the zoom to
-    /// be clearly over the fit (`ZOOM_FIT_SLACK`) in two consecutive frames: measurement
-    /// rounding right after a zoom step or one transient resize frame cannot flip it back.
+    /// Recomputes the ceiling from this frame's layout measurements (`ZoomFitter::observe`).
+    /// Effective zoom = min(chosen, ceiling): lowered when the window no longer fits it
+    /// (resize, theme/font change, panel toggles; two consecutive clearly-over frames, see
+    /// `ZOOM_FIT_SLACK`), raised back toward the chosen zoom as soon as the window holds more
+    /// (0020 UI ruling, zoom return). Zoom In/A+ use the same ceiling.
+    ///
+    /// The "Zoom reduced to {z}% to fit window" notice lives while the clamp is current: set (or
+    /// updated in place) by a reduction or a partial return, cleared when the chosen zoom is
+    /// back; a resize also clears a "layout limit" notice.
     pub(super) fn fit(&mut self, fit: ZoomFit) {
-        self.zoom_ceiling = self.zoom_policy.ceiling(fit);
-        let over = self.zoom > self.zoom_ceiling + 1e-3 && self.zoom_policy.raw_ceiling(fit) < self.zoom - ZOOM_FIT_SLACK;
-        self.over_frames = if over { self.over_frames.saturating_add(1) } else { 0 };
-        if self.over_frames >= 2 {
-            self.over_frames = 0;
-            self.zoom = self.zoom_ceiling;
-            self.set_notice(format!("Zoom reduced to {:.0}% to fit window", self.zoom * 100.0));
+        match self.fitter.observe(self.zoom, self.chosen_zoom, fit) {
+            FitOutcome::Keep => self.keep_reduced_notice(),
+            FitOutcome::Reduce(z) => {
+                self.zoom = z;
+                self.set_reduced_notice();
+            }
+            FitOutcome::Raise(z) => {
+                self.zoom = z;
+                self.notice.clear_if(NoticeOwner::ZoomLimit);
+                if (z - self.chosen_zoom).abs() < 1e-3 {
+                    self.notice.clear_if(NoticeOwner::Zoom);
+                } else if self.notice.owner == Some(NoticeOwner::Zoom) {
+                    self.set_reduced_notice();
+                } else {
+                    self.keep_reduced_notice();
+                }
+            }
+            FitOutcome::Resized => {
+                self.notice.clear_if(NoticeOwner::ZoomLimit);
+                if self.zoom >= self.chosen_zoom - 1e-3 {
+                    self.notice.clear_if(NoticeOwner::Zoom);
+                } else {
+                    self.keep_reduced_notice();
+                }
+            }
+        }
+    }
+    /// Review S1: the reduced notice comes back when the slot is free (a copy or Reset View
+    /// notice expired) while the clamp is still current; another owner's notice is kept.
+    fn keep_reduced_notice(&mut self) {
+        if self.notice.owner.is_none() && self.zoom < self.chosen_zoom - 1e-3 {
+            self.set_reduced_notice();
         }
     }
     /// A reduction is pending (one over-fit frame seen): the UI repaints once more to confirm.
     pub fn zoom_fit_pending(&self) -> bool {
-        self.over_frames > 0
+        self.fitter.over_frames > 0
     }
     pub(super) fn set_center_split(&mut self, r: f32) {
         self.center_split = r.clamp(0.0, 1.0);
@@ -292,8 +450,110 @@ impl ViewPreferences {
         self.show_hex = true;
         self.center_split = CENTER_SPLIT_DEFAULT;
         self.zoom = 1.0;
+        self.chosen_zoom = 1.0;
         self.all_columns = false;
-        self.notice = RESET_NOTICE.into();
-        self.notice_until = Some(now + Duration::from_secs(RESET_NOTICE_SECS));
+        self.notify(NoticeOwner::Reset, RESET_NOTICE, now, Some(RESET_NOTICE_SECS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// need 875×560 pt at any zoom: 1400×900 fits 160 %, 900×700 fits 100 %.
+    fn at(w: f32, h: f32, z: f32) -> ZoomFit {
+        ZoomFit { at_zoom: z, avail_w: w / z, avail_h: h / z, need_w: 875.0, need_h: 560.0 }
+    }
+
+    /// 0020 §5 / UI ruling (zoom return): one rule for the first frame and every later one.
+    /// A restored 160 % in a small first window behaves exactly like a resize to that window at
+    /// 160 %: Keep after one over-fit frame, Reduce after two; a single transient frame is
+    /// Keep; a larger window raises the effective zoom back to the chosen one.
+    #[test]
+    fn zoom_fitter_observe_table() {
+        let fresh = || ZoomFitter::new(ZoomPolicy::DEFAULT);
+        // (name, frames before (window, zoom), then the observed frames, expected outcomes)
+        let restored: Vec<FitOutcome> = {
+            let mut f = fresh();
+            vec![f.observe(1.6, 1.6, at(900.0, 700.0, 1.6)), f.observe(1.6, 1.6, at(900.0, 700.0, 1.6))]
+        };
+        let resized: Vec<FitOutcome> = {
+            let mut f = fresh();
+            assert_eq!(f.observe(1.6, 1.6, at(1400.0, 900.0, 1.6)), FitOutcome::Keep);
+            vec![f.observe(1.6, 1.6, at(900.0, 700.0, 1.6)), f.observe(1.6, 1.6, at(900.0, 700.0, 1.6))]
+        };
+        assert_eq!(restored, vec![FitOutcome::Keep, FitOutcome::Reduce(1.0)], "restored 160 % in a small first frame");
+        assert_eq!(resized, restored, "≡ a resize to the same window at 160 %");
+        let mut f = fresh();
+        f.observe(1.6, 1.6, at(1400.0, 900.0, 1.6));
+        assert_eq!(f.observe(1.6, 1.6, at(900.0, 700.0, 1.6)), FitOutcome::Keep, "one transient frame");
+        assert_eq!(f.observe(1.6, 1.6, at(1400.0, 900.0, 1.6)), FitOutcome::Resized, "back before a second over frame: nothing changes");
+        assert!(f.over_frames == 0);
+        // Clamped at 100 % (chosen 160 %): a larger window raises the zoom back.
+        let mut f = fresh();
+        f.observe(1.0, 1.6, at(900.0, 700.0, 1.0));
+        assert_eq!(f.observe(1.0, 1.6, at(1100.0, 700.0, 1.0)), FitOutcome::Raise(1.2), "partial return: min(chosen, ceiling)");
+        assert_eq!(f.observe(1.2, 1.6, at(1400.0, 900.0, 1.2)), FitOutcome::Raise(1.6), "full return to the chosen zoom");
+        assert_eq!(f.observe(1.6, 1.6, at(1400.0, 900.0, 1.6)), FitOutcome::Keep, "never above the chosen zoom");
+        // Review N2: a steady 1000 pt window whose measured fit depends on the zoom it is
+        // measured at (1.31 at ≤ 125 %, 1.27 above: more than ZOOM_FIT_SLACK apart). Chosen
+        // 160 %: one Raise to 130 %, the Reduce back to 120 %, then no Raise/Reduce flip-flop.
+        let steady = |z: f32| {
+            let raw = if z <= 1.25 { 1.31 } else { 1.27 };
+            ZoomFit { at_zoom: z, avail_w: 1000.0 / z, avail_h: 10_000.0 / z, need_w: 1000.0 / raw, need_h: 1.0 }
+        };
+        let (mut f, mut z) = (fresh(), 1.2f32);
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            let o = f.observe(z, 1.6, steady(z));
+            if let FitOutcome::Raise(n) | FitOutcome::Reduce(n) = o {
+                z = n;
+            }
+            seen.push(match o {
+                FitOutcome::Raise(n) => format!("Raise({n:.1})"),
+                FitOutcome::Reduce(n) => format!("Reduce({n:.1})"),
+                o => format!("{o:?}"),
+            });
+        }
+        let mut want = vec!["Raise(1.3)", "Keep", "Reduce(1.2)"];
+        want.extend(["Keep"; 9]);
+        assert_eq!(seen, want, "steady window at a fractional fit");
+        assert!((z - 1.2).abs() < 1e-3);
+        // A resize (the window grows) allows the return again.
+        assert_eq!(f.observe(1.2, 1.6, at(1400.0, 900.0, 1.2)), FitOutcome::Raise(1.6), "resized: return to the chosen zoom");
+    }
+
+    /// Chosen vs effective zoom and the one notice slot (newest replaces, owner-cleared,
+    /// timed copy notice).
+    #[test]
+    fn chosen_zoom_survives_the_clamp_and_one_notice_slot() {
+        let mut p = ViewPreferences::new();
+        p.set_zoom(1.6);
+        p.fit(at(1400.0, 900.0, 1.6));
+        p.fit(at(900.0, 700.0, 1.6));
+        p.fit(at(900.0, 700.0, 1.6));
+        assert_eq!((p.zoom(), p.chosen_zoom(), p.persisted().zoom, p.notice()), (1.0, 1.6, 1.6, "Zoom reduced to 100% to fit window"));
+        let now = Instant::now();
+        p.notify(NoticeOwner::Copy, "Copied offset range", now, Some(COPY_NOTICE_SECS));
+        assert_eq!((p.notice(), p.notice_owner()), ("Copied offset range", Some(NoticeOwner::Copy)), "newest replaces");
+        // Review S1: the copy notice expires while the clamp is current → the reduced notice
+        // returns with the next fit (same window), and stays while the clamp does.
+        p.fit(at(900.0, 700.0, 1.0));
+        assert_eq!(p.notice(), "Copied offset range", "a live copy notice is kept");
+        p.expire_notice(now + Duration::from_secs(COPY_NOTICE_SECS));
+        assert_eq!(p.notice(), "");
+        p.fit(at(900.0, 700.0, 1.0));
+        assert_eq!((p.notice(), p.notice_owner()), ("Zoom reduced to 100% to fit window", Some(NoticeOwner::Zoom)), "clamp still current");
+        p.fit(at(900.0, 700.0, 1.0));
+        assert_eq!(p.notice(), "Zoom reduced to 100% to fit window");
+        p.notify(NoticeOwner::Copy, "Copied offset range", now, Some(COPY_NOTICE_SECS));
+        p.fit(at(1400.0, 900.0, 1.0));
+        assert_eq!((p.zoom(), p.notice()), (1.6, "Copied offset range"), "zoom returns; a copy notice is not the zoom's to clear");
+        p.expire_notice(now + Duration::from_secs(COPY_NOTICE_SECS - 1));
+        assert_eq!(p.notice(), "Copied offset range");
+        p.expire_notice(now + Duration::from_secs(COPY_NOTICE_SECS));
+        assert_eq!(p.notice(), "", "copy notice expires after 4 s");
+        p.clear_notice(NoticeOwner::Zoom);
+        assert_eq!(p.notice_owner(), None);
     }
 }
