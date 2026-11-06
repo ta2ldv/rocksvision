@@ -1,0 +1,47 @@
+# J5 (XCopy, fresh HOME): item 17 narrow windows. Open at 1400x900, select cf_b (L0 + L1), then resize.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+click 583 204
+sleep 0.8
+click 508 272
+sleep 1
+shot j5_00_1400_cfb
+note 900x700 at 100 percent
+winsize 900 700
+sleep 1.5
+winfo
+shot j5_01_900x700_100
+note 900x560 at 100 percent
+winsize 900 560
+sleep 1.5
+winfo
+shot j5_02_900x560_100
+note zoom in x7 with Cmd+= (A+ equivalent)
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 1
+shot j5_03_900x560_zoomed
+note 900x700 zoomed
+winsize 900 700
+sleep 1.5
+winfo
+shot j5_04_900x700_zoomed

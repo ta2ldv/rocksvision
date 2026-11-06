@@ -1,0 +1,14 @@
+# P4 item 4/5 discovery: db-checkpoint copy without 000013.sst, LSM Map.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/missing-sst
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+move 900 650
+sleep 0.4
+shot p4_09_map

@@ -1,0 +1,58 @@
+# J6b: item 3 six themes (map shown, cf_a, 000013 selected+focused). Theme submenu is open from j6a.
+front
+click 472 230
+sleep 1
+move 900 430
+sleep 0.6
+shot j6_01_autistic
+crop j6_01_autistic_top 150 90 1300 130
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 469 253
+sleep 1
+move 900 430
+sleep 0.6
+shot j6_02_matrix
+crop j6_02_matrix_top 150 90 1300 130
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 504 274
+sleep 1
+move 900 430
+sleep 0.6
+shot j6_03_amiga_workbench
+crop j6_03_amiga_workbench_top 150 90 1300 130
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 499 296
+sleep 1
+move 900 430
+sleep 0.6
+shot j6_04_amiga_tool_style
+crop j6_04_amiga_tool_style_top 150 90 1300 130
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 475 340
+sleep 1
+move 900 430
+sleep 0.6
+shot j6_05_wooden
+crop j6_05_wooden_top 150 90 1300 130
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 470 319
+sleep 1
+move 900 430
+sleep 0.6
+shot j6_06_xcopy
+crop j6_06_xcopy_top 150 90 1300 130

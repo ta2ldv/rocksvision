@@ -1,0 +1,23 @@
+# A8: Observed levels table at 1400x900 (bytes shown), Map, Table again
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 207 213
+sleep 0.8
+click 300 524
+sleep 1.2
+move 1380 880
+shot a8_1_table_fresh
+click 557 151
+sleep 1.2
+move 1380 880
+shot a8_2_map
+click 517 151
+sleep 1.2
+move 1380 880
+shot a8_3_table_after_map

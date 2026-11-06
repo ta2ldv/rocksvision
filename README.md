@@ -7,6 +7,10 @@
 
 [English](README.md) · [Türkçe](README.tr.md)
 
+[![RocksVision LSM Map of the multilevel-advanced-db example: WAL files above column family default's levels L0–L2, with SST 000067 selected and its MANIFEST facts in the Explanation](screenshots/lsm-map.png)](screenshots/highres/lsm-map_highres.png)
+
+Explore RocksDB from the LSM tree down to individual bytes: inspect WAL and SST files, see column families and levels recorded in the MANIFEST, and trace decoded fields back to the bytes that hold them.
+
 ## Table of contents
 
 - [About](#about)
@@ -64,7 +68,7 @@ Screenshots of all six themes (previews; each links to its full-resolution file)
 | Menu | Purpose |
 |---|---|
 | File | Open a standalone file or database directory; jump to a byte offset |
-| View | Search, zoom, themes, panel visibility and Reset View |
+| View | Search, zoom, themes, LSM Map, panel visibility, Show Tooltips and Reset View |
 | Help | RocksVision Help and Keyboard Shortcuts |
 | RocksVision (macOS) | About, Hide and Quit |
 
@@ -77,32 +81,49 @@ macOS uses the system menu bar; other platforms use an in-window menu. The follo
 
 ## Usage
 
-Build and launch the application using the instructions below. Then try:
+Build and launch the application using the instructions below. You can open a folder or file with **Open Folder…** / **Open File…**, or type a path and press **Go**.
 
-| Action | Included example |
-|---|---|
-| **Open Folder…** | [`examples/data/basic-db/`](examples/data/basic-db/) — a complete database directory |
-| **Open File…** | [`examples/files/sst-zstd/sst-zstd.sst`](examples/files/sst-zstd/sst-zstd.sst) — one compressed SST |
-| **Open File…** | [`examples/files/wal-plain/000004.log`](examples/files/wal-plain/000004.log) — one WAL, no companion files required |
+### Included examples
 
-You can also enter a path and press **Go**. The [example guide](examples/README.md) covers Bloom filters, index variants, compression, multiple LSM levels, fragmented WALs and clearly labeled corrupt files. Examples are already included; no data-generation step is required.
+- **`examples/data/`** holds complete database folders (CURRENT, MANIFEST, SST and WAL files). Open a scenario folder such as `multilevel-advanced-db` with **Open Folder…**, not the parent `data/` folder.
+- **`examples/files/`** holds single files. Open the `.sst`, `.log`, CURRENT or MANIFEST file itself with **Open File…**.
 
-### How to use the included examples
+Both open without installing or running RocksDB; the generators that produced them are separate developer tooling. The [example guide](examples/README.md) describes every scenario.
 
-There are two kinds of examples:
+### Walkthrough 1: the LSM tree
 
-- **`examples/data/`**: Each subdirectory is a complete database example containing CURRENT, MANIFEST and the scenario’s SST/WAL files. Use **Open Folder…** and select a scenario such as `basic-db` or `multilevel-db`, not the parent `data/` directory. This lets you inspect file relationships and levels recorded in the MANIFEST.
-- **`examples/files/`**: Each subdirectory contains one file for standalone inspection. Use **Open File…** and select the actual `.sst`, `.log`, CURRENT or MANIFEST file, not its containing directory. Standalone SST/WAL inspection needs no running database or companion files; information that requires missing context is not guessed.
+1. **Open Folder…** → [`examples/data/multilevel-advanced-db/`](examples/data/multilevel-advanced-db/).
+2. Press **LSM Map** in the toolbar (⇧⌘M; Ctrl+Shift+M on Windows/Linux).
+3. Choose a column family in the selector above the map.
+4. Hover an SST box or WAL card for a tooltip; click it to show its facts in the Explanation.
+5. Double-click it (or press Enter) to open the file.
+6. **◀ Back** returns to the map. **Table | Map** switches between the map and the levels table.
 
-1. Start with **Open Folder… → `examples/data/basic-db/`**.
-2. Select CURRENT, MANIFEST, an SST or a WAL in the left file list, then expand its structure tree.
-3. Select a row in the center to see the corresponding bytes below and its explanation on the right.
-4. Try **Open File… → `examples/files/sst-zstd/sst-zstd.sst`**. Select a compressed data block and use **show decompressed block** to inspect decoded bytes; use **show file bytes** to return to the stored bytes.
-5. Open **`examples/files/wal-plain/000004.log`** to explore physical WAL records and decoded operations.
+### Walkthrough 2: an SST down to bytes
+
+1. **Open File…** → [`examples/files/sst-zstd/sst-zstd.sst`](examples/files/sst-zstd/sst-zstd.sst).
+2. In the structure tree, select a data block, then select an entry in the table.
+3. Its bytes are highlighted below. The Explanation shows the offset inside the decompressed block and the file range of the compressed block that holds it.
+4. **show file bytes** shows the stored bytes; **show block@0x… (decompressed)** goes back.
+
+An SST inside a database folder also shows `level (MANIFEST)` and `column family (MANIFEST)` rows (and `--dump` prints them) when the folder's CURRENT names a MANIFEST that lists it: external evidence, not stored in the SST. Otherwise the `level` row says why it is unknown, as for this standalone example.
+
+### Walkthrough 3: a WAL
+
+1. **Open File…** → [`examples/files/wal-plain/000004.log`](examples/files/wal-plain/000004.log).
+2. **Physical blocks** lists the stored fragments; **Logical records (reassembled view)** lists the reassembled WriteBatches.
+3. Select a WriteBatch, then one of its operations and its key and value fields.
+4. The byte view shows file offsets (**FILE**); **show record@0x… (reassembled)** switches to record offsets (**RECORD+**).
+
+### Controls at a glance
+
+- **Search:** type in the search field; **Enter** / **Shift+Enter** or **Next** / **Prev** move between matches.
+- **Map vs. app zoom:** when the map is larger than its area, **Center**, **Fit**, **−** and **+** appear above it and move only the map; **A−** / **A+** scale the whole application.
+- **Map keyboard:** while the map has focus, use the arrows to select, **Enter** to open, **Esc** to leave, **0** for Fit and **C** for Center. **LSM Map** (⇧⌘M) gives the map focus again.
+- **Tooltips:** **View → Show Tooltips** turns hover tooltips on or off; the Explanation shows the same facts.
+- **Layout:** **Reset View** restores the panel layout and 100 % zoom.
 
 For comparisons, try `data/bloom-full`, `data/bloom-absent`, `data/index-partitioned`, `data/codec-*` and `data/multilevel-db`. The `files/corrupt-*` samples are intentionally damaged: select the affected element to inspect available **Diagnosis** information. Most examples are valid, not corrupt. The [example guide](examples/README.md) documents scenarios and expected observations.
-
-**You can try RocksVision even if you have never installed RocksDB and do not have a database of your own.** The repository includes small example datasets generated beforehand with real RocksDB 10.4.2. They are ready-made sample files for learning and trying the tool: simply open them in RocksVision. No RocksDB installation, running database or data-generation step is required. RocksVision reads the sample files without changing them.
 
 ### Screen layout
 
@@ -112,7 +133,7 @@ For comparisons, try `data/bloom-full`, `data/bloom-absent`, `data/index-partiti
 |---|---|
 | Left — Navigation | Files; the structure tree in physical file order (each block once, SST Footer last), then labeled views (logical records, observed levels, data blocks via index) |
 | Center top — Records | Fields and records of the selected structure, with its file range, stored size and next structure |
-| Center bottom — Bytes | Offsets (FILE / BLK+ / REC+), hex and ASCII; synchronized with selection in both directions |
+| Center bottom — Bytes | Offsets (FILE / BLOCK+ / RECORD+), hex and ASCII; synchronized with selection in both directions |
 | Right — Explanation | Meaning, where (every address space, file first), diagnosis, derivation and, collapsed, other byte interpretations |
 
 Select a row to highlight its bytes; click a byte to select the field that holds it (the byte stays outlined); **Shift+click** selects a raw range. Double-click a link, handle or reference to go to the structure at its place in the tree; **Back** returns. **]** / **[** step through fields, **Shift+]** / **Shift+[** through structures. **File** offsets and **Decompressed block / Reassembled record** offsets are different address spaces: a reassembled field shows its exact file range(s); a decompressed field only the compressed block that contains it. A standalone SST cannot establish its LSM level without MANIFEST context.
@@ -136,11 +157,13 @@ Scripts check prerequisites, bootstrap missing tools where supported, and build 
 
 Open the macOS `.app` in Finder, run the Windows `.exe`, or launch `./dist/ubuntu-x64/rocksvision` from an Ubuntu desktop session. Each script also produces a ZIP/tar.gz package, build information and SHA-256 checksums under `dist/`. Linux desktop/runtime requirements and setup details are in the [build guide](docs/BUILD.md).
 
-**Verification status:** v0.1.2 was built, packaged and tested by CI on all four platforms (macOS ARM, macOS Intel, Ubuntu, Windows) and released; its packaged macOS ARM app was checked in its GUI. Ubuntu GUI launch is not yet tested. Version 0.1.3 is in development and awaits its CI run.
+**Verification status:** v0.1.2 was built, packaged and tested by CI on all four platforms (macOS ARM, macOS Intel, Ubuntu, Windows) and released; its packaged macOS ARM app was checked in its GUI. Ubuntu GUI launch is not yet tested. Version 0.1.4 is in development (latest release 0.1.3) and awaits its CI run.
 
 ## Status and limitations
 
-Version **0.1.3** is an early inspection tool. Format coverage is not universal; unsupported features and unavailable context must be distinguished from absent or corrupt data. Checks do not guarantee detection of every damaged file.
+Version **0.1.4** (in development; latest release 0.1.3) is an early inspection tool. Format coverage is not universal; unsupported features and unavailable context must be distinguished from absent or corrupt data. Checks do not guarantee detection of every damaged file.
+
+The LSM Map shows the final state the MANIFEST records, not memtable, flush or compaction history, and it shows no link between a WAL and SST files. An SST opened on its own has no level: only its folder's MANIFEST records one. Layouts are verified for RocksDB 10.4.2 on the included examples; the four-platform CI run for the current version is pending.
 
 Known follow-ups include narrow-window paging controls, Matrix toolbar clipping, and propagation of incomplete WAL-fragment diagnostics to the root summary. macOS packages are ad-hoc signed, not notarized. See the [build guide](docs/BUILD.md) for platform-specific limitations.
 

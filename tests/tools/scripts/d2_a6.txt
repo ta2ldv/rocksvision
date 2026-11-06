@@ -1,0 +1,13 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+click 592 204
+sleep 0.8
+shot {{TAG}}_dropdown

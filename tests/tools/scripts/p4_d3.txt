@@ -1,0 +1,10 @@
+# P4 item 7 part 3: (CURRENT of the scratch copy deleted outside) Back, then status.
+front
+shot p4_16_before_back
+click 462 150
+sleep 2
+move 900 750
+sleep 0.4
+shot p4_16_after_back
+crop p4_16_status 164 948 900 30
+crop p4_16_toolbar 420 135 500 55

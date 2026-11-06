@@ -1,0 +1,8 @@
+front
+click 619 120
+key a cmd
+type {{DIR}}/examples/files/sst-zstd/sst-zstd.sst
+click 773 120
+sleep 2.0
+move 1380 880
+shot w2_0_open

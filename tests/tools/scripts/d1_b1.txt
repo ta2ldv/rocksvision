@@ -1,0 +1,30 @@
+front
+click 211 296
+sleep 1
+move 1380 880
+sleep 0.5
+shot b1_0_wal_open
+move 535 426
+shot b1_trunc_t0
+sleep 0.3
+shot b1_trunc_t1
+sleep 1.0
+shot b1_trunc_t2
+move 560 426
+sleep 0.6
+shot b1_trunc_move_in_row
+move 1380 880
+sleep 0.5
+move 611 258
+sleep 0.6
+shot b1_header_t1
+sleep 1.0
+shot b1_header_t2
+move 1380 880
+sleep 0.5
+move 451 397
+sleep 0.6
+shot b1_blocks_t1
+sleep 1.0
+shot b1_blocks_t2
+move 1380 880

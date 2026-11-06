@@ -18,13 +18,19 @@ pub struct JobState {
     scan: Option<(u64, bool)>,
     /// Change-on-disk stat in flight.
     stat: Option<u64>,
+    /// WAL summary job in flight (0026 item 4; its replies also carry the file generation).
+    wal_scan: Option<u64>,
     /// The copy in flight and its gate.
     clip: ClipboardState,
 }
 
 impl JobState {
     pub(super) fn new(worker: Worker) -> Self {
-        JobState { worker, resolve: None, scan: None, stat: None, clip: ClipboardState::default() }
+        JobState { worker, resolve: None, scan: None, stat: None, wal_scan: None, clip: ClipboardState::default() }
+    }
+    /// A WAL summary job is running.
+    pub fn wal_scanning(&self) -> bool {
+        self.wal_scan.is_some()
     }
 
     pub fn resolving(&self) -> bool {
@@ -73,6 +79,10 @@ impl JobState {
     pub(super) fn stat(&mut self, generation: u64, path: PathBuf) {
         self.stat = Some(self.worker.io(generation, IoRequest::Stat(path)));
     }
+    /// Starts the bounded WAL summaries of `files` (one job, one reply per file).
+    pub(super) fn wal_summaries(&mut self, generation: u64, files: Vec<PathBuf>) {
+        self.wal_scan = Some(self.worker.io(generation, IoRequest::WalSummaries(files)));
+    }
     /// Copy through the I/O pool for selection epoch `sel` (text or physical bytes); the gate
     /// records it as the copy in flight. Returns the request id.
     pub(super) fn copy(&mut self, generation: u64, sel: u64, job: CopyJob) -> u64 {
@@ -97,6 +107,7 @@ impl JobState {
     pub(super) fn cancel_file_jobs(&mut self) {
         self.worker.cancel_file_jobs();
         self.stat = None;
+        self.wal_scan = None;
         self.clip.cancelled();
     }
     pub(super) fn cancel_search(&self) {
@@ -128,6 +139,24 @@ impl JobState {
     }
     pub(super) fn finish_scan(&mut self) {
         self.scan = None;
+    }
+    /// `req` is the WAL summary job in flight (not cleared: it answers once per file).
+    pub(super) fn wal_scan_matches(&self, req: u64) -> bool {
+        self.wal_scan == Some(req)
+    }
+    /// The WAL summary job ended (every file answered, failed or cancelled); true if one was
+    /// in flight.
+    pub(super) fn finish_wal_scan(&mut self) -> bool {
+        self.wal_scan.take().is_some()
+    }
+    /// No file waits for the summary job any more (its inventory was replaced): cancel it so it
+    /// stops reading, and forget it (D3 N8). True if one was in flight.
+    pub(super) fn abandon_wal_scan(&mut self) -> bool {
+        let had = self.wal_scan.take().is_some();
+        if had {
+            self.worker.cancel_wal_summaries();
+        }
+        had
     }
     pub(super) fn take_stat(&mut self, req: u64) -> bool {
         let ok = self.stat == Some(req);

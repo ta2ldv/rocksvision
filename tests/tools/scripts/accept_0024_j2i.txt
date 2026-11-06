@@ -1,0 +1,20 @@
+# J2i: Fit from x2.2, then + at x1 at offsets 1162,1170,1178 (one click each) with crops.
+front
+click 1183 204
+sleep 0.6
+move 900 420
+sleep 0.8
+shot j2i_01
+crop j2i_01_after_fit 420 190 1180 40
+click 1170 204
+sleep 0.6
+move 900 430
+sleep 0.8
+shot j2i_02
+crop j2i_02_plus_1170 420 190 1180 40
+click 1176 204
+sleep 0.6
+move 900 420
+sleep 0.8
+shot j2i_03
+crop j2i_03_plus_1176 420 190 1180 40

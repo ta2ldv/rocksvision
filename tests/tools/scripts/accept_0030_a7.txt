@@ -1,0 +1,43 @@
+# 0030 phase 2 DRAFT A7 SST with MANIFEST context. Assumes rows "level (MANIFEST)" / "column family (MANIFEST)" (Implicit, explain line),
+# "Show in LSM Map >" link, single-file wording "unknown here (opened as a single file); Open Folder... on its directory shows the MANIFEST level",
+# no stale context after opening another folder.
+# Placeholders: DIR (advanced example), OTHERDIR (any other folder), FILE_SST (an SST inside DIR for Open File), EXFILE (examples/files/sst-zstd/sst-zstd.sst),
+#   PATHX PATHY GOX GOY (folder), OPENFILEX OPENFILEY, SSTX SSTY (000085.sst or any SST row in the folder list), LEVELX LEVELY (the level row), PARKX PARKY
+front
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+note A7.1 double-click an SST in the folder list: expect level (MANIFEST) + column family (MANIFEST)
+dclick {{SSTX}} {{SSTY}}
+sleep 1.5
+move {{PARKX}} {{PARKY}}
+shot a7_1_sst_with_context
+click {{LEVELX}} {{LEVELY}}
+sleep 0.8
+move {{PARKX}} {{PARKY}}
+shot a7_2_level_row_selected
+note A7.2 open another folder: no stale context
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{OTHERDIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+shot a7_3_other_folder
+note A7.3 Open File on an SST without its folder loaded (type the path into the path bar as a file): single-file wording
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{FILE_SST}}
+click {{GOX}} {{GOY}}
+sleep 2.0
+move {{PARKX}} {{PARKY}}
+shot a7_4_single_file_in_db_dir
+note A7.4 examples/files SST: standalone wording
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{EXFILE}}
+click {{GOX}} {{GOY}}
+sleep 2.0
+move {{PARKX}} {{PARKY}}
+shot a7_5_examples_files_sst

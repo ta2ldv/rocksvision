@@ -1,0 +1,13 @@
+# open DIR (--set DIR=...), show map; shots {{TAG}}_early / {{TAG}}_settled
+front
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 446 118
+sleep 0.3
+shot {{TAG}}_early
+sleep 4
+move 700 900
+shot {{TAG}}_settled

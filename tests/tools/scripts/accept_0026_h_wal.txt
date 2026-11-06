@@ -1,0 +1,19 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-wal
+key return
+sleep 3
+click 446 118
+sleep 6
+move 700 900
+shot h3_many_wal_1400
+click 1171 277
+sleep 0.6
+move 700 900
+shot h3_many_wal_sel_newest
+move 1171 277
+sleep 2.3
+shot h3_many_wal_tooltip_edge_right

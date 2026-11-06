@@ -1,0 +1,34 @@
+# J3a (XCopy, fresh HOME): item 10 disabled-button tooltips.
+front
+winsize 1400 900
+sleep 1
+note CASE lone SST
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/lone/000009.sst
+click 773 120
+sleep 2.5
+move 443 119
+sleep 1.8
+shot j3_01_lone
+crop j3_01_lone_crop 150 90 1000 160
+note CASE folder without CURRENT or MANIFEST
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/nocurrent
+click 773 120
+sleep 2.5
+move 443 119
+sleep 1.8
+shot j3_02_nocurrent
+crop j3_02_nocurrent_crop 150 90 1000 160
+note CASE CURRENT names a missing MANIFEST
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/nomanifest
+click 773 120
+sleep 2.5
+move 443 119
+sleep 1.8
+shot j3_03_nomanifest
+crop j3_03_nomanifest_crop 150 90 1000 160

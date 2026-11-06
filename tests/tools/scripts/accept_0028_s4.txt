@@ -1,0 +1,11 @@
+front
+click 621 610
+sleep 1
+dclick 621 610
+sleep 3
+move 700 930
+shot g06_sst_000085_opened
+click 462 150
+sleep 2
+move 700 930
+shot g07_back_map_restored

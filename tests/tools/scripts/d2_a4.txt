@@ -1,0 +1,11 @@
+front
+move 449 279
+sleep 1.4
+shot a4_1_before_hover
+drag 449 279 600 279
+sleep 0.8
+move 600 279
+sleep 1.4
+shot a4_2_after_drag
+move 880 680
+shot a4_3_after_park

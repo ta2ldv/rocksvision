@@ -1,0 +1,19 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/unknown-cmp
+click 773 120
+sleep 2.5
+click 446 118
+sleep 3
+move 700 880
+shot j6_01_map
+move 600 460
+sleep 2
+shot j6_02_hover_between
+click 760 460
+sleep 1
+move 700 880
+shot j6_03_select

@@ -1,0 +1,16 @@
+# choose cf_two, shot cards, hover + select the cards
+front
+click 490 250
+sleep 1.0
+move 1380 880
+shot a6_7_cf_two
+move 518 283
+sleep 1.3
+shot a6_8_tip_000011_cf_two
+click 518 283
+sleep 0.8
+move 1380 880
+shot a6_9_sel_000011_cf_two
+click 680 283
+sleep 0.8
+shot a6_10_sel_000014_cf_two

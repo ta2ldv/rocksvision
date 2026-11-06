@@ -1,0 +1,17 @@
+front
+click 445 120
+sleep 1.2
+winsize 900 588
+sleep 1.8
+move 800 560
+shot a1_1_900x588_entry
+sleep 2
+shot a1_2_900x588_entry_b
+click 608 227
+sleep 1
+move 800 560
+shot a1_3_after_fit
+click 1102 204
+sleep 1
+move 800 560
+shot a1_3b_after_fit_btn

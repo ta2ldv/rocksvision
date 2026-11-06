@@ -1,0 +1,28 @@
+# R10: item 9 (smallest box selectable at x1, cf_events 000026) and item 11 (XCopy / Amiga Tool Style map).
+front
+note ITEM9 click smallest box 000026 at x1 (cf_events)
+click 756 259
+sleep 0.8
+move 900 600
+sleep 0.6
+shot r10_01_xcopy_map_selected
+crop r10_01_top 150 90 1300 260
+note ITEM11 theme Amiga Tool Style
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 499 296
+sleep 1
+move 900 600
+sleep 0.6
+shot r10_02_amiga_tool_style_map
+crop r10_02_top 150 90 1300 260
+note ITEM11 back to XCopy
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 470 319
+sleep 1
+shot r10_03_xcopy_again

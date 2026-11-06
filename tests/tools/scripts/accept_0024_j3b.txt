@@ -1,0 +1,13 @@
+# J3b: item 11 missing SST.
+front
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/missing-sst
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+move 900 430
+sleep 0.5
+shot j3_04_missing_map
+crop j3_04_missing_strip 395 125 760 190

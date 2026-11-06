@@ -1,0 +1,42 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click 773 120
+sleep 2.5
+click 446 118
+sleep 3
+click 592 204
+sleep 0.7
+click 501 251
+sleep 1.2
+move 700 800
+sleep 0.4
+shot a1_00_map
+move 700 800
+shot a1_top_before
+move 743 410
+sleep 2
+shot a1_top_after
+move 700 800
+shot a1_bottom_before
+move 830 458
+sleep 2
+shot a1_bottom_after
+move 700 800
+shot a1_left_before
+move 460 406
+sleep 2
+shot a1_left_after
+move 700 800
+shot a1_right_before
+move 1195 458
+sleep 2
+shot a1_right_after
+move 700 800
+shot a1_wal_before
+move 518 294
+sleep 2
+shot a1_wal_after

@@ -1,0 +1,11 @@
+front
+move 700 900
+shot g_axis_0_before
+drag 880 242 700 242
+sleep 0.8
+move 700 900
+shot g_axis_1_after_drag_in_outline
+click 1100 242
+sleep 0.8
+move 700 900
+shot g_axis_2_after_click_outside_outline

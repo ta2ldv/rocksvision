@@ -1,0 +1,5 @@
+front
+winsize 1400 900
+sleep 3
+move 700 700
+shot a6e_01_4100_wide

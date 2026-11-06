@@ -1,0 +1,6 @@
+front
+winsize 1400 900
+sleep 1
+winfo
+move 700 880
+shot g00_start

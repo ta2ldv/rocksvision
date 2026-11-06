@@ -90,6 +90,8 @@ pub enum NoticeOwner {
     Reset,
     /// Copy confirmation or copy message ("Copied …", "Copying…", "Nothing selected…"; timed).
     Copy,
+    /// Navigation message: Back with an empty history ("No previous view"; timed).
+    Nav,
 }
 
 /// The one transient status-bar notice and its owner and expiry.
@@ -186,6 +188,15 @@ impl ZoomFitter {
     }
 }
 
+/// Which records / bytes split applies to the center column (0030 A8): the file views' table,
+/// the levels view's Table mode, or the LSM Map. Each keeps its own user split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitRole {
+    Records,
+    LevelsTable,
+    Map,
+}
+
 #[derive(Debug)]
 pub struct ViewPreferences {
     /// Stable id of the active theme (resolved against the UI registry).
@@ -196,8 +207,15 @@ pub struct ViewPreferences {
     /// Out / Actual Size / SetZoom / Reset View set it (0020 UI ruling, zoom return).
     chosen_zoom: f32,
     fitter: ZoomFitter,
-    /// Records share of the center column (bytes below); session-only.
-    center_split: f32,
+    /// The user's records share of the file views (bytes below; None: `CENTER_SPLIT_DEFAULT`
+    /// with the byte-pane content cap, 0030 A8-2); session-only.
+    center_split: Option<f32>,
+    /// The user's split while the LSM Map is shown (0026 D2 F2); None: the map takes all but
+    /// the byte pane's minimum. Session-only; Table / other views keep `center_split`.
+    map_split: Option<f32>,
+    /// The user's split of the levels view in Table mode (0030 A8); None: the table gets what
+    /// all its rows need, the bytes keeping what they keep under the Map. Session-only.
+    levels_split: Option<f32>,
     /// The one transient status-bar notice (zoom, Reset View, copy).
     notice: TransientNotice,
     show_shortcuts: bool,
@@ -210,6 +228,8 @@ pub struct ViewPreferences {
     layout_epoch: u32,
     /// Show the table columns that are hidden for lack of width ("+N columns"); session-only.
     all_columns: bool,
+    /// View › Show Tooltips (persisted; default on).
+    tooltips: bool,
 }
 
 impl ViewPreferences {
@@ -219,7 +239,9 @@ impl ViewPreferences {
             zoom: 1.0,
             chosen_zoom: 1.0,
             fitter: ZoomFitter::new(ZoomPolicy::DEFAULT),
-            center_split: CENTER_SPLIT_DEFAULT,
+            center_split: None,
+            map_split: None,
+            levels_split: None,
             notice: TransientNotice::default(),
             show_shortcuts: false,
             show_about: false,
@@ -229,7 +251,16 @@ impl ViewPreferences {
             show_hex: true,
             layout_epoch: 0,
             all_columns: false,
+            tooltips: true,
         }
+    }
+
+    /// App-owned contextual tooltips are shown (View › Show Tooltips).
+    pub fn tooltips(&self) -> bool {
+        self.tooltips
+    }
+    pub(super) fn set_tooltips(&mut self, on: bool) {
+        self.tooltips = on;
     }
 
     /// The user asked to show every table column even when they do not fit.
@@ -257,8 +288,19 @@ impl ViewPreferences {
     pub fn zoom_ceiling(&self) -> f32 {
         self.fitter.ceiling
     }
+    /// The file views' effective records ratio (kept for the integration tests; the read API of
+    /// the splits is `split(role)`, architect N8).
     pub fn center_split(&self) -> f32 {
-        self.center_split
+        self.center_split.unwrap_or(CENTER_SPLIT_DEFAULT)
+    }
+    /// The user's records share for a split role; None: that role's automatic split
+    /// (None for every role the user has not dragged).
+    pub fn split(&self, role: SplitRole) -> Option<f32> {
+        match role {
+            SplitRole::Records => self.center_split,
+            SplitRole::LevelsTable => self.levels_split,
+            SplitRole::Map => self.map_split,
+        }
     }
     /// The one transient status-bar notice (zoom, Reset View or copy), or "".
     pub fn notice(&self) -> &str {
@@ -306,16 +348,23 @@ impl ViewPreferences {
     /// Visibility, split and zoom are at their Reset View defaults (panel widths are UI memory
     /// and checked by the shell).
     pub fn is_default_layout(&self) -> bool {
-        self.show_left && self.show_right && self.show_hex && !self.all_columns && (self.chosen_zoom - 1.0).abs() < 1e-4 && (self.center_split - CENTER_SPLIT_DEFAULT).abs() < 1e-4
+        self.show_left
+            && self.show_right
+            && self.show_hex
+            && !self.all_columns
+            && (self.chosen_zoom - 1.0).abs() < 1e-4
+            && self.center_split.is_none()
+            && self.map_split.is_none()
+            && self.levels_split.is_none()
     }
     /// True if Zoom In would change the zoom (toolbar/menu enabled state).
     pub fn can_zoom_in(&self) -> bool {
         let p = self.fitter.policy;
         p.zoom_in(self.zoom) <= self.fitter.ceiling + 1e-3 && self.zoom < p.max - 1e-3
     }
-    /// The persisted subset (theme id + the chosen zoom, never the clamped one).
+    /// The persisted subset (theme id, the chosen zoom — never the clamped one — and tooltips).
     pub fn persisted(&self) -> Prefs {
-        Prefs { theme: self.theme_id.to_string(), zoom: self.chosen_zoom }
+        Prefs { theme: self.theme_id.to_string(), zoom: self.chosen_zoom, tooltips: self.tooltips }
     }
 
     /// Sets the one transient notice (replaces any older one). `secs`: timed, else untimed.
@@ -419,11 +468,24 @@ impl ViewPreferences {
     pub fn zoom_fit_pending(&self) -> bool {
         self.fitter.over_frames > 0
     }
-    pub(super) fn set_center_split(&mut self, r: f32) {
-        self.center_split = r.clamp(0.0, 1.0);
+    /// A split drag: stored for the role shown (file views' table, levels table or LSM Map);
+    /// the other roles keep theirs, so switching restores them (0026 D2 F2, 0030 A8).
+    pub(super) fn set_split(&mut self, role: SplitRole, r: f32) {
+        let r = r.clamp(0.0, 1.0);
+        match role {
+            SplitRole::Records => self.center_split = Some(r),
+            SplitRole::LevelsTable => self.levels_split = Some(r),
+            SplitRole::Map => self.map_split = Some(r),
+        }
     }
-    pub(super) fn reset_center_split(&mut self) {
-        self.center_split = CENTER_SPLIT_DEFAULT;
+    /// Double-click on the split handle (0030 A8-5): only the role shown goes back to its
+    /// automatic split; the others (e.g. the Map's) are kept. Reset View resets all.
+    pub(super) fn reset_split(&mut self, role: SplitRole) {
+        match role {
+            SplitRole::Records => self.center_split = None,
+            SplitRole::LevelsTable => self.levels_split = None,
+            SplitRole::Map => self.map_split = None,
+        }
     }
     pub(super) fn set_show_shortcuts(&mut self, b: bool) {
         self.show_shortcuts = b;
@@ -448,7 +510,9 @@ impl ViewPreferences {
         self.show_left = true;
         self.show_right = true;
         self.show_hex = true;
-        self.center_split = CENTER_SPLIT_DEFAULT;
+        self.center_split = None;
+        self.map_split = None;
+        self.levels_split = None;
         self.zoom = 1.0;
         self.chosen_zoom = 1.0;
         self.all_columns = false;

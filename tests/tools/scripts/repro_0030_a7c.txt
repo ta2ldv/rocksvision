@@ -1,0 +1,6 @@
+# 0030 P1 item 4: select the level row to read the full text in the explanation panel
+front
+click 448 411
+sleep 0.8
+move 1380 900
+shot a7_2_level_selected

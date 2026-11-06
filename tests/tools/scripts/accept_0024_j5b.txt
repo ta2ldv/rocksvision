@@ -1,0 +1,30 @@
+# J5b: same run: enlarge window, zoom to 160 percent (or ceiling), then shrink -> clamped.
+front
+winsize 1400 900
+sleep 1.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 1
+shot j5b_00_1400_zoomed
+note shrink to 900x700 with high chosen zoom
+winsize 900 700
+sleep 2
+shot j5b_01_900x700_clamped
+winsize 900 560
+sleep 2
+winfo
+shot j5b_02_900x560_clamped
+move 1010 148
+sleep 1.8
+shot j5b_03_hover_disabled_aplus

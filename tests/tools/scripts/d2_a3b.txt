@@ -1,0 +1,16 @@
+front
+move 826 406
+sleep 1.3
+shot a3_2_bar_hover
+click 826 406
+sleep 1.0
+move 1380 880
+shot a3_3_click1
+click 826 406
+sleep 1.0
+move 1380 880
+shot a3_4_click2
+click 826 406
+sleep 1.0
+move 1380 880
+shot a3_5_click3

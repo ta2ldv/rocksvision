@@ -9,7 +9,7 @@
 //! only Shift+click extends; a press-and-drag selects nothing (no text selection, no drag
 //! capture, no scroll-to-cursor animation).
 
-use super::{PanelMemory, strong};
+use super::{PanelMemory, TipExt, strong};
 use crate::app::hex::{HexState, PageState};
 use crate::app::provenance;
 use crate::app::{Action, AppState, Panel};
@@ -149,7 +149,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMemor
 }
 
 fn hide_button(ui: &mut egui::Ui, acts: &mut Vec<Action>) {
-    if ui.small_button("Hide bytes").on_hover_text(menu::tip("Hide the byte view", MenuCmd::TogglePanel(Panel::Bytes))).clicked() {
+    if ui.small_button("Hide bytes").tip(menu::tip("Hide the byte view", MenuCmd::TogglePanel(Panel::Bytes))).clicked() {
         acts.push(Action::TogglePanel(Panel::Bytes));
     }
 }
@@ -198,7 +198,7 @@ fn group_space(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Ac
             ui.add(egui::Label::new(RichText::new(word).color(tint).strong()).extend().selectable(false));
         })
         .response
-        .on_hover_text(tip);
+        .tip(tip);
     // Space switcher: file vs derived spaces of the current view.
     let spaces: Vec<SpaceInfo> = st.session().view().map(|v| v.spaces.clone()).unwrap_or_default();
     if !spaces.is_empty() {
@@ -206,7 +206,7 @@ fn group_space(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Ac
             acts.push(Action::HexShowSpace(Space::File));
         }
         for s in spaces {
-            if hex.space() != s.space && ui.small_button(format!("show {}", s.space.label())).on_hover_text(&s.title).clicked() {
+            if hex.space() != s.space && ui.small_button(format!("show {}", s.space.label())).tip(&s.title).clicked() {
                 acts.push(Action::HexShowSpace(s.space));
             }
         }
@@ -272,9 +272,9 @@ fn group_paging(ui: &mut egui::Ui, space: Space, base: u64, size: u64, acts: &mu
     let next_w = (width(next, egui::TextStyle::Button) + pad).max(LAYOUT.glyph_button[0]);
     let label_text_w = width(label, egui::TextStyle::Body);
     let button = |s: &str| egui::Button::new(s).min_size(egui::vec2(LAYOUT.glyph_button[0], LAYOUT.glyph_button[1]));
-    let r = ui.add_enabled(t.prev.is_some(), button(prev)).on_disabled_hover_text("First page");
+    let r = ui.add_enabled(t.prev.is_some(), button(prev)).tip_disabled("First page");
     if let Some((to, tip)) = &t.prev
-        && r.on_hover_text(tip).clicked()
+        && r.tip(tip).clicked()
     {
         acts.push(Action::HexPage(*to));
     }
@@ -283,13 +283,13 @@ fn group_paging(ui: &mut egui::Ui, space: Space, base: u64, size: u64, acts: &mu
         // reachable.
         let room = (ui.available_width() - next_w - ui.spacing().item_spacing.x - PACK_SLACK).max(0.0);
         let label_w = label_text_w.min(room);
-        ui.allocate_ui(egui::vec2(label_w, ui.spacing().interact_size.y), |ui| ui.add(egui::Label::new(label.as_str()).truncate()).on_hover_text(&t.tip));
+        ui.allocate_ui(egui::vec2(label_w, ui.spacing().interact_size.y), |ui| ui.add(super::Elided::new(egui::Label::new(label.as_str())).tip(t.tip.as_str())));
     } else {
-        ui.add(egui::Label::new(label.as_str()).wrap_mode(egui::TextWrapMode::Extend)).on_hover_text(&t.tip);
+        ui.add(egui::Label::new(label.as_str()).wrap_mode(egui::TextWrapMode::Extend)).tip(&t.tip);
     }
-    let r = ui.add_enabled(t.next.is_some(), button(next)).on_disabled_hover_text("Last page");
+    let r = ui.add_enabled(t.next.is_some(), button(next)).tip_disabled("Last page");
     if let Some((to, tip)) = &t.next
-        && r.on_hover_text(tip).clicked()
+        && r.tip(tip).clicked()
     {
         acts.push(Action::HexPage(*to));
     }
@@ -300,7 +300,7 @@ fn group_paging(ui: &mut egui::Ui, space: Space, base: u64, size: u64, acts: &mu
 fn group_goto(ui: &mut egui::Ui, st: &AppState, acts: &mut Vec<Action>) {
     let mut goto = st.session().hex().goto().to_string();
     let tip = menu::tip("Go to Offset", MenuCmd::GotoOffset);
-    let r = ui.add(egui::TextEdit::singleline(&mut goto).hint_text("Go to offset (0x… or decimal)").desired_width(LAYOUT.goto_width).id(egui::Id::new(GOTO_ID))).on_hover_text(tip);
+    let r = ui.add(egui::TextEdit::singleline(&mut goto).hint_text("Go to offset (0x… or decimal)").desired_width(LAYOUT.goto_width).id(egui::Id::new(GOTO_ID))).tip(tip);
     if r.changed() {
         acts.push(Action::SetGoto(goto));
     }
@@ -483,7 +483,7 @@ fn show_bytes(
                     Space::File => format!("{pos} ({off})"),
                     _ => format!("{pos} (not a file offset)"),
                 };
-                let resp = resp.clone().on_hover_ui_at_pointer(|ui| {
+                let resp = resp.clone().tip_ui(|ui| {
                     ui.monospace(format!("{where_}\nbyte 0x{b:02x} = {b} = 0b{b:08b} = '{}'", if (0x20..0x7f).contains(&b) { b as char } else { '·' }));
                     if let Some(o) = owner(off) {
                         ui.label(o);

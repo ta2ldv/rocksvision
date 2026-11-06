@@ -163,7 +163,7 @@ fn bloom_and_index_scenarios_show_their_structure() {
     assert!(t.contains("data-block hash index present"));
 }
 
-const DATA: [&str; 18] = [
+const DATA: [&str; 19] = [
     "basic-db",
     "bloom-full",
     "bloom-partitioned",
@@ -179,6 +179,7 @@ const DATA: [&str; 18] = [
     "codec-lz4hc",
     "codec-zstd",
     "multilevel-db",
+    "multilevel-advanced-db",
     "wal-basic",
     "wal-fragmented",
     "wal-recycled",
@@ -221,6 +222,7 @@ fn data_scenarios_current_resolves_manifest_and_every_file_dumps() {
         match scn {
             "wal-basic" | "wal-fragmented" => assert_eq!(sst_rows, 0, "{scn}: WAL-only"),
             "multilevel-db" => assert_eq!(sst_rows, 7),
+            "multilevel-advanced-db" => assert_eq!(sst_rows, 27),
             "wal-recycled" => assert_eq!(sst_rows, 6),
             _ => assert_eq!(sst_rows, 1, "{scn}"),
         }

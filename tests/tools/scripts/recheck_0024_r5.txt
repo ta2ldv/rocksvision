@@ -1,0 +1,33 @@
+# R5: db-levels (open). ITEM5 map -> tree root -> tree node = table. ITEM7 + right after CF choice.
+front
+note ITEM5 LSM Map button
+click 443 119
+sleep 2
+shot r5_01_map
+note ITEM5 tree root then Observed levels node
+click 240 503
+sleep 1.5
+shot r5_02_root
+click 313 524
+sleep 1.5
+shot r5_03_tree_node
+note ITEM7 Map segment, choose cf_users, plus x3
+click 557 151
+sleep 1.5
+shot r5_04_map
+click 583 204
+sleep 0.8
+click 508 252
+sleep 0.2
+click 1170 204
+sleep 0.6
+shot r5_05_plus1
+crop r5_05_strip 420 190 1180 40
+click 1170 204
+sleep 0.6
+shot r5_06_plus2
+crop r5_06_strip 420 190 1180 40
+click 1170 204
+sleep 0.6
+shot r5_07_plus3
+crop r5_07_strip 420 190 1180 40

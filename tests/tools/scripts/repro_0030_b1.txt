@@ -1,0 +1,30 @@
+# 0030 P1 item 1: WAL table double tooltip; 000150.log open in pid. Window at 164,76 1400x900. No clicks while hovering.
+front
+move 1380 900
+sleep 0.5
+note B1 truncated cell "log number (from fil..." pointer stops (move itself includes 0.15 s settle)
+move 535 426
+shot b1_trunc_t0
+sleep 0.3
+shot b1_trunc_t1
+sleep 0.7
+shot b1_trunc_t2
+move 1380 900
+sleep 0.5
+note B1 header cell Status
+move 611 258
+shot b1_header_t0
+sleep 0.3
+shot b1_header_t1
+sleep 1.0
+shot b1_header_t2
+move 1380 900
+sleep 0.5
+note B1 non-truncated cell blocks
+move 451 397
+shot b1_blocks_t0
+sleep 0.3
+shot b1_blocks_t1
+sleep 1.0
+shot b1_blocks_t2
+move 1380 900

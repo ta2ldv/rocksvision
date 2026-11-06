@@ -1,0 +1,21 @@
+# J3c: item 11: cf_a, dashed missing box 000013 (lane 1), click, double-click.
+front
+click 583 204
+sleep 0.8
+click 508 252
+sleep 1
+move 900 430
+sleep 0.5
+shot j3_05_cfa
+crop j3_05_map 395 125 760 190
+note SINGLE click missing box
+click 972 292
+sleep 1
+move 900 430
+sleep 0.5
+shot j3_06_missing_selected
+crop j3_06_map 395 125 760 190
+note DOUBLE click missing box
+dclick 972 292
+sleep 2
+shot j3_07_after_dclick

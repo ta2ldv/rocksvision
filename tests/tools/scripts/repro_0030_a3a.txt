@@ -1,0 +1,7 @@
+# 0030 P1 item 5: map at 900x700 via toolbar LSM Map, no hover over the map, shot TAG
+front
+click 445 120
+sleep 1.5
+move 900 690
+sleep 0.5
+shot {{TAG}}

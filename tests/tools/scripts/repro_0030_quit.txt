@@ -1,0 +1,4 @@
+# quit the bound (own) app
+front
+key q cmd
+sleep 1

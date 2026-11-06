@@ -1,0 +1,12 @@
+# open DIR via the path bar at window size W x H, then shot TAG. Assumes the window sits at 164,76 (winsize keeps position).
+front
+winsize {{W}} {{H}}
+sleep 1
+winfo
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+move 1380 880
+shot {{TAG}}

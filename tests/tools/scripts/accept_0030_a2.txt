@@ -1,0 +1,57 @@
+# 0030 phase 2 DRAFT A2 keyboard-only route. Assumes: Shift+Cmd+M focuses the map (also when already shown), focus ring on the map,
+# status-bar focus hint, Up from L0 -> newest WAL, Enter opens, Back restores map focus, Tab leaves the ring, View > Show Tooltips.
+# Placeholders: DIR, TAG, PATHX PATHY GOX GOY (folder open), SEL_CURRENTX SEL_CURRENTY (CURRENT in the folder list), PARKX PARKY, BACKX BACKY
+front
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{SEL_CURRENTX}} {{SEL_CURRENTY}}
+sleep 0.8
+note A2.1 Shift+Cmd+M: ring visible, no mouse click on the map
+key m cmd shift
+sleep 1.2
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_1_ring
+note A2.2 Up: newest WAL selected
+key up
+sleep 0.6
+shot {{TAG}}_2_up
+note A2.3 Enter: WAL opens
+key return
+sleep 1.2
+shot {{TAG}}_3_enter
+note A2.4 Back: map with ring, arrows work at once
+click {{BACKX}} {{BACKY}}
+sleep 1.0
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_4_back
+key down
+sleep 0.5
+shot {{TAG}}_5_arrow_after_back
+note A2.5 Tab x2: ring gone
+key tab
+key tab
+sleep 0.5
+shot {{TAG}}_6_tab2
+note A2.6 Shift+Cmd+M again: ring back, pick kept
+key m cmd shift
+sleep 0.8
+shot {{TAG}}_7_refocus
+note A2.8 old failing sequence (P7 variant 3 of 0026): Shift+Cmd+M, Up, Enter, Back, arrows; then Tab Tab, Shift+Cmd+M, arrows
+key up
+key return
+sleep 1.0
+click {{BACKX}} {{BACKY}}
+sleep 0.8
+key left
+sleep 0.4
+shot {{TAG}}_8_old_seq_a
+key tab
+key tab
+key m cmd shift
+sleep 0.6
+key right
+sleep 0.4
+shot {{TAG}}_9_old_seq_b

@@ -1,0 +1,15 @@
+front
+click 236 494
+sleep 0.7
+move 700 800
+sleep 0.5
+move 498 280
+sleep 2.5
+shot j3_off_hover_wal
+move 900 462
+sleep 2.5
+shot j3_off_hover_box
+click 864 458
+sleep 1
+move 700 800
+shot j3_off_explanation

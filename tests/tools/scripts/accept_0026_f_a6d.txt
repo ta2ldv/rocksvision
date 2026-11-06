@@ -1,0 +1,13 @@
+front
+click 700 119
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-sst-4100
+key return
+sleep 8
+click 446 118
+sleep 8
+move 400 640
+shot a6d_01_4100
+wheel 575 423 0 -200
+sleep 1
+shot a6d_02_scroll

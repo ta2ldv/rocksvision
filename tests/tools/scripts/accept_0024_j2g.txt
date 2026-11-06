@@ -1,0 +1,20 @@
+# J2g: mouse test of strip buttons at x2.2: minus, then plus, then Fit (coordinates from j2e_02 shot, strip layout at x2.2).
+front
+click 1130 204
+sleep 0.6
+move 900 420
+sleep 0.8
+shot j2g_01
+crop j2g_01_after_minus 420 190 1180 40
+click 1155 204
+sleep 0.6
+move 900 430
+sleep 0.8
+shot j2g_02
+crop j2g_02_after_plus 420 190 1180 40
+click 1183 204
+sleep 0.6
+move 900 420
+sleep 0.8
+shot j2g_03
+crop j2g_03_after_fit 420 190 1180 40

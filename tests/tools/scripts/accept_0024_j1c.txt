@@ -1,0 +1,8 @@
+# J1c: Cmd+M minimizes (item 5); popup closed first.
+front
+key esc
+sleep 0.5
+note ITEM5 Cmd+M (combo closed)
+key m cmd
+sleep 1.5
+shot j1c_02_after_cmd_m

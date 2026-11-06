@@ -1,0 +1,19 @@
+front
+click 875 613
+sleep 0.8
+move 1380 880
+shot san_1_box_clicked
+click 592 204
+sleep 0.8
+click 490 251
+sleep 1.2
+move 1380 880
+shot san_2_cf_users
+dclick 875 613
+sleep 1.8
+move 1380 880
+shot san_3_opened
+click 462 150
+sleep 1.2
+move 1380 880
+shot san_4_back

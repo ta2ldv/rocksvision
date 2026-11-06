@@ -1,0 +1,16 @@
+# J2d: retry '+' with a preceding hover and a move away afterwards.
+front
+move 1165 204
+sleep 0.4
+click 1170 204
+sleep 0.6
+move 900 400
+sleep 0.8
+shot j2d_01_after_plus1
+crop j2d_01_strip 420 190 1180 40
+click 1170 204
+sleep 0.6
+move 900 420
+sleep 0.8
+shot j2d_02_after_plus2
+crop j2d_02_strip 420 190 1180 40

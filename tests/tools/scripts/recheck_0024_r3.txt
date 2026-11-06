@@ -1,0 +1,18 @@
+# R3 (fresh HOME): item 4b missing-MANIFEST copy: folder note and disabled LSM Map tooltip.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/nomanifest
+click 773 120
+sleep 2.5
+shot r3_01_opened
+crop r3_01_note 150 125 400 100
+note ITEM4b hover disabled LSM Map
+move 440 119
+sleep 0.3
+move 443 119
+sleep 1.8
+shot r3_02_hover
+crop r3_02_hover_wide 150 90 1000 160

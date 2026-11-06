@@ -1,0 +1,23 @@
+front
+click 627 459
+sleep 0.8
+move 1380 880
+shot w3_5_operation
+click 163 18
+sleep 0.7
+shot m_file_menu
+key esc
+click 210 18
+sleep 0.7
+shot m_view_menu
+key esc
+click 259 18
+sleep 0.7
+shot m_help_menu
+key esc
+key f cmd
+sleep 0.5
+type 000150
+key return
+sleep 0.8
+shot m_search

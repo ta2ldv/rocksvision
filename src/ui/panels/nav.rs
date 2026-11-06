@@ -1,6 +1,6 @@
 //! Navigation panel: folder file list and the lazy structure tree.
 
-use super::{strong, table_style, title_line};
+use super::{TipExt, strong, table_style, title_line};
 use crate::app::{Action, AppState, Panel};
 use crate::model::{ChildRole, NodeKind};
 use crate::ui::layout::{LAYOUT, tree_label_wraps};
@@ -42,7 +42,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                     tok.p.text_muted
                 };
                 let r = ui.add(egui::Button::selectable(cur, RichText::new(txt).color(col)).wrap_mode(egui::TextWrapMode::Extend));
-                let r = r.on_hover_text(format!(
+                let r = r.tip(format!(
                     "{} · {} · {} bytes{}",
                     e.kind.label(),
                     if e.kind.decodable() { "decoded" } else { "not decoded" },
@@ -71,7 +71,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
             let t = RichText::new(format!("{} file (root)", doc.file_label())).strong();
             if ui
                 .add(egui::Button::selectable(sel, if sel { t.color(tok.p.sel_fg) } else { t.color(tok.p.heading) }).wrap_mode(egui::TextWrapMode::Truncate))
-                .on_hover_text(format!("{} file (root)", doc.file_label()))
+                .tip(format!("{} file (root)", doc.file_label()))
                 .clicked()
             {
                 acts.push(Action::SelectRoot);
@@ -138,8 +138,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll_to: Option<us
                 };
                 // A table view node first says what it lists (0020 §5), then its status.
                 let r = match crate::app::provenance::view_tooltip(&n.kind).filter(|_| n.role == ChildRole::View) {
-                    Some(what) => r.on_hover_text(format!("{full}\n{what}\n{tip}")),
-                    None => r.on_hover_text(format!("{full}\n{tip}")),
+                    Some(what) => r.tip(format!("{full}\n{what}\n{tip}")),
+                    None => r.tip(format!("{full}\n{tip}")),
                 };
                 if scroll_to == Some(i) {
                     // Vertical reveal only (the tree has no horizontal scrolling).

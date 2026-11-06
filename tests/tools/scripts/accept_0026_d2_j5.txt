@@ -1,0 +1,51 @@
+front
+winsize 900 700
+sleep 1.5
+move 605 700
+shot j5_01_nav_B
+click 660 248
+click 660 248
+sleep 0.5
+move 605 700
+shot j5_02_plus_twice
+click 560 248
+sleep 0.5
+move 605 700
+shot j5_03_center
+click 607 248
+sleep 0.5
+move 605 700
+shot j5_04_fit
+wheel 605 470 0 -200
+sleep 0.6
+shot j5_05_wheel_v_pinned
+wheel 605 470 0 -120 shift
+sleep 0.6
+shot j5_06_shift_wheel
+wheel 605 470 0 120 cmd
+sleep 0.6
+shot j5_07_cmd_wheel_zoom
+click 607 248
+click 605 466
+key equal
+key c
+sleep 0.5
+shot j5_08_key_c
+key 0
+sleep 0.5
+shot j5_09_key_0
+winsize 1000 700
+sleep 1.2
+shot j5_10_w1000
+winsize 1100 700
+sleep 1.2
+shot j5_11_w1100
+winsize 1250 700
+sleep 1.2
+shot j5_12_w1250
+winsize 1400 700
+sleep 1.2
+shot j5_13_w1400
+winsize 900 700
+sleep 1.2
+shot j5_14_back_to_900

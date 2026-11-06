@@ -1,0 +1,6 @@
+# A4 unknown comparator: narrow window to force Overflow, shot
+front
+winsize 900 640
+sleep 1.5
+move 800 620
+shot a4_6_unkcmp_900

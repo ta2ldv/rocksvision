@@ -1,0 +1,14 @@
+# J2c: choose CF cf_users, plus twice.
+front
+click 583 204
+sleep 0.8
+click 508 252
+sleep 1
+shot j2c_01_cf_users
+crop j2c_01_map 420 190 1180 300
+click 1170 204
+sleep 0.5
+click 1170 204
+sleep 1
+shot j2c_02_zoomed
+crop j2c_02_strip 420 190 1180 40

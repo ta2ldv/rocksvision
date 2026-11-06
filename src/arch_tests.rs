@@ -173,7 +173,69 @@ fn panels_only_read_app_state() {
 
 #[test]
 fn model_has_no_pixel_geometry() {
-    forbid(&["model.rs"], &["f32", "f64", "width", "px"]);
+    // D3 N9: code only; prose in string literals ("…boxes are equal in size") is not geometry.
+    let mut bad = Vec::new();
+    for (f, c) in code("model.rs") {
+        let c = strip_string_literals(&c);
+        for n in ["f32", "f64", "width", "px"] {
+            if c.contains(n) {
+                bad.push(format!("src/{f} uses {n}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "pixel geometry in the model:\n{}", bad.join("\n"));
+}
+
+/// `code` with the contents of every "…" string literal removed (escapes honoured; char
+/// literals such as '"' are kept as they are).
+fn strip_string_literals(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut chars = code.chars().peekable();
+    let mut in_str = false;
+    let mut prev = '\0';
+    while let Some(ch) = chars.next() {
+        if in_str {
+            match ch {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => {
+                    in_str = false;
+                    out.push('"');
+                }
+                _ => {}
+            }
+        } else if ch == '"' && !(prev == '\'' && chars.peek() == Some(&'\'')) {
+            in_str = true;
+            out.push('"');
+        } else {
+            out.push(ch);
+        }
+        prev = ch;
+    }
+    out
+}
+
+#[test]
+fn string_literals_are_stripped_but_code_is_kept() {
+    assert_eq!(strip_string_literals(r#"let w = "width \" px"; f32"#), r#"let w = ""; f32"#);
+    assert_eq!(strip_string_literals("let q = '\"'; width"), "let q = '\"'; width");
+}
+
+/// 0026 D3 (architect §6.3): one WAL lifecycle rule, `WalLifecycle::of`; app and ui never
+/// compare a WAL number against a CF log number themselves.
+#[test]
+fn wal_lifecycle_has_one_rule() {
+    require("model.rs", "pub fn of(number: Option<u64>");
+    forbid_in_prod(&["app", "ui"], &["per_cf.get("]);
+}
+
+/// 0026 D3 (architect §6.4): the UI renders map facts from `app::map_facts`; it never builds a
+/// fact, decides a lifecycle or a CF membership itself.
+#[test]
+fn ui_builds_no_map_facts() {
+    require("ui/panels/lsm_map.rs", "map_facts::");
+    forbid_in_prod(&["ui"], &["MapFact {", "WalLifecycle::of", "summary.membership("]);
 }
 
 /// Every request variant has a kind-correct Failed reply (and I/O requests a Cancelled one).
@@ -204,7 +266,7 @@ fn every_request_has_a_matching_failed_arm() {
         assert!(count(&decode, &format!("DecodeKind::{v}")) >= 2, "decode: no Failed arm for {v}");
     }
     let ios = variants("IoRequest");
-    assert_eq!(ios, ["Resolve", "Scan", "Page", "Copy", "Stat"]);
+    assert_eq!(ios, ["Resolve", "Scan", "Page", "Copy", "Stat", "WalSummaries"]);
     for v in &ios {
         // IoKind::of, run_io, io_cancelled.
         assert!(count(&io, &format!("IoRequest::{v}")) >= 3, "io: IoRequest::{v} lacks a run or Cancelled arm");
@@ -302,7 +364,19 @@ fn prod_code_cuts_inline_test_modules_only() {
 fn rendering_and_pure_services_do_no_io() {
     require("app/jobs/io_pool.rs", "RangeReader");
     forbid_in_prod(
-        &["ui/panels", "ui/layout.rs", "ui/menu.rs", "app/provenance.rs", "app/diagnosis.rs", "app/search.rs", "app/explanation.rs", "app/clipboard.rs", "app/navigation.rs"],
+        &[
+            "ui/panels",
+            "ui/layout.rs",
+            "ui/menu.rs",
+            "app/provenance.rs",
+            "app/diagnosis.rs",
+            "app/search.rs",
+            "app/explanation.rs",
+            "app/clipboard.rs",
+            "app/navigation.rs",
+            "app/lsm_map.rs",
+            "app/map_facts.rs",
+        ],
         &["std::fs", "crate::io", "RangeReader", "std::process", "Worker", "JobState", "IoRequest", "IoBackend", "FsBackend", "search_file", "jobs::Request"],
     );
 }
@@ -324,6 +398,90 @@ fn production_code_never_writes_files() {
         }
     }
     assert!(bad.is_empty(), "file writes in production code:\n{}", bad.join("\n"));
+}
+
+/// 0024 §5: every app-owned tooltip in src/ui goes through the one gate (`panels::TipExt`,
+/// View › Show Tooltips); only the gate itself calls egui's hover-text API.
+#[test]
+fn tooltips_go_through_the_one_gate() {
+    require("ui/panels/mod.rs", "impl TipExt for egui::Response");
+    let mut bad = Vec::new();
+    // The gate itself (`impl TipExt`, ui/panels/mod.rs) shows every tooltip through egui's
+    // `Tooltip` with the theme's tooltip frame (0026 §3: `show_tip`); nothing else in src/ui
+    // calls any hover-tooltip API, and the gate no longer uses the frame-less hover helpers.
+    require("ui/panels/mod.rs", "fn show_tip(");
+    require("ui/panels/mod.rs", ".truncate().show_tooltip_when_elided(false)");
+    let gate: &[(&str, usize)] = &[("egui::Tooltip", usize::MAX), ("show_tooltip", 1), (".truncate()", 1)];
+    for (f, c) in prod_code("ui") {
+        for n in [
+            // 0030 B: egui's own elided-text tooltip was a second popup beside the gate's; the
+            // gate's `Elided` is the only truncated label (it turns egui's tooltip off once).
+            ".truncate()",
+            ".on_hover_text(",
+            ".on_disabled_hover_text(",
+            ".on_hover_ui(",
+            ".on_hover_ui_at_pointer(",
+            ".on_hover_text_at_pointer(",
+            ".on_disabled_hover_ui(",
+            "show_tooltip",
+            "show_tooltip_text",
+            "egui::Tooltip",
+        ] {
+            let allowed = if rel_matches(&f, "ui/panels/mod.rs") { gate.iter().find(|g| g.0 == n).map(|g| g.1).unwrap_or(0) } else { 0 };
+            if c.matches(n).count() > allowed {
+                bad.push(format!("src/{f} uses {n}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "tooltips outside the gate:\n{}", bad.join("\n"));
+}
+
+/// 0024 D2 (architect should-fix 1): the app layer never branches on display labels or parses
+/// presenter strings back (typed fields such as `View::lsm_blocked` instead).
+#[test]
+fn app_does_not_branch_on_labels() {
+    require("app/session.rs", "lsm_blocked");
+    forbid_in_prod(&["app"], &[".name ==", "name.as_str()", "name.starts_with(", "trim_start_matches(\"Layout", "value.split_whitespace", "value.parse"]);
+}
+
+/// 0024 §8: the map and tooltips did not grow `AppState` (five components); the map state lives
+/// in the session, the tooltips flag in `ViewPreferences`, order/range logic in the inventory.
+#[test]
+fn app_state_keeps_five_components() {
+    let text = std::fs::read_to_string(src().join("app/state.rs")).unwrap();
+    let start = text.find("pub struct AppState {").unwrap();
+    let body = &text[start..start + text[start..].find("\n}").unwrap()];
+    assert_eq!(body.lines().skip(1).filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//")).count(), 5, "{body}");
+    require("app/session.rs", "map: MapState");
+    require("app/view_prefs.rs", "tooltips: bool");
+    // 0026 D3 (architect §6.2): the WAL inventory lives in the session, the map split next to
+    // the centre split.
+    require("app/session.rs", "wals: Option<WalInventory>");
+    require("app/view_prefs.rs", "map_split: Option<f32>");
+    // 0030 (architect §5.1): the levels table's split next to the others, the lane tier in the
+    // map state and in its snapshot (Back restores it).
+    require("app/view_prefs.rs", "levels_split: Option<f32>");
+    require("app/lsm_map.rs", "tier: LaneTier,");
+    require("app/lsm_map.rs", "tier: self.tier }");
+    forbid_in_prod(&["app/lsm_map.rs", "ui/panels/lsm_map.rs"], &["binary_search", "sort_unstable", "ikey", "user_key", "from_comparator"]);
+}
+
+/// 0030 A7 (architect §5.2): the SST's MANIFEST context is read only by `inspect` (in the decode
+/// job); nothing else looks for a sibling CURRENT.
+#[test]
+fn sst_manifest_context_only_in_the_decode_job() {
+    require("inspect.rs", "pub fn sst_manifest_context(");
+    forbid_in_prod(&["app", "ui", "present", "sst", "model.rs"], &["sst_manifest_context(", "join(\"CURRENT\")"]);
+}
+
+/// 0030 A1/A3 (architect §5.3): the map camera policy (Fit's tier, zoom to a density bar, the
+/// tier after a zoom) lives in `app::lsm_map`; the painter only calls it.
+#[test]
+fn map_camera_policy_lives_in_app() {
+    require("app/lsm_map.rs", "pub fn zoom_to_bar(");
+    require("app/lsm_map.rs", "pub fn reveal_zoom(");
+    require("app/lsm_map.rs", "pub fn tier_after_zoom(");
+    forbid_in_prod(&["ui"], &["fn zoom_to_bar", "fn reveal_zoom", "fit_tier(", "LaneTier::Full } else"]);
 }
 
 /// Presenters and the UI select behaviour by `FieldKind`/`DecodedValue`, not by display labels

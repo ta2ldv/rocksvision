@@ -12,7 +12,7 @@ mod io_pool;
 mod search;
 
 use crate::discover::DirEntry;
-use crate::model::{Child, NodeKind, Space, Span, View};
+use crate::model::{Child, NodeKind, Space, Span, View, WalSummary};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -136,6 +136,13 @@ pub enum Response {
         req: u64,
         outcome: Outcome<(u64, Option<SystemTime>)>,
     },
+    /// One WAL's summary (`path`), or the end of the whole job (`path` None: Failed / Cancelled
+    /// before every file was answered).
+    WalScanned {
+        req: u64,
+        path: Option<PathBuf>,
+        outcome: Outcome<WalSummary>,
+    },
     SearchProgress {
         done: u64,
         total: u64,
@@ -183,6 +190,9 @@ pub enum IoRequest {
         job: CopyJob,
     },
     Stat(PathBuf),
+    /// Bounded summaries of these WAL files, one `WalScanned` reply per file in this order
+    /// (0026 item 4); a cancel stops it with one path-less Cancelled reply.
+    WalSummaries(Vec<PathBuf>),
 }
 
 pub struct Worker {
@@ -195,6 +205,9 @@ pub struct Worker {
     /// `cancel_upto` so opening a file (which cancels the previous file's jobs) does not
     /// cancel the still-running scan of its folder.
     scan_cancel_upto: Arc<AtomicU64>,
+    /// WAL summary jobs with id <= this value are cancelled; `cancel_file_jobs` / `cancel_all`
+    /// also move it, `cancel_wal_summaries` moves only it (D3 N8: an orphaned summary job).
+    wal_cancel_upto: Arc<AtomicU64>,
     next_job: AtomicU64,
     /// Job id of the newest view request: an older view still queued or running is obsolete
     /// and is cancelled cooperatively (its reply is discarded by the session anyway).
@@ -234,6 +247,7 @@ impl Worker {
             next_job: AtomicU64::new(0),
             latest_view,
             scan_cancel_upto: Arc::new(AtomicU64::new(0)),
+            wal_cancel_upto: Arc::new(AtomicU64::new(0)),
             busy,
             io_inflight: Arc::new(AtomicUsize::new(0)),
             search_id: Arc::new(AtomicU64::new(0)),
@@ -257,11 +271,16 @@ impl Worker {
     }
 
     /// Runs a bounded I/O job on its own short-lived thread so a slow read never blocks the
-    /// UI or the decode worker. Returns the job id immediately. At most
+    /// UI or the decode worker. Returns the job id immediately. Folder scans / path resolves
+    /// follow `cancel_scans`, every other job (WAL summaries included) `cancel_file_jobs`. At most
     /// `LIMITS.max_io_inflight` jobs run at once; further requests fail fast.
     pub fn io(&self, generation: u64, req: IoRequest) -> u64 {
         let job = self.next_id();
-        let cancel = if matches!(req, IoRequest::Resolve(_) | IoRequest::Scan(_)) { self.scan_cancel_upto.clone() } else { self.cancel_upto.clone() };
+        let cancel = match req {
+            IoRequest::Resolve(_) | IoRequest::Scan(_) => self.scan_cancel_upto.clone(),
+            IoRequest::WalSummaries(_) => self.wal_cancel_upto.clone(),
+            _ => self.cancel_upto.clone(),
+        };
         io_pool::run(io_pool::Ctx { generation, job, tx: self.resp_tx.clone(), wake: self.wake.clone(), inflight: self.io_inflight.clone(), cancel, backend: self.backend.clone() }, req);
         job
     }
@@ -272,12 +291,20 @@ impl Worker {
         let n = self.next_job.load(Ordering::SeqCst);
         self.cancel_upto.store(n, Ordering::SeqCst);
         self.scan_cancel_upto.store(n, Ordering::SeqCst);
+        self.wal_cancel_upto.store(n, Ordering::SeqCst);
     }
 
     /// Cancels decode, page, copy and stat jobs dispatched so far, but not folder scans or
     /// path resolves (used when switching files inside the same folder).
     pub fn cancel_file_jobs(&self) {
-        self.cancel_upto.store(self.next_job.load(Ordering::SeqCst), Ordering::SeqCst);
+        let n = self.next_job.load(Ordering::SeqCst);
+        self.cancel_upto.store(n, Ordering::SeqCst);
+        self.wal_cancel_upto.store(n, Ordering::SeqCst);
+    }
+
+    /// Cancels WAL summary jobs dispatched so far, nothing else.
+    pub fn cancel_wal_summaries(&self) {
+        self.wal_cancel_upto.store(self.next_job.load(Ordering::SeqCst), Ordering::SeqCst);
     }
 
     /// Cancels folder scans / path resolves dispatched so far.

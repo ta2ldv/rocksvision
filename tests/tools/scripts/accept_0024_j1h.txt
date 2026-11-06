@@ -1,0 +1,20 @@
+# J1h: item 9 - Back until history is empty, then Option+Left.
+front
+note BACK 1
+click 456 151
+sleep 1.5
+shot j1h_01_back1
+note BACK 2
+click 456 151
+sleep 1.5
+shot j1h_02_back2
+note BACK 3
+click 456 151
+sleep 1.5
+shot j1h_03_back3
+crop j1h_03_back_btn 390 125 500 40
+note OPTION+LEFT with (presumably) no history
+key left alt
+sleep 1
+shot j1h_04_optleft
+crop j1h_04_status 150 870 800 40

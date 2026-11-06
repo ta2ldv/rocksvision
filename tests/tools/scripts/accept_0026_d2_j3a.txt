@@ -1,0 +1,10 @@
+front
+move 700 800
+shot j3_wal_before
+move 498 280
+sleep 2
+shot j3_wal_after
+move 700 800
+click 208 18
+sleep 1
+shot j3_viewmenu

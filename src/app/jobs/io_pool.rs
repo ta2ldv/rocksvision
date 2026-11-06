@@ -5,9 +5,10 @@
 use super::{CopyJob, IoRequest, Outcome, Response, Tagged};
 use crate::app::clipboard::hex_copy_text;
 use crate::discover::{self, DirEntry};
-use crate::io::RangeReader;
-use crate::limits::LIMITS;
-use crate::model::Space;
+use crate::io::{RangeRead, RangeReader};
+use crate::limits::{LIMITS, WAL_SUMMARY_BYTES};
+use crate::model::{Space, WalSummary};
+use crate::wal::summary;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -25,6 +26,10 @@ pub trait IoBackend: Send + Sync {
     /// Bounded read; returns the bytes and the file size.
     fn read(&self, p: &Path, off: u64, len: u64) -> std::io::Result<(Vec<u8>, u64)>;
     fn stat(&self, p: &Path) -> std::io::Result<(u64, Option<SystemTime>)>;
+    /// Read-only random access to a file (WAL summaries). Default: the real file.
+    fn open_read(&self, p: &Path) -> std::io::Result<Box<dyn RangeRead>> {
+        Ok(Box::new(RangeReader::open(p)?))
+    }
 }
 
 pub struct FsBackend;
@@ -91,6 +96,10 @@ impl<B: IoBackend> IoBackend for DelayBackend<B> {
         self.wait();
         self.inner.stat(p)
     }
+    fn open_read(&self, p: &Path) -> std::io::Result<Box<dyn RangeRead>> {
+        self.wait();
+        self.inner.open_read(p)
+    }
 }
 
 /// Everything one I/O job needs (cloned handles of the worker's shared state).
@@ -146,6 +155,7 @@ enum IoKind {
     Page(u64),
     Copy(u64),
     Stat,
+    WalSummaries,
 }
 
 impl IoKind {
@@ -156,6 +166,7 @@ impl IoKind {
             IoRequest::Page { off, .. } => IoKind::Page(*off),
             IoRequest::Copy { sel, .. } => IoKind::Copy(*sel),
             IoRequest::Stat(_) => IoKind::Stat,
+            IoRequest::WalSummaries(_) => IoKind::WalSummaries,
         }
     }
     fn failed(self, req: u64, msg: &str) -> Response {
@@ -166,6 +177,7 @@ impl IoKind {
             IoKind::Page(off) => Response::Page { req, space: Space::File, off, outcome: Outcome::Failed(e()) },
             IoKind::Copy(sel) => Response::Copied { req, sel, outcome: Outcome::Failed(e()) },
             IoKind::Stat => Response::Stat { req, outcome: Outcome::Failed(e()) },
+            IoKind::WalSummaries => Response::WalScanned { req, path: None, outcome: Outcome::Failed(e()) },
         }
     }
 }
@@ -213,6 +225,23 @@ fn run_io(b: &dyn IoBackend, req: u64, r: IoRequest, cancelled: &dyn Fn() -> boo
             let o = outcome(b.stat(&p), cancelled);
             send(Response::Stat { req, outcome: o });
         }
+        IoRequest::WalSummaries(files) => {
+            // One reply per file, in order; a cancel ends the job with one path-less reply.
+            for p in files {
+                let o = match b.open_read(&p) {
+                    Ok(r) => match summary::summarize(r, p.clone(), WAL_SUMMARY_BYTES, cancelled) {
+                        Some(s) => Outcome::Done(s),
+                        None => Outcome::Cancelled,
+                    },
+                    Err(e) => Outcome::Done(WalSummary::Unreadable(e.to_string())),
+                };
+                if o == Outcome::Cancelled || cancelled() {
+                    send(Response::WalScanned { req, path: None, outcome: Outcome::Cancelled });
+                    return;
+                }
+                send(Response::WalScanned { req, path: Some(p), outcome: o });
+            }
+        }
     }
 }
 
@@ -223,6 +252,7 @@ fn io_cancelled(req: u64, r: IoRequest) -> Response {
         IoRequest::Page { off, .. } => Response::Page { req, space: Space::File, off, outcome: Outcome::Cancelled },
         IoRequest::Copy { sel, .. } => Response::Copied { req, sel, outcome: Outcome::Cancelled },
         IoRequest::Stat(_) => Response::Stat { req, outcome: Outcome::Cancelled },
+        IoRequest::WalSummaries(_) => Response::WalScanned { req, path: None, outcome: Outcome::Cancelled },
     }
 }
 
@@ -240,10 +270,11 @@ mod tests {
             IoRequest::Page { path: p(), off: 16, len: 4 },
             IoRequest::Copy { sel: 5, job: CopyJob::FileHex { path: p(), off: 0, len: 4, requested: 9 } },
             IoRequest::Stat(p()),
+            IoRequest::WalSummaries(vec![p()]),
         ];
         for r in &reqs {
             match r {
-                IoRequest::Resolve(_) | IoRequest::Scan(_) | IoRequest::Page { .. } | IoRequest::Copy { .. } | IoRequest::Stat(_) => {}
+                IoRequest::Resolve(_) | IoRequest::Scan(_) | IoRequest::Page { .. } | IoRequest::Copy { .. } | IoRequest::Stat(_) | IoRequest::WalSummaries(_) => {}
             }
         }
         reqs
@@ -258,9 +289,33 @@ mod tests {
             Response::Page { req, outcome, space: Space::File, off: 16 } => (2, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
             Response::Copied { req, outcome, sel: 5 } => (3, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
             Response::Stat { req, outcome } => (4, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
+            Response::WalScanned { req, outcome, path: None } => (5, *req, f(matches!(outcome, Outcome::Failed(_)), matches!(outcome, Outcome::Cancelled))),
             _ => return None,
         };
         Some((k, req, failed, cancelled))
+    }
+
+    /// 0026 item 4: one reply per WAL in order (an unreadable path is a typed Unreadable summary,
+    /// not a failed job); a cancel ends the job with one path-less Cancelled reply.
+    #[test]
+    fn wal_summaries_reply_per_file_and_stop_on_cancel() {
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let files = vec![fx.join("wal-basic/000004.log"), fx.join("no-such-dir/000099.log"), fx.join("empty/000001.log")];
+        let got = std::cell::RefCell::new(Vec::new());
+        let send = |r: Response| got.borrow_mut().push(r);
+        run_io(&FsBackend, 3, IoRequest::WalSummaries(files.clone()), &|| false, &send);
+        let got = got.into_inner();
+        assert_eq!(got.len(), 3);
+        for (r, want) in got.iter().zip(&files) {
+            let Response::WalScanned { req: 3, path: Some(p), outcome: Outcome::Done(s) } = r else { panic!("unexpected reply") };
+            assert_eq!(p, want);
+            assert_eq!(matches!(s, WalSummary::Unreadable(_)), p.to_string_lossy().contains("no-such-dir"), "{s:?}");
+        }
+        let got = std::cell::RefCell::new(Vec::new());
+        let send = |r: Response| got.borrow_mut().push(r);
+        run_io(&FsBackend, 4, IoRequest::WalSummaries(files), &|| true, &send);
+        let got = got.into_inner();
+        assert!(matches!(got.as_slice(), [Response::WalScanned { req: 4, path: None, outcome: Outcome::Cancelled }]));
     }
 
     /// Every I/O request has a Failed and a Cancelled reply of its own kind with its request id.

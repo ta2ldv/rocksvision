@@ -1,0 +1,15 @@
+front
+winsize 900 588
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-wal
+click 1039 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 880 560
+shot chips_900x588
+winsize 700 560
+sleep 1.5
+shot chips_700x560

@@ -1,0 +1,25 @@
+# Task 0024: reproduce the reported upper-center Back failure on the released 0.1.3 package.
+# Coordinates (screen points) from full-screen shots p1/p2/p3 (factor 1.08): path field 583,120; Go 773,120;
+# tree "Observed levels (via MANIFEST)" 313,522; first table row (0 default L0 000014, on disk) 470,504;
+# upper-center "Back" button 462,150. Expected on 0.1.3: after the SST opens, Back does nothing.
+front
+click 583 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+click 313 522
+sleep 1.5
+shot r_01_levels_table
+dclick 470 504
+sleep 2
+shot r_02_sst_opened
+note CLICK upper-center Back button once
+click 462 150
+sleep 1.5
+shot r_03_after_back_button
+note PRESS Back key (alt+left) once more
+key left alt
+sleep 1.5
+shot r_04_after_back_key
+key q cmd

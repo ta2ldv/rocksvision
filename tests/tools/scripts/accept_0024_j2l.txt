@@ -1,0 +1,27 @@
+# J2l: item 15 keyboard on map (focus requested by LSM Map entry from CURRENT), db-levels default CF.
+front
+click 443 119
+sleep 2
+shot j2l_01_entry
+key down
+sleep 0.7
+shot j2l_02_down
+key up
+sleep 0.7
+shot j2l_03_up
+key end
+sleep 0.7
+shot j2l_04_end
+key home
+sleep 0.7
+shot j2l_05_home
+key right
+sleep 0.7
+shot j2l_06_right
+key down
+sleep 0.7
+shot j2l_07_down
+note ENTER opens focused on-disk box
+key return
+sleep 2
+shot j2l_08_enter

@@ -1,0 +1,9 @@
+# Task 0024 Back repro, pass 2: type the folder path, Go, shot (coordinates of the tree). Then quit.
+front
+click 583 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+shot p2_01_after_go
+key q cmd

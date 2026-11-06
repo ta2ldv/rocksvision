@@ -1,0 +1,11 @@
+# P4 item 5 (default CF 1 file crop) then choose cf_a to find the missing box.
+front
+shot p4_10_default
+crop p4_10_default_header 400 175 330 80
+click 583 204
+sleep 0.8
+click 484 251
+sleep 1
+move 900 650
+sleep 0.4
+shot p4_10_cfa

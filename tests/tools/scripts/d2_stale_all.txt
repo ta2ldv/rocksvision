@@ -1,0 +1,7 @@
+front
+click 592 204
+sleep 0.8
+click 490 251
+sleep 1.0
+move 1380 880
+shot sta_2_cf_users

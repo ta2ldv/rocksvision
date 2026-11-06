@@ -12,7 +12,7 @@ pub mod layout;
 
 use crate::io::{RangeRead, RangeReader, read_vec};
 use crate::limits::{BLOCK_CACHE_BYTES, BLOCK_CACHE_ITEMS, KNOWN_BLOCK_HANDLES, MAX_DECOMPRESSED};
-use crate::model::{BlockKind, CheckKind, DecodedValue as DV, Diagnostic, RowTally, Space, Span, Status, Trust};
+use crate::model::{BlockKind, CheckKind, DecodedValue as DV, Diagnostic, RowTally, Space, Span, SstManifestContext, Status, Trust};
 use crate::util::{fixed32, fixed64, varint64};
 use block::{Block, BlockCache, Entry, EntryError, IndexFmt, Layout, LayoutError};
 use footer::{BLOCK_TRAILER, Footer, Handle};
@@ -74,6 +74,9 @@ pub struct SstInspector {
     /// Row tallies of the two table views over the cached layout (`layout_tallies`).
     /// Boxed: keeps `Inspector::Sst` small (clippy::large_enum_variant).
     tallies: Option<Box<LayoutTallies>>,
+    /// MANIFEST evidence of this file (0030 A7), looked up once by `inspect` (which owns the
+    /// sibling-file access): None = not looked up yet; Some(None) = no evidence.
+    manifest_context: Option<Box<SstManifestContext>>,
     /// Full tally scans so far (bounded-cost test).
     #[cfg(test)]
     tally_scans: u64,
@@ -187,6 +190,14 @@ impl SstInspector {
         Self::from_reader(Box::new(r), path)
     }
 
+    pub fn set_manifest_context(&mut self, e: SstManifestContext) {
+        self.manifest_context = Some(Box::new(e));
+    }
+    /// The MANIFEST context of this file (0030 A7); None until `inspect` looked it up.
+    pub fn manifest_context(&self) -> Option<&SstManifestContext> {
+        self.manifest_context.as_deref()
+    }
+
     pub fn from_reader(r: Box<dyn RangeRead>, path: PathBuf) -> Self {
         let len = r.len();
         let tail_len = len.min(footer::NEW_FOOTER);
@@ -214,6 +225,7 @@ impl SstInspector {
             known: std::collections::HashMap::new(),
             checked: std::collections::HashMap::new(),
             tallies: None,
+            manifest_context: None,
             #[cfg(test)]
             tally_scans: 0,
         };

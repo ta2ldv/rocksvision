@@ -1,0 +1,13 @@
+front
+click 330 300
+sleep 0.8
+move 1380 880
+shot w3_1_physical
+click 330 340
+sleep 0.8
+move 1380 880
+shot w3_2_logical
+click 184 340
+sleep 0.8
+move 1380 880
+shot w3_2b_expanded

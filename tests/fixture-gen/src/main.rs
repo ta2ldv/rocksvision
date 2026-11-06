@@ -1,14 +1,14 @@
 //! RocksVision fixture generator (RocksDB 10.4.2 via rocksdb 0.24.0 / librocksdb-sys 0.17.3).
 //!
-//! Usage: fixture-gen large-sst|large-wal <DIR> --mb N | examples <EXAMPLES_DIR> | examples-verify <EXAMPLES_DIR> <SCRATCH> | --verify <FIXTURES> <SCRATCH> | [OUT_DIR]   (default: ../fixtures relative to the crate dir)
+//! Usage: fixture-gen large-sst|large-wal <DIR> --mb N | multi-cf-wal <DB_DIR> | many-sst <DIR> [--files N] [--overlap] | wal-stale-tail <DIR> | examples <EXAMPLES_DIR> | examples-verify <EXAMPLES_DIR> <SCRATCH> | multilevel-advanced <DB_DIR> [--evidence <FILE>] | multilevel-advanced-verify <SHIPPED_DIR> <SCRATCH> | --verify <FIXTURES> <SCRATCH> | [OUT_DIR]   (default: ../fixtures relative to the crate dir)
 //! Deletes and recreates OUT_DIR, writes all cases, MANIFEST.md and SHA256SUMS.
 //! Keys/values are deterministic; file bytes are NOT guaranteed identical across runs
 //! (DB id/session id, creation time, OPTIONS file timestamps). The committed files plus
 //! SHA256SUMS are the reference for immutability tests.
 
 use rocksdb::{
-    BlockBasedIndexType, BlockBasedOptions, ChecksumType, ColumnFamilyDescriptor,
-    DBCompressionType, DataBlockIndexType, MergeOperands, Options, SstFileWriter, WriteBatch, DB,
+    BlockBasedIndexType, BlockBasedOptions, BottommostLevelCompaction, ChecksumType, ColumnFamilyDescriptor, CompactOptions, DBCompressionType, DataBlockIndexType, MergeOperands, Options,
+    SstFileWriter, WaitForCompactOptions, WriteBatch, DB,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -131,6 +131,7 @@ fn single_delete_batch(keys: &[&[u8]]) -> WriteBatch {
     }
 }
 
+#[allow(clippy::enum_variant_names)] // names mirror the WAL record tags (kTypeColumnFamily*)
 enum HOp<'a> {
     DeleteCf(u32, &'a [u8]),         // tag 0x04
     PutCf(u32, &'a [u8], &'a [u8]),  // tag 0x05
@@ -828,7 +829,7 @@ fn db_levels(out: &Path, m: &mut Man) -> R<()> {
         writeln!(layout, "From `DB::live_files()` (level, file, entries, deletions, smallest/largest user key) at close:\n")?;
         writeln!(layout, "| CF | level | file | size | entries | deletions | smallest | largest |\n|---|---|---|---|---|---|---|---|")?;
         let mut lf = db.live_files()?;
-        lf.sort_by(|a, b| (a.column_family_name.clone(), a.level, a.name.clone()).cmp(&(b.column_family_name.clone(), b.level, b.name.clone())));
+        lf.sort_by_key(|a| (a.column_family_name.clone(), a.level, a.name.clone()));
         for f in &lf {
             writeln!(layout, "| {} | L{} | {} | {} | {} | {} | `{}` | `{}` |", f.column_family_name, f.level, f.name.trim_start_matches('/'), f.size,
                 f.num_entries, f.num_deletions, esc(f.start_key.as_deref().unwrap_or(b"")), esc(f.end_key.as_deref().unwrap_or(b"")))?;
@@ -847,7 +848,7 @@ fn db_levels(out: &Path, m: &mut Man) -> R<()> {
     m.line("Real DB dir with CURRENT, MANIFEST-*, OPTIONS-*, IDENTITY, SSTs and any WAL left by close. Options: 3 CFs (`default`, `cf_users`, `cf_events`), `disable_auto_compactions`, `level_compaction_dynamic_level_bytes=false` (so manual compaction output goes to L1, not L6), `num_levels=7`, write_buffer_size 256 MiB. Plan:");
     m.line(&plan);
     m.line("");
-    m.line(&format!("Files in dir: {}", names.join(", ")));
+    m.line(format!("Files in dir: {}", names.join(", ")));
     m.line("");
     m.line(&layout);
     for w in list_files(&dir, "log") {
@@ -931,6 +932,7 @@ fn copy_dir(a: &Path, b: &Path) -> R<()> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 fn count_cf(db: &DB, cf: &str) -> R<(usize, Option<Vec<u8>>, Option<Vec<u8>>)> {
     let h = db.cf_handle(cf).unwrap();
     let mut it = db.raw_iterator_cf(&h);
@@ -1244,6 +1246,779 @@ fn large_wal(out: &Path, mb: u64) -> R<()> {
     Ok(())
 }
 
+/// `fixture-gen many-sst <DIR> [--files N]` (default 600, max 5000): a DB at DIR with N tiny L0 SSTs in the default
+/// CF, one flush each, disjoint ascending keys (`k-000000-a`..), auto compactions off. With `--overlap` every file
+/// covers the same wide key range instead (all L0 files overlap). Scratch only; not committed.
+fn many_sst(out: &Path, files: usize, overlap: bool) -> R<()> {
+    let files = files.clamp(1, 5000);
+    if out.exists() {
+        fs::remove_dir_all(out)?;
+    }
+    fs::create_dir_all(out)?;
+    let mut o = Options::default();
+    o.create_if_missing(true);
+    o.set_disable_auto_compactions(true);
+    o.set_level_zero_slowdown_writes_trigger(1 << 20);
+    o.set_level_zero_stop_writes_trigger(1 << 20);
+    o.set_write_buffer_size(64 << 20);
+    {
+        let db = DB::open(&o, out)?;
+        for i in 0..files {
+            if overlap {
+                // every file covers the same wide user-key range (k-000000 .. k-999999) with a distinct middle key,
+                // so all L0 files overlap and the map needs one lane per file (distinct seq per flush).
+                db.put("k-000000", format!("lo-{i}"))?;
+                db.put(format!("k-{:06}", 1000 + i * 7), format!("mid-{i}"))?;
+                db.put("k-999999", format!("hi-{i}"))?;
+            } else {
+                for j in 0..3 {
+                    db.put(format!("k-{i:06}-{j}"), format!("value-{i}-{j}"))?;
+                }
+            }
+            db.flush()?;
+        }
+    }
+    let ssts = fs::read_dir(out)?.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "sst")).count();
+    println!("many-sst{}: {} files requested, {} .sst on disk in {}", if overlap { " --overlap" } else { "" }, files, ssts, out.display());
+    Ok(())
+}
+
+/// `fixture-gen multi-cf-wal <OUT_DIR>`: `<OUT_DIR>` = a DB folder (CURRENT, MANIFEST, OPTIONS, one WAL) whose
+/// WAL holds unflushed writes to default + cf_users + cf_events (WAL on, nothing flushed, clean close; with the WAL
+/// enabled RocksDB does not flush memtables on close). Prints folder listing; NOT a committed fixture.
+fn multi_cf_wal(out: &Path) -> R<()> {
+    if out.exists() {
+        fs::remove_dir_all(out)?;
+    }
+    fs::create_dir_all(out)?;
+    let mut o = Options::default();
+    o.create_if_missing(true);
+    o.create_missing_column_families(true);
+    o.set_disable_auto_compactions(true);
+    o.set_write_buffer_size(64 << 20);
+    o.set_recycle_log_file_num(0);
+    let descs = cf_descs(&["default", "cf_users", "cf_events"], &o);
+    {
+        let db = DB::open_cf_descriptors(&o, out, descs)?;
+        let cd = db.cf_handle("default").unwrap();
+        let cu = db.cf_handle("cf_users").unwrap();
+        let ce = db.cf_handle("cf_events").unwrap();
+        for i in 0..5 {
+            db.put_cf(&cd, format!("d-{i:03}"), format!("d-value-{i}"))?;
+            db.put_cf(&cu, format!("u-{i:03}"), format!("u-value-{i}"))?;
+            db.put_cf(&ce, format!("e-{i:03}"), format!("e-value-{i}"))?;
+        }
+        // One atomic batch across all three CFs as well.
+        let mut b = WriteBatch::default();
+        b.put_cf(&cd, "d-batch", "x");
+        b.put_cf(&cu, "u-batch", "y");
+        b.put_cf(&ce, "e-batch", "z");
+        db.write(b)?;
+        // `--flush-default`: one SST for `default` only, so the LSM Map exists and the old WAL is below
+        // default's log number but still at/above cf_users' and cf_events' (the "flushed for ...; may hold
+        // unflushed for ..." lifecycle sentence).
+        if std::env::args().any(|a| a == "--flush-all") {
+            db.flush_cf(&cd)?;
+            db.flush_cf(&cu)?;
+            db.flush_cf(&ce)?;
+        }
+        if std::env::args().any(|a| a == "--flush-default") {
+            db.flush_cf(&cd)?;
+            db.put_cf(&cd, "d-after-flush", "v")?;
+        }
+        db.flush_wal(true)?;
+    }
+    let mut names: Vec<_> = fs::read_dir(out)?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    names.sort();
+    for p in names {
+        println!("{}  {} B  {}", p.display(), fs::metadata(&p)?.len(), sha256_file(&p)?);
+    }
+    Ok(())
+}
+
+/// `fixture-gen checkpoint <OUT_DIR>`: a small 3-CF DB at `<OUT_DIR>/ckpt-src`, then a real
+/// `Checkpoint::create_checkpoint` into `<OUT_DIR>/ckpt` while the DB is open; evidence in
+/// `<OUT_DIR>/checkpoint.md` (hard links of the SSTs, CURRENT, MANIFEST, WAL, live files).
+/// NOT regenerated by the default fixture run; `<OUT_DIR>/ckpt` is copied to tests/fixtures/db-checkpoint.
+fn checkpoint(out: &Path) -> R<()> {
+    use rocksdb::checkpoint::Checkpoint;
+    use std::os::unix::fs::MetadataExt;
+    if out.exists() {
+        fs::remove_dir_all(out)?;
+    }
+    fs::create_dir_all(out)?;
+    let out = out.canonicalize()?;
+    let src = out.join("ckpt-src");
+    let ck = out.join("ckpt");
+    let mut o = Options::default();
+    o.create_if_missing(true);
+    o.create_missing_column_families(true);
+    o.set_disable_auto_compactions(true);
+    o.set_level_compaction_dynamic_level_bytes(false);
+    o.set_num_levels(7);
+    o.set_write_buffer_size(64 << 10);
+    let descs = vec![
+        ColumnFamilyDescriptor::new("default", o.clone()),
+        ColumnFamilyDescriptor::new("cf_a", o.clone()),
+        ColumnFamilyDescriptor::new("cf_b", o.clone()),
+    ];
+    let mut md = String::new();
+    let mut live_tbl = String::new();
+    {
+        let db = DB::open_cf_descriptors(&o, &src, descs)?;
+        let cd = db.cf_handle("default").unwrap();
+        let ca = db.cf_handle("cf_a").unwrap();
+        let cb = db.cf_handle("cf_b").unwrap();
+        let val = |tag: &str, i: usize| format!("{tag}-{i:03}-value");
+        // default: one flush -> 1 L0
+        for i in 0..40 { db.put_cf(&cd, format!("d-{i:03}"), val("d", i))?; }
+        db.flush_cf(&cd)?;
+        // cf_a: two flushes (overlapping ranges) -> 2 L0 files
+        for i in 0..40 { db.put_cf(&ca, format!("a-{i:03}"), val("a1", i))?; }
+        db.flush_cf(&ca)?;
+        for i in 20..60 { db.put_cf(&ca, format!("a-{i:03}"), val("a2", i))?; }
+        db.flush_cf(&ca)?;
+        // cf_b: two flushes, compact_range -> merged into one L1 file
+        for i in 0..40 { db.put_cf(&cb, format!("b-{i:03}"), val("b1", i))?; }
+        db.flush_cf(&cb)?;
+        for i in 40..80 { db.put_cf(&cb, format!("b-{i:03}"), val("b2", i))?; }
+        db.flush_cf(&cb)?;
+        db.compact_range_cf(&cb, None::<&[u8]>, None::<&[u8]>);
+
+        writeln!(live_tbl, "| CF | level | file | size | smallest | largest | entries | deletions |")?;
+        writeln!(live_tbl, "|---|---|---|---|---|---|---|---|")?;
+        let mut lf = db.live_files()?;
+        lf.sort_by(|a, b| (&a.column_family_name, a.level, &a.name).cmp(&(&b.column_family_name, b.level, &b.name)));
+        for f in &lf {
+            writeln!(
+                live_tbl,
+                "| {} | L{} | {} | {} | `{}` | `{}` | {} | {} |",
+                f.column_family_name, f.level, f.name, f.size,
+                esc(f.start_key.as_deref().unwrap_or(b"")), esc(f.end_key.as_deref().unwrap_or(b"")),
+                f.num_entries, f.num_deletions
+            )?;
+        }
+        // The real API call, DB still open.
+        Checkpoint::new(&db)?.create_checkpoint(&ck)?;
+    } // DB closed
+
+    writeln!(md, "# checkpoint evidence (fixture-gen checkpoint)\n")?;
+    writeln!(md, "RocksDB 10.4.2 (rocksdb 0.24.0 / librocksdb-sys 0.17.3), `Checkpoint::new(&db)?.create_checkpoint(ckpt)` while the source DB was open (then closed). Source DB `ckpt-src` stays out of Git; `ckpt` is copied (plain copy) to tests/fixtures/db-checkpoint.\n")?;
+    writeln!(md, "3 CFs: default (1 flush -> 1 L0), cf_a (2 flushes -> 2 L0, overlapping), cf_b (2 non-overlapping flushes + compact_range -> engine moved both files to L1 without merging). ~40 keys per flush; auto compactions disabled.\n")?;
+    writeln!(md, "## Hard links: SSTs of ckpt vs the same name in ckpt-src\n")?;
+    writeln!(md, "| file | ckpt inode | ckpt nlink | src inode | src nlink | same inode | size |")?;
+    writeln!(md, "|---|---|---|---|---|---|---|")?;
+    for p in list_files(&ck, "sst") {
+        let n = p.file_name().unwrap().to_string_lossy().to_string();
+        let a = fs::metadata(&p)?;
+        let b = fs::metadata(src.join(&n))?;
+        writeln!(md, "| {n} | {} | {} | {} | {} | {} | {} |", a.ino(), a.nlink(), b.ino(), b.nlink(), a.ino() == b.ino() && a.dev() == b.dev(), a.len())?;
+    }
+    writeln!(md, "\n## Other files of ckpt\n")?;
+    writeln!(md, "| file | size | inode | nlink | same inode as ckpt-src copy |")?;
+    writeln!(md, "|---|---|---|---|---|")?;
+    let mut names: Vec<_> = fs::read_dir(&ck)?.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    names.sort();
+    let mut wal = false;
+    let mut manifest = String::new();
+    for n in &names {
+        if n.ends_with(".sst") { continue; }
+        if n.ends_with(".log") { wal = true; }
+        if n.starts_with("MANIFEST-") { manifest = n.clone(); }
+        let a = fs::metadata(ck.join(n))?;
+        let same = fs::metadata(src.join(n)).map(|b| b.ino() == a.ino() && b.dev() == a.dev()).map(|s| s.to_string()).unwrap_or_else(|_| "absent in src".into());
+        writeln!(md, "| {n} | {} | {} | {} | {same} |", a.len(), a.ino(), a.nlink())?;
+    }
+    let cur = fs::read_to_string(ck.join("CURRENT"))?;
+    writeln!(md, "\nCURRENT content: `{}` (names the MANIFEST: {})", cur.trim_end().escape_debug(), cur.trim_end() == manifest)?;
+    writeln!(md, "MANIFEST: `{manifest}`")?;
+    writeln!(md, "WAL (.log) present in ckpt: {wal} (everything was flushed before the checkpoint; an empty .log is what the engine creates for the live memtable, absence would also be normal)")?;
+    let total: u64 = names.iter().map(|n| fs::metadata(ck.join(n)).map(|m| m.len()).unwrap_or(0)).sum();
+    writeln!(md, "Total size of ckpt: {total} bytes in {} files\n", names.len())?;
+    writeln!(md, "## DB::live_files() of the source\n")?;
+    md.push_str(&live_tbl);
+    fs::write(out.join("checkpoint.md"), &md)?;
+    print!("{md}");
+    Ok(())
+}
+
+// ------------------------------------------- multilevel-advanced (task 0013, handoff 0028)
+// `fixture-gen multilevel-advanced <OUT_DIR> [--evidence <FILE>]`: builds the deterministic scenario
+// behind examples/data/multilevel-advanced-db in a FRESH `<OUT_DIR>` (removed first), closes the DB
+// cleanly, removes LOCK/LOG*, prints (and optionally saves) the engine evidence.
+// `fixture-gen multilevel-advanced-verify <SHIPPED_DIR> <SCRATCH_DIR>`: re-checks a shipped copy with the
+// engine on disposable copies only (read-only open + normal open with WAL recovery), comparing every key
+// and value of every CF with the scenario model replayed without a DB; sha256 of the shipped files is
+// compared before/after. RocksDB 10.4.2 behaviour relied on (db_impl_compaction_flush.cc):
+// - CompactRange with level_compaction_dynamic_level_bytes=false walks L0 -> L1 -> ... until the last
+//   non-empty level, so once L2 holds files a manual CompactRange pushes L1 data into L2; L1 above L2
+//   is therefore produced by the engine's automatic L0 -> L1 compaction (enabled per CF, then disabled).
+// - ReFitLevel (CompactRange change_level=true) moves ALL files of a level and needs the target empty.
+// - With the WAL enabled, closing the DB does not flush memtables, so unflushed CF data pins older WALs.
+
+const MA_CFS: [(&str, &str); 3] = [("default", "item"), ("cf_users", "user"), ("cf_orders", "order")];
+const MA_A: [usize; 3] = [0, 100, 200]; // L2 ranges [s, s+50)
+const MA_B: [(usize, usize); 3] = [(30, 79), (140, 169), (240, 289)]; // L1 ranges, inclusive
+
+enum MaW {
+    Put(usize, String),
+    Del(usize),
+    DelRange(usize, usize), // [a, b)
+}
+
+fn ma_key(ci: usize, n: usize) -> String {
+    format!("{}:{n:03}", MA_CFS[ci].1)
+}
+
+struct Ma {
+    db: Option<DB>,
+    dir: PathBuf,
+    model: Vec<std::collections::BTreeMap<String, String>>,
+    hist: std::collections::BTreeMap<(usize, usize), Vec<String>>,
+    ev: String,
+    quiet: bool, // model-only replay (verify): no evidence output
+}
+
+impl Ma {
+    fn say(&mut self, s: impl AsRef<str>) {
+        if self.quiet {
+            return;
+        }
+        println!("{}", s.as_ref());
+        self.ev.push_str(s.as_ref());
+        self.ev.push('\n');
+    }
+
+    fn seq(&self) -> u64 {
+        self.db.as_ref().map(|d| d.latest_sequence_number()).unwrap_or(0)
+    }
+
+    /// Apply ops one write each (or as ONE WriteBatch when `atomic`), to the DB (if any) and the model.
+    fn apply(&mut self, tag: &str, ops: Vec<(usize, MaW)>, atomic: bool) -> R<()> {
+        let s0 = self.seq();
+        if let Some(db) = &self.db {
+            let mut b = WriteBatch::default();
+            for (ci, op) in &ops {
+                let h = db.cf_handle(MA_CFS[*ci].0).unwrap();
+                match op {
+                    MaW::Put(n, v) if atomic => b.put_cf(&h, ma_key(*ci, *n), v),
+                    MaW::Del(n) if atomic => b.delete_cf(&h, ma_key(*ci, *n)),
+                    MaW::DelRange(a, z) if atomic => b.delete_range_cf(&h, ma_key(*ci, *a), ma_key(*ci, *z)),
+                    MaW::Put(n, v) => db.put_cf(&h, ma_key(*ci, *n), v)?,
+                    MaW::Del(n) => db.delete_cf(&h, ma_key(*ci, *n))?,
+                    MaW::DelRange(a, z) => db.delete_range_cf(&h, ma_key(*ci, *a), ma_key(*ci, *z))?,
+                }
+            }
+            if atomic {
+                db.write(b)?;
+            }
+        }
+        let s1 = self.seq();
+        let mut seq = s0;
+        for (ci, op) in &ops {
+            if !atomic {
+                seq += 1;
+            } else {
+                seq = s0 + 1;
+            }
+            let at = if self.db.is_some() { format!(" @{seq}") } else { String::new() };
+            let m = &mut self.model[*ci];
+            match op {
+                MaW::Put(n, v) => {
+                    let what = if m.contains_key(&ma_key(*ci, *n)) { "Put(update)" } else { "Put(insert)" };
+                    m.insert(ma_key(*ci, *n), v.clone());
+                    self.hist.entry((*ci, *n)).or_default().push(format!("{tag} {what} `{v}`{at}"));
+                }
+                MaW::Del(n) => {
+                    m.remove(&ma_key(*ci, *n));
+                    self.hist.entry((*ci, *n)).or_default().push(format!("{tag} Delete{at}"));
+                }
+                MaW::DelRange(a, z) => {
+                    for n in *a..*z {
+                        m.remove(&ma_key(*ci, n));
+                        self.hist.entry((*ci, n)).or_default().push(format!("{tag} DeleteRange[{a:03},{z:03}){at}"));
+                    }
+                }
+            }
+        }
+        if self.db.is_some() {
+            let cfs: Vec<&str> = {
+                let mut v: Vec<&str> = ops.iter().map(|(c, _)| MA_CFS[*c].0).collect();
+                v.sort();
+                v.dedup();
+                v
+            };
+            self.say(format!("- write `{tag}`{}: {} op(s) to {:?}, seq {}..{}", if atomic { " (ONE WriteBatch)" } else { "" }, ops.len(), cfs, s0 + 1, s1));
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self, ci: usize, why: &str) -> R<()> {
+        let Some(db) = &self.db else { return Ok(()) };
+        let before: Vec<String> = db.live_files()?.into_iter().map(|f| f.name).collect();
+        db.flush_cf(&db.cf_handle(MA_CFS[ci].0).unwrap())?;
+        let new: Vec<String> = db
+            .live_files()?
+            .into_iter()
+            .filter(|f| !before.contains(&f.name))
+            .map(|f| format!("{} (L{}, {} B, {} entries, {} deletions)", f.name.trim_start_matches('/'), f.level, f.size, f.num_entries, f.num_deletions))
+            .collect();
+        let logs = self.logs();
+        self.say(format!("- flush_cf({}) [{why}] -> new SST {}; WALs now {logs}", MA_CFS[ci].0, new.join(", ")));
+        Ok(())
+    }
+
+    fn logs(&self) -> String {
+        list_files(&self.dir, "log").iter().map(|p| format!("{} ({} B)", p.file_name().unwrap().to_string_lossy(), fs::metadata(p).map(|m| m.len()).unwrap_or(0))).collect::<Vec<_>>().join(", ")
+    }
+
+    fn level_counts(&self, ci: usize) -> R<[usize; 3]> {
+        let db = self.db.as_ref().unwrap();
+        let h = db.cf_handle(MA_CFS[ci].0).unwrap();
+        let mut c = [0usize; 3];
+        for (l, x) in c.iter_mut().enumerate() {
+            *x = db.property_int_value_cf(&h, &format!("rocksdb.num-files-at-level{l}"))?.unwrap_or(0) as usize;
+        }
+        Ok(c)
+    }
+
+    fn inventory(&mut self, title: &str) -> R<()> {
+        let Some(db) = &self.db else { return Ok(()) };
+        let mut lf = db.live_files()?;
+        lf.sort_by(|a, b| (MA_CFS.iter().position(|c| c.0 == a.column_family_name), a.level, &a.name).cmp(&(MA_CFS.iter().position(|c| c.0 == b.column_family_name), b.level, &b.name)));
+        let mut s = format!("\n#### Inventory: {title}\n\n| CF | level | file | size | entries | deletions | smallest .. largest |\n|---|---|---|---|---|---|---|\n");
+        for f in &lf {
+            writeln!(
+                s,
+                "| {} | L{} | {} | {} | {} | {} | `{}` .. `{}` |",
+                f.column_family_name,
+                f.level,
+                f.name.trim_start_matches('/'),
+                f.size,
+                f.num_entries,
+                f.num_deletions,
+                esc(f.start_key.as_deref().unwrap_or(b"")),
+                esc(f.end_key.as_deref().unwrap_or(b""))
+            )?;
+        }
+        let mut counts = vec![];
+        for (ci, cf) in MA_CFS.iter().enumerate() {
+            let c = self.level_counts(ci)?;
+            counts.push(format!("{} L0={} L1={} L2={}", cf.0, c[0], c[1], c[2]));
+        }
+        writeln!(s, "\n`rocksdb.num-files-at-level<N>`: {}; WALs: {}; latest_sequence_number {}\n", counts.join("; "), self.logs(), self.seq())?;
+        self.say(s);
+        Ok(())
+    }
+
+    /// Round 1: manual CompactRange([key(a), key(b)]) of one CF while L2 is empty (output L1).
+    fn compact_to_l1(&mut self, ci: usize, a: usize, b: usize) -> R<()> {
+        let Some(db) = &self.db else { return Ok(()) };
+        let h = db.cf_handle(MA_CFS[ci].0).unwrap();
+        let before: Vec<String> = db.live_files()?.into_iter().filter(|f| f.column_family_name == MA_CFS[ci].0).map(|f| format!("{}@L{}", f.name.trim_start_matches('/'), f.level)).collect();
+        let mut co = CompactOptions::default();
+        co.set_exclusive_manual_compaction(true);
+        co.set_bottommost_level_compaction(BottommostLevelCompaction::Skip);
+        db.compact_range_cf_opt(&h, Some(ma_key(ci, a)), Some(ma_key(ci, b)), &co);
+        let after: Vec<String> = db.live_files()?.into_iter().filter(|f| f.column_family_name == MA_CFS[ci].0).map(|f| format!("{}@L{}", f.name.trim_start_matches('/'), f.level)).collect();
+        let gone: Vec<&String> = before.iter().filter(|x| !after.contains(x)).collect();
+        let new: Vec<&String> = after.iter().filter(|x| !before.contains(x)).collect();
+        drop(h);
+        self.say(format!("- compact_range_cf_opt({}, `{}`..`{}`, exclusive, bottommost Skip): inputs {gone:?} -> outputs {new:?}", MA_CFS[ci].0, ma_key(ci, a), ma_key(ci, b)));
+        Ok(())
+    }
+
+    /// Round 2: manual CompactRange(full range, change_level=true, target_level=2): ReFitLevel L1 -> L2.
+    fn refit_to_l2(&mut self, ci: usize) -> R<()> {
+        let Some(db) = &self.db else { return Ok(()) };
+        let h = db.cf_handle(MA_CFS[ci].0).unwrap();
+        let mut co = CompactOptions::default();
+        co.set_exclusive_manual_compaction(true);
+        co.set_bottommost_level_compaction(BottommostLevelCompaction::Skip);
+        co.set_change_level(true);
+        co.set_target_level(2);
+        let c0 = self.level_counts(ci)?;
+        db.compact_range_cf_opt(&h, None::<&[u8]>, None::<&[u8]>, &co);
+        let c1 = self.level_counts(ci)?;
+        drop(h);
+        self.say(format!("- compact_range_cf_opt({}, full range, change_level=true, target_level=2, bottommost Skip): levels L0/L1/L2 {c0:?} -> {c1:?}", MA_CFS[ci].0));
+        if c1[2] != 3 || c1[1] != 0 {
+            return Err(format!("refit to L2 did not give 3 L2 files: {c1:?}").into());
+        }
+        Ok(())
+    }
+
+    /// Round 3: the engine's automatic L0 -> L1 compaction for one CF (trigger 2), then disabled again.
+    fn auto_l0_to_l1(&mut self, ci: usize) -> R<()> {
+        let Some(db) = &self.db else { return Ok(()) };
+        let h = db.cf_handle(MA_CFS[ci].0).unwrap();
+        let before: Vec<String> = db.live_files()?.into_iter().filter(|f| f.column_family_name == MA_CFS[ci].0).map(|f| format!("{}@L{}", f.name.trim_start_matches('/'), f.level)).collect();
+        db.set_options_cf(&h, &[("disable_auto_compactions", "false")])?;
+        db.wait_for_compact(&WaitForCompactOptions::default())?;
+        db.set_options_cf(&h, &[("disable_auto_compactions", "true")])?;
+        let after: Vec<String> = db.live_files()?.into_iter().filter(|f| f.column_family_name == MA_CFS[ci].0).map(|f| format!("{}@L{}", f.name.trim_start_matches('/'), f.level)).collect();
+        let gone: Vec<&String> = before.iter().filter(|x| !after.contains(x)).collect();
+        let new: Vec<&String> = after.iter().filter(|x| !before.contains(x)).collect();
+        drop(h);
+        self.say(format!("- automatic compaction {} (SetOptions disable_auto_compactions=false, level0_file_num_compaction_trigger=2, WaitForCompact, then disable_auto_compactions=true): inputs {gone:?} -> outputs {new:?}", MA_CFS[ci].0));
+        Ok(())
+    }
+}
+
+fn ma_puts(ci: usize, tag: &str, ns: impl IntoIterator<Item = usize>) -> Vec<(usize, MaW)> {
+    ns.into_iter().map(|n| (ci, MaW::Put(n, format!("{tag}-{n:03}")))).collect()
+}
+
+/// The whole scenario. With `m.db == None` only the model/history is built (used by verify).
+fn ma_script(m: &mut Ma) -> R<()> {
+    m.say("\n### Phase A: two flush epochs per future-L2 range, per CF");
+    for ci in 0..3 {
+        for &s in &MA_A {
+            m.apply(&format!("a1[{s:03}]"), ma_puts(ci, "a1", s..s + 50), false)?;
+            m.flush(ci, "epoch a1")?;
+            let mut ops = ma_puts(ci, "a2", (s..s + 50).step_by(5));
+            ops.push((ci, MaW::Del(s + 3)));
+            ops.push((ci, MaW::Del(s + 13)));
+            ops.push((ci, MaW::DelRange(s + 20, s + 24)));
+            m.apply(&format!("a2[{s:03}]"), ops, false)?;
+            m.flush(ci, "epoch a2")?;
+        }
+    }
+    m.inventory("before round 1 (each CF: 6 overlapping-in-pairs L0 files)")?;
+    m.say("\n### Round 1 (manual): CompactRange per range -> one merged L1 file per range (L2 still empty, so L1 is the bottommost level: tombstones and older versions are dropped)");
+    for ci in 0..3 {
+        for &s in &MA_A {
+            m.compact_to_l1(ci, s, s + 49)?;
+        }
+    }
+    m.inventory("after round 1 / before round 2")?;
+    m.say("\n### Round 2 (manual): CompactRange(change_level=true, target_level=2) per CF -> engine ReFitLevel moves the three L1 files to L2");
+    for ci in 0..3 {
+        m.refit_to_l2(ci)?;
+    }
+    m.inventory("after round 2")?;
+
+    m.say("\n### Phase B + Round 3 (automatic L0 -> L1): two flush epochs per L1 range, compacted by the engine while L2 holds older data");
+    for ci in 0..3 {
+        for &(s, e) in &MA_B {
+            m.apply(&format!("b1[{s:03}]"), ma_puts(ci, "b1", (s..=e).filter(|n| n % 2 == 0)), false)?;
+            m.flush(ci, "epoch b1")?;
+            let mut ops = vec![(ci, MaW::Put(s + 2, format!("b2-{:03}", s + 2)))];
+            ops.push((ci, MaW::Del(s + 1)));
+            ops.push((ci, MaW::Del(s + 9)));
+            ops.push((ci, MaW::DelRange(s + 4, s + 8)));
+            ops.extend(ma_puts(ci, "b2", (e - 9..=e).filter(|n| n % 2 == 1)));
+            m.apply(&format!("b2[{s:03}]"), ops, false)?;
+            m.flush(ci, "epoch b2")?;
+            if m.db.is_some() && ci == 0 && s == MA_B[0].0 {
+                m.inventory("before the first round-3 compaction (default)")?;
+            }
+            m.auto_l0_to_l1(ci)?;
+        }
+    }
+    m.inventory("after round 3")?;
+
+    m.say("\n### Phase C: three overlapping L0 flushes per CF (default now; cf_users/cf_orders third flush during the WAL phase)");
+    let c1 = |ci: usize| -> Vec<(usize, MaW)> {
+        let mut v = ma_puts(ci, "c1", (20..=120).step_by(10));
+        v.push((ci, MaW::Del(45)));
+        v
+    };
+    let c2 = |ci: usize| -> Vec<(usize, MaW)> {
+        let mut v = ma_puts(ci, "c2", (60..=180).step_by(15));
+        v.push((ci, MaW::DelRange(100, 106)));
+        v
+    };
+    let c3 = |ci: usize| -> Vec<(usize, MaW)> {
+        let mut v = ma_puts(ci, "c3", (140..=260).step_by(20));
+        v.push((ci, MaW::Del(205)));
+        v.push((ci, MaW::Put(30, "c3-030".into())));
+        v
+    };
+    for ci in 0..3 {
+        m.apply("c1", c1(ci), false)?;
+        m.flush(ci, "epoch c1")?;
+        m.apply("c2", c2(ci), false)?;
+        m.flush(ci, "epoch c2")?;
+    }
+    m.apply("c3", c3(0), false)?;
+    m.flush(0, "epoch c3")?;
+
+    m.say("\n### WAL phase: flush sequencing so older WALs stay needed by unflushed CF data");
+    m.apply("c3", c3(1), false)?;
+    m.apply("w1", vec![(0, MaW::Put(300, "w1-300".into())), (0, MaW::Put(1, "w1-001".into())), (0, MaW::Del(2))], false)?;
+    m.flush(1, "cf_users epoch c3; default W1 stays unflushed")?;
+    m.apply("c3", c3(2), false)?;
+    let mut w2 = vec![];
+    for ci in [0, 1] {
+        w2.extend([(ci, MaW::Put(301, "w2-301".into())), (ci, MaW::Put(11, "w2-011".into())), (ci, MaW::Del(12))]);
+    }
+    m.apply("w2", w2, false)?;
+    m.flush(2, "cf_orders epoch c3; default W1+W2 and cf_users W2 stay unflushed")?;
+    let mut w3 = vec![];
+    for ci in 0..3 {
+        w3.extend([(ci, MaW::Put(302, "w3-302".into())), (ci, MaW::Put(303, "w3-303".into())), (ci, MaW::Put(5, "w3-005".into())), (ci, MaW::Del(6)), (ci, MaW::DelRange(210, 215))]);
+    }
+    m.apply("w3", w3, false)?;
+    let mut wb = vec![];
+    for ci in 0..3 {
+        wb.push((ci, MaW::Put(304, "wb-304".into())));
+        wb.push((ci, MaW::Del(7)));
+    }
+    m.apply("wb", wb, true)?;
+    Ok(())
+}
+
+fn ma_opts() -> Options {
+    let mut o = Options::default();
+    o.create_if_missing(true);
+    o.create_missing_column_families(true);
+    o.set_disable_auto_compactions(true); // toggled per CF only for round 3
+    o.set_level_zero_file_num_compaction_trigger(2);
+    o.set_level_compaction_dynamic_level_bytes(false); // L1 is the base level; L2 below it
+    o.set_num_levels(7);
+    o.set_write_buffer_size(64 << 20); // nothing flushes unless the scenario flushes
+    o.set_keep_log_file_num(1);
+    o.set_compression_type(DBCompressionType::None);
+    // Same codec (None) on every level. Setting compression_per_level also makes RocksDB 10.4.2 skip its
+    // L0 -> L1 trivial-move shortcuts (db/compaction/compaction_picker_level.cc:638 TryPickL0TrivialMove and
+    // :707 the single-file expansion in TryExtendNonL0TrivialMove; both require compression_per_level empty),
+    // so the round-3 automatic compaction really merges both L0 epochs of a range into one L1 file.
+    o.set_compression_per_level(&[DBCompressionType::None; 7]);
+    o.set_block_based_table_factory(&{
+        let mut b = BlockBasedOptions::default();
+        b.set_block_size(256);
+        b.set_bloom_filter(10.0, false);
+        b
+    });
+    o
+}
+
+const MA_SELECTED: [usize; 16] = [1, 2, 3, 5, 6, 7, 20, 21, 30, 31, 35, 45, 100, 102, 205, 211];
+
+fn ma_selected(m: &Ma) -> String {
+    let mut s = String::from("| key | history (epoch, op, value, seq) | expected final |\n|---|---|---|\n");
+    for (ci, cf) in MA_CFS.iter().enumerate() {
+        for &n in &MA_SELECTED {
+            let k = ma_key(ci, n);
+            let h = m.hist.get(&(ci, n)).map(|v| v.join("; ")).unwrap_or_default();
+            let fin = m.model[ci].get(&k).map(|v| format!("`{v}`")).unwrap_or_else(|| "absent".into());
+            let _ = writeln!(s, "| {} `{k}` | {h} | {fin} |", cf.0);
+        }
+    }
+    s
+}
+
+fn multilevel_advanced(out: &Path, evidence: Option<&Path>) -> R<()> {
+    // Guard: never wipe an existing database (e.g. the shipped examples/data/multilevel-advanced-db).
+    if out.join("CURRENT").exists() {
+        return Err(format!("refusing to overwrite {}: it already contains CURRENT (an existing RocksDB directory); choose an empty or new scratch directory", out.display()).into());
+    }
+    if out.exists() {
+        fs::remove_dir_all(out)?;
+    }
+    fs::create_dir_all(out)?;
+    let out = out.canonicalize()?;
+    let o = ma_opts();
+    let descs: Vec<ColumnFamilyDescriptor> = MA_CFS.iter().map(|c| ColumnFamilyDescriptor::new(c.0, o.clone())).collect();
+    let db = DB::open_cf_descriptors(&o, &out, descs)?;
+    let mut m = Ma { db: Some(db), dir: out.clone(), model: vec![Default::default(); 3], hist: Default::default(), ev: String::new(), quiet: false };
+    m.say("# multilevel-advanced generation evidence (fixture-gen multilevel-advanced)\n");
+    m.say("RocksDB 10.4.2 (rocksdb 0.24.0 / librocksdb-sys 0.17.3+10.4.2). Options: 3 CFs default/cf_users/cf_orders, disable_auto_compactions=true (round 3 toggles it per CF), level0_file_num_compaction_trigger=2, level_compaction_dynamic_level_bytes=false, num_levels=7, write_buffer_size 64 MiB, compression None, block_size 256, Bloom 10 bits/key, WAL enabled, recycle_log_file_num 0.");
+    ma_script(&mut m)?;
+    m.inventory("FINAL (before close)")?;
+    {
+        let db = m.db.as_ref().unwrap();
+        let mut s = String::new();
+        for c in MA_CFS {
+            let h = db.cf_handle(c.0).unwrap();
+            writeln!(s, "\n`rocksdb.levelstats` {}:\n```\n{}```", c.0, db.property_value_cf(&h, "rocksdb.levelstats")?.unwrap_or_default())?;
+            writeln!(s, "`rocksdb.sstables` {} (file:size[smallest_seq .. largest_seq] keys):\n```\n{}```", c.0, db.property_value_cf(&h, "rocksdb.sstables")?.unwrap_or_default())?;
+            writeln!(
+                s,
+                "{} active memtable: {} entries, {} deletes (unflushed, only in the WALs)",
+                c.0,
+                db.property_int_value_cf(&h, "rocksdb.num-entries-active-mem-table")?.unwrap_or(0),
+                db.property_int_value_cf(&h, "rocksdb.num-deletes-active-mem-table")?.unwrap_or(0)
+            )?;
+        }
+        writeln!(s, "\n`rocksdb.min-log-number-to-keep`: {}", db.property_int_value("rocksdb.min-log-number-to-keep")?.unwrap_or(0))?;
+        writeln!(s, "latest_sequence_number: {}", db.latest_sequence_number())?;
+        let mut counts = vec![];
+        for (ci, c) in MA_CFS.iter().enumerate() {
+            let (n, _, _) = count_cf(db, c.0)?;
+            let want = m.model[ci].len();
+            counts.push(format!("{} {n} (model {want})", c.0));
+            if n != want {
+                return Err(format!("{}: engine has {n} keys, model {want}", c.0).into());
+            }
+        }
+        writeln!(s, "keys per CF via full iteration: {}", counts.join(", "))?;
+        m.say(s);
+    }
+    let lc: Vec<[usize; 3]> = (0..3).map(|ci| m.level_counts(ci)).collect::<R<_>>()?;
+    drop(m.db.take()); // clean close; WAL enabled => no flush on close
+    clean_db_dir(&out)?;
+    let mut names: Vec<_> = fs::read_dir(&out)?.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    names.sort();
+    let mut s = String::from("\n### Final directory after close (LOCK/LOG removed)\n\n| file | bytes | sha256 |\n|---|---|---|\n");
+    let mut total = 0u64;
+    for p in &names {
+        let len = fs::metadata(p)?.len();
+        total += len;
+        writeln!(s, "| {} | {len} | {} |", p.file_name().unwrap().to_string_lossy(), sha256_file(p)?)?;
+    }
+    writeln!(s, "\nTotal {} files, {total} bytes; level counts L0/L1/L2 per CF {lc:?}", names.len())?;
+    m.say(s);
+    m.say("\n### Selected keys (history from the generator; seq = sequence number assigned)\n");
+    let sel = ma_selected(&m);
+    m.say(sel);
+    for w in list_files(&out, "log") {
+        let sc = scan_wal(&w)?;
+        m.say(format!("\nWAL scan {} (generator mini-scanner):\n{sc}", w.file_name().unwrap().to_string_lossy()));
+    }
+    if let Some(e) = evidence {
+        fs::write(e, &m.ev)?;
+    }
+    if lc.iter().any(|c| c.contains(&0)) {
+        return Err("some CF lacks a file on L0, L1 or L2".into());
+    }
+    Ok(())
+}
+
+fn multilevel_advanced_verify(shipped: &Path, scratch: &Path) -> R<()> {
+    if scratch.exists() {
+        fs::remove_dir_all(scratch)?;
+    }
+    fs::create_dir_all(scratch)?;
+    let sums = |d: &Path| -> R<Vec<(String, String)>> {
+        let mut v = vec![];
+        for p in list_all(d) {
+            v.push((p.file_name().unwrap().to_string_lossy().to_string(), sha256_file(&p)?));
+        }
+        Ok(v)
+    };
+    let before = sums(shipped)?;
+    let mut model = Ma { db: None, dir: PathBuf::new(), model: vec![Default::default(); 3], hist: Default::default(), ev: String::new(), quiet: true };
+    ma_script(&mut model)?;
+    let mut ok = true;
+    let mut chk = |name: &str, cond: bool, detail: String| {
+        println!("{} {name}: {detail}", if cond { "PASS" } else { "FAIL" });
+        ok &= cond;
+    };
+    let o = {
+        let mut o = ma_opts();
+        o.create_if_missing(false);
+        o.create_missing_column_families(false);
+        o
+    };
+    let descs = || -> Vec<ColumnFamilyDescriptor> { MA_CFS.iter().map(|c| ColumnFamilyDescriptor::new(c.0, o.clone())).collect() };
+    for (mode, sub) in [("read-only", "ro-copy"), ("read-write (WAL recovery)", "verify-copy")] {
+        let d = scratch.join(sub);
+        copy_dir(shipped, &d)?;
+        let db = if sub == "ro-copy" { DB::open_cf_descriptors_read_only(&o, &d, descs(), false)? } else { DB::open_cf_descriptors(&o, &d, descs())? };
+        println!("== {mode} open of {}", d.display());
+        let mut lf = db.live_files()?;
+        lf.sort_by(|a, b| (MA_CFS.iter().position(|c| c.0 == a.column_family_name), a.level, &a.name).cmp(&(MA_CFS.iter().position(|c| c.0 == b.column_family_name), b.level, &b.name)));
+        for f in &lf {
+            println!(
+                "  {} L{} {} {} B entries {} deletions {} {}..{}",
+                f.column_family_name,
+                f.level,
+                f.name.trim_start_matches('/'),
+                f.size,
+                f.num_entries,
+                f.num_deletions,
+                esc(f.start_key.as_deref().unwrap_or(b"")),
+                esc(f.end_key.as_deref().unwrap_or(b""))
+            );
+        }
+        for (ci, c) in MA_CFS.iter().enumerate() {
+            let h = db.cf_handle(c.0).unwrap();
+            let mut lv = [0u64; 3];
+            for (l, x) in lv.iter_mut().enumerate() {
+                *x = db.property_int_value_cf(&h, &format!("rocksdb.num-files-at-level{l}"))?.unwrap_or(0);
+            }
+            let ls = db.property_value_cf(&h, "rocksdb.levelstats")?.unwrap_or_default();
+            println!("  levelstats {}: {}", c.0, ls.lines().skip(2).filter(|l| !l.trim().is_empty()).map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" | "));
+            if sub == "ro-copy" {
+                chk(&format!("{mode} {} levels", c.0), lv == [3, 3, 3], format!("files at L0/L1/L2 = {lv:?} (expected [3, 3, 3])"));
+            } else {
+                chk(
+                    &format!("{mode} {} levels", c.0),
+                    lv[1] == 3 && lv[2] == 3 && lv[0] >= 3,
+                    format!("files at L0/L1/L2 = {lv:?} (L1/L2 = 3; L0 >= 3: recovery may flush the WAL data into a new L0 file)"),
+                );
+            }
+            // every key and value
+            let mut it = db.raw_iterator_cf(&h);
+            it.seek_to_first();
+            let mut got = std::collections::BTreeMap::new();
+            while it.valid() {
+                got.insert(String::from_utf8_lossy(it.key().unwrap()).to_string(), String::from_utf8_lossy(it.value().unwrap()).to_string());
+                it.next();
+            }
+            it.status()?;
+            let want = &model.model[ci];
+            chk(&format!("{mode} {} content", c.0), &got == want, format!("{} keys iterated, model {} keys, identical={}", got.len(), want.len(), &got == want));
+            // representative Gets
+            let g = |n: usize| -> R<Option<String>> { Ok(db.get_cf(&h, ma_key(ci, n))?.map(|v| String::from_utf8_lossy(&v).to_string())) };
+            let p = c.1;
+            let mut cases: Vec<(usize, Option<String>, &str)> = vec![
+                (30, Some("c3-030".into()), "updated in a2,b1,c1,c3: newest wins"),
+                (3, None, "point Delete in a2 (dropped with the key at bottommost L1)"),
+                (21, None, "inside a2 DeleteRange [020,024)"),
+                (20, Some("c1-020".into()), "range-deleted in a2, re-inserted by c1"),
+                (31, None, "point Delete b2 (tombstone in L1 over L2 value)"),
+                (35, None, "inside b2 DeleteRange [034,038) over L2 values"),
+                (45, None, "point Delete c1 (tombstone in L0)"),
+                (102, None, "inside c2 DeleteRange [100,106)"),
+                (0, Some("a2-000".into()), "boundary: first key of L2 range"),
+                (49, Some("a1-049".into()), "boundary: last key of L2 range"),
+                (50, Some("c1-050".into()), "gap key inserted only by c1"),
+                (79, Some("b2-079".into()), "boundary: last key of L1 range"),
+                (5, Some("w3-005".into()), "WAL-only update"),
+                (6, None, "WAL-only point Delete"),
+                (7, None, "WAL-only Delete in the cross-CF batch"),
+                (211, None, "WAL-only DeleteRange [210,215)"),
+                (215, Some("a2-215".into()), "end key of the WAL DeleteRange survives"),
+                (302, Some("w3-302".into()), "WAL-only insert"),
+                (304, Some("wb-304".into()), "WAL-only insert in the cross-CF batch"),
+            ];
+            if ci == 0 {
+                cases.push((1, Some("w1-001".into()), "WAL-only update (oldest retained WAL)"));
+                cases.push((2, None, "WAL-only Delete (oldest retained WAL)"));
+            }
+            if ci < 2 {
+                cases.push((11, Some("w2-011".into()), "WAL-only update (second WAL)"));
+                cases.push((12, None, "WAL-only Delete (second WAL)"));
+            }
+            for (n, want, why) in cases {
+                let got = g(n)?;
+                chk(&format!("{mode} get {p}:{n:03}"), got == want, format!("{got:?} (expected {want:?}; {why})"));
+            }
+        }
+        println!("  latest_sequence_number {}", db.latest_sequence_number());
+        drop(db);
+        if sub == "verify-copy" {
+            println!("  files after recovery: {}", list_all(&d).iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>().join(", "));
+        }
+    }
+    let after = sums(shipped)?;
+    chk("shipped unchanged", before == after, format!("{} files, sha256 before == after: {}", before.len(), before == after));
+    println!("{}", if ok { "ALL PASS" } else { "SOME FAIL" });
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn list_all(d: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(d).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_file()).collect()).unwrap_or_default();
+    v.sort();
+    v
+}
+
 fn mb_arg(args: &[String]) -> u64 {
     args.iter().position(|a| a == "--mb").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(100)
 }
@@ -1252,6 +2027,26 @@ fn main() -> R<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s == "large-sst").unwrap_or(false) {
         return large_sst(Path::new(&args[2]), mb_arg(&args));
+    }
+    if args.get(1).map(|s| s == "checkpoint").unwrap_or(false) {
+        return checkpoint(Path::new(&args[2]));
+    }
+    if args.get(1).map(|s| s == "many-sst").unwrap_or(false) {
+        let n = args.iter().position(|a| a == "--files").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(600);
+        return many_sst(Path::new(&args[2]), n, args.iter().any(|a| a == "--overlap"));
+    }
+    if args.get(1).map(|s| s == "wal-stale-tail").unwrap_or(false) {
+        return wal_stale_tail(Path::new(&args[2]));
+    }
+    if args.get(1).map(|s| s == "multi-cf-wal").unwrap_or(false) {
+        return multi_cf_wal(Path::new(&args[2]));
+    }
+    if args.get(1).map(|s| s == "multilevel-advanced").unwrap_or(false) {
+        let ev = args.iter().position(|a| a == "--evidence").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+        return multilevel_advanced(Path::new(&args[2]), ev.as_deref());
+    }
+    if args.get(1).map(|s| s == "multilevel-advanced-verify").unwrap_or(false) {
+        return multilevel_advanced_verify(Path::new(&args[2]), Path::new(&args[3]));
     }
     if args.get(1).map(|s| s == "large-wal").unwrap_or(false) {
         return large_wal(Path::new(&args[2]), mb_arg(&args));
@@ -1311,5 +2106,56 @@ fn main() -> R<()> {
     fs::write(out.join("MANIFEST.md"), &m.s)?;
     fs::write(out.join("SHA256SUMS"), &sums)?;
     println!("OK {} files, {} bytes", files.len(), total);
+    Ok(())
+}
+
+/// CRC32C (Castagnoli), bitwise; only for the tiny synthetic record of `wal-stale-tail`.
+fn crc32c_bitwise(data: &[u8]) -> u32 {
+    let mut c = !0u32;
+    for &b in data {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0x82F6_3B78 } else { c >> 1 };
+        }
+    }
+    !c
+}
+
+/// `fixture-gen wal-stale-tail <DIR>`: SYNTHETIC scratch fixture (NOT shipped, NOT in examples/ or tests/fixtures).
+/// Creates `multi-cf-wal` at DIR, then appends to the newest `.log` ONE valid recyclable-format record
+/// (crc32c masked | len u16 LE | type 5 kRecyclableFullType | log_number u32 LE | payload) whose log number is
+/// LOWER than the file's own number and whose payload is a valid one-Put WriteBatch for the default CF. The reader
+/// (RocksDB log_reader.cc kOldRecord) treats it as the end of the log: the "stale tail" state of a recycled WAL.
+fn wal_stale_tail(out: &Path) -> R<()> {
+    multi_cf_wal(out)?;
+    let wal = list_files(out, "log").pop().ok_or("no .log in the generated folder")?;
+    let own: u32 = wal.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok()).ok_or("log file name is not a number")?;
+    let old = own.saturating_sub(2).max(1).min(own - 1);
+    // WriteBatch: sequence u64 LE | count u32 LE | 0x01 (Put, default CF) varint klen key varint vlen value
+    let (k, v) = (b"stale-key", b"stale-value");
+    let mut batch = Vec::new();
+    batch.extend_from_slice(&9999u64.to_le_bytes());
+    batch.extend_from_slice(&1u32.to_le_bytes());
+    batch.push(0x01);
+    batch.push(k.len() as u8);
+    batch.extend_from_slice(k);
+    batch.push(v.len() as u8);
+    batch.extend_from_slice(v);
+    let mut body = vec![5u8];
+    body.extend_from_slice(&old.to_le_bytes());
+    body.extend_from_slice(&batch);
+    let crc = crc32c_bitwise(&body);
+    let masked = crc.rotate_right(15).wrapping_add(0xa282_ead8);
+    let mut rec = Vec::new();
+    rec.extend_from_slice(&masked.to_le_bytes());
+    rec.extend_from_slice(&(batch.len() as u16).to_le_bytes());
+    rec.extend_from_slice(&body);
+    let before = fs::metadata(&wal)?.len();
+    if (before as usize % BLOCK) + rec.len() > BLOCK {
+        return Err("record would cross a block boundary".into());
+    }
+    let mut f = fs::OpenOptions::new().append(true).open(&wal)?;
+    std::io::Write::write_all(&mut f, &rec)?;
+    println!("wal-stale-tail: appended {} B recyclable record (log number {old}, file number {own}) at offset {before} of {}", rec.len(), wal.display());
     Ok(())
 }

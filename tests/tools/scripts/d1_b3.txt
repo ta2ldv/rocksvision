@@ -1,0 +1,24 @@
+front
+move 1380 860
+sleep 0.3
+move 850 472
+sleep 1.4
+shot b3_map_hover
+move 1380 860
+sleep 0.4
+move 626 885
+sleep 1.4
+shot b3_hex_hover
+move 1380 860
+note toggle Show Tooltips off via View menu
+click 210 18
+sleep 0.6
+click 234 493
+sleep 0.6
+move 850 472
+sleep 1.5
+shot b3_map_hover_tooltips_off
+move 626 885
+sleep 1.5
+shot b3_hex_hover_tooltips_off
+move 1380 860

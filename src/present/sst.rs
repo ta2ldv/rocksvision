@@ -40,6 +40,39 @@ fn prop_field(label: &str, name: &str, v: &[u8]) -> Field {
     }
 }
 
+/// 0030 A7: the level / column family rows of an SST from its directory's MANIFEST (external
+/// evidence, not stored in the SST; Implicit, no bytes), or the unknown level with why. The CF
+/// row is compared with the SST's own `rocksdb.column.family.name` property (`cf_prop`).
+pub fn manifest_context_fields(ctx: &SstManifestContext, cf_prop: Option<&[u8]>) -> Vec<Field> {
+    let unknown = |why: String| vec![Field::new("level", None, format!("unknown — {why} (only a MANIFEST records levels)")).status(Status::Unknown)];
+    match ctx {
+        SstManifestContext::Standalone => unknown("a standalone SST has no MANIFEST context: no numbered name or no CURRENT next to it".into()),
+        SstManifestContext::NotListed { manifest, number } => unknown(format!("{manifest} in this folder does not list {number:06}.sst as a live file")),
+        SstManifestContext::Untrusted { manifest } => unknown(format!("{manifest} in this folder could not be read or replayed completely")),
+        SstManifestContext::Listed(e) => {
+            let ext = format!("External MANIFEST evidence ({}, live file {:06}), not stored in the SST.", e.manifest, e.number);
+            let meaning = |what: &str| format!("The {what} that {} records for {:06}.sst. An SST does not store its level.\n{ext}", e.manifest, e.number);
+            let read = e.read_at.map(|s| format!(" (read {})", crate::util::utc_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(s)))).unwrap_or_default();
+            let source = format!("from the folder's MANIFEST{read}");
+            let level = Field::new("level (MANIFEST)", None, format!("L{}", e.level)).status(Status::Implicit).explain(meaning("level"));
+            let cf = Field::new("column family (MANIFEST)", None, format!("{} {}", e.cf_id, e.cf_name));
+            let cf = match cf_prop.map(|p| String::from_utf8_lossy(p).into_owned()) {
+                Some(p) if p == e.cf_name => cf.status(Status::Implicit).explain(format!("{}\nAgrees with the SST property rocksdb.column.family.name.", meaning("column family"))),
+                Some(p) => cf.status(Status::Unknown).explain(format!("{}\nMANIFEST lists it under {} {}; the SST property says {p}. Not reconciled.", meaning("column family"), e.cf_id, e.cf_name)),
+                None => cf.status(Status::Implicit).explain(meaning("column family")),
+            };
+            [level, cf]
+                .into_iter()
+                .map(|mut f| {
+                    f.no_bytes_source = Some(source.clone());
+                    f.kind = K::ManifestEvidence;
+                    f
+                })
+                .collect()
+        }
+    }
+}
+
 fn space_info(b: &Block) -> Vec<SpaceInfo> {
     if b.compressed {
         vec![SpaceInfo {
@@ -776,7 +809,9 @@ impl SstInspector {
             }
             Err(e) => f.push(Field::new("footer", None, e).status(Status::Invalid).diag(self.footer_diagnostic().cloned())),
         }
-        f.push(Field::new("level", None, "unknown for a standalone SST (only a MANIFEST records levels)").status(Status::Unknown));
+        // 0030 A7: an SST does not store its column family id or level; the MANIFEST of its
+        // own directory does. Shown only for this directory + file number (`inspect`).
+        f.extend(manifest_context_fields(self.manifest_context().unwrap_or(&SstManifestContext::Standalone), self.prop("rocksdb.column.family.name")));
         if self.has_props() {
             for (k, label) in [
                 ("rocksdb.creating.db.identity", "producer DB id"),
@@ -1533,6 +1568,32 @@ impl SstInspector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0030 A7: MANIFEST rows (Implicit, no bytes, external-evidence explanation, CF agreement
+    /// or disagreement with the SST property) and the unknown level with its reason.
+    #[test]
+    fn manifest_context_rows_and_unknown_reasons() {
+        let e = SstManifestEvidence { manifest: "MANIFEST-000005".into(), number: 85, cf_id: 1, cf_name: "cf_users".into(), level: 1, read_at: Some(0) };
+        let rows = manifest_context_fields(&SstManifestContext::Listed(e.clone()), Some(b"cf_users"));
+        assert_eq!(
+            rows.iter().map(|f| (&*f.name, &*f.value, f.status)).collect::<Vec<_>>(),
+            [("level (MANIFEST)", "L1", Status::Implicit), ("column family (MANIFEST)", "1 cf_users", Status::Implicit)]
+        );
+        assert!(rows.iter().all(|f| f.span.is_none() && f.kind == K::ManifestEvidence && f.explain.contains("External MANIFEST evidence (MANIFEST-000005, live file 000085), not stored in the SST.")));
+        assert_eq!(rows[0].explain.lines().next(), Some("The level that MANIFEST-000005 records for 000085.sst. An SST does not store its level."));
+        assert!(rows[1].explain.ends_with("Agrees with the SST property rocksdb.column.family.name."));
+        assert_eq!(rows[0].no_bytes_source.as_deref(), Some("from the folder's MANIFEST (read 1970-01-01 00:00:00 UTC)"));
+        let differ = manifest_context_fields(&SstManifestContext::Listed(e), Some(b"cf_orders"));
+        assert_eq!(differ[1].status, Status::Unknown);
+        assert!(differ[1].explain.ends_with("MANIFEST lists it under 1 cf_users; the SST property says cf_orders. Not reconciled."));
+        let one = |c: SstManifestContext| manifest_context_fields(&c, None).into_iter().map(|f| (f.name, f.value, f.status)).collect::<Vec<_>>();
+        assert_eq!(
+            one(SstManifestContext::Standalone),
+            [("level".to_string(), "unknown — a standalone SST has no MANIFEST context: no numbered name or no CURRENT next to it (only a MANIFEST records levels)".to_string(), Status::Unknown)]
+        );
+        assert!(one(SstManifestContext::NotListed { manifest: "MANIFEST-000005".into(), number: 99 })[0].1.contains("does not list 000099.sst as a live file"));
+        assert!(one(SstManifestContext::Untrusted { manifest: "MANIFEST-000005".into() })[0].1.contains("could not be read or replayed completely"));
+    }
 
     /// 0015 C3 GUI-5: a tree listing reads and checks blocks only while its byte budget lasts;
     /// beyond it a block is listed "not checked" (coverage 0 of 1) and nothing is read.

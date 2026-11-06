@@ -6,29 +6,51 @@
 //! issues the decode request and executes the plan.
 
 use super::jobs::{SelectHint, ViewTarget};
+use super::lsm_map::MapSnapshot;
 use super::provenance::{self, field_at};
 use super::selection::{SelOrigin, SelSnapshot};
 use crate::limits::LIMITS;
 use crate::model::{NodeKind, Space, Span, View};
+use std::path::PathBuf;
 
-/// One history step: the view, its selection, the byte-view position (space + the offset
-/// shown) and the Go-to text, restored together by Back.
+/// One history step: the file and view, its selection, the byte-view position (space + the
+/// offset shown), the Go-to text and the LSM Map state, restored together by Back (also across
+/// files: 0024 §4).
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistEntry {
     pub kind: NodeKind,
+    pub file: PathBuf,
     pub sel: SelSnapshot,
     pub hex_space: Space,
     pub hex_at: u64,
     pub goto: String,
+    pub map: Option<MapSnapshot>,
+    /// Records table vertical scroll offset (points).
+    pub table_scroll: f32,
 }
 
-/// Where the user is (what Back restores): selection, byte-view space and offset, Go-to text.
+impl HistEntry {
+    /// The entry of view `kind` at position `h`.
+    pub fn at(kind: NodeKind, h: Here) -> HistEntry {
+        HistEntry { kind, file: h.file, sel: h.sel, hex_space: h.hex_space, hex_at: h.hex_at, goto: h.goto, map: h.map, table_scroll: h.table_scroll }
+    }
+    pub fn here(&self) -> Here {
+        Here { file: self.file.clone(), sel: self.sel.clone(), hex_space: self.hex_space, hex_at: self.hex_at, goto: self.goto.clone(), map: self.map.clone(), table_scroll: self.table_scroll }
+    }
+}
+
+/// Where the user is (what Back restores): file, selection, byte-view space and offset, Go-to
+/// text, the map state of a levels view and the records table's scroll offset.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Here {
+    pub file: PathBuf,
     pub sel: SelSnapshot,
     pub hex_space: Space,
     pub hex_at: u64,
     pub goto: String,
+    pub map: Option<MapSnapshot>,
+    /// Records table vertical scroll offset in points (0 = top).
+    pub table_scroll: f32,
 }
 
 /// Selection to apply when the requested view arrives — only if the selection epoch is still
@@ -43,11 +65,13 @@ pub struct PendingSel {
     pub via: Option<String>,
     /// Back: the saved selection, byte-view position and Go-to text to restore as they were.
     pub restore: Option<Here>,
+    /// Map state to apply on arrival (toolbar LSM Map entry, Back to a map).
+    pub map: Option<MapSnapshot>,
 }
 
 impl PendingSel {
     pub fn new(epoch: u64, origin: SelOrigin, anchor: Option<Span>, hint: Option<SelectHint>) -> Self {
-        PendingSel { epoch, origin, anchor, hint, via: None, restore: None }
+        PendingSel { epoch, origin, anchor, hint, via: None, restore: None, map: None }
     }
 }
 
@@ -106,6 +130,13 @@ impl Navigation {
     pub fn pending_target(&self) -> Option<&ViewTarget> {
         self.inflight.as_ref().map(|f| &f.target)
     }
+    pub(super) fn is_inflight(&self, req: u64) -> bool {
+        self.inflight.as_ref().is_some_and(|f| f.req == req)
+    }
+    /// The request in flight is a Back (it popped a history entry).
+    pub fn back_in_flight(&self) -> bool {
+        self.inflight.as_ref().is_some_and(|f| matches!(f.history, Applied::Popped(_)))
+    }
     pub fn can_go_back(&self) -> bool {
         !self.history.is_empty()
     }
@@ -120,19 +151,44 @@ impl Navigation {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn begin(&mut self, req: u64, target: ViewTarget, hist: HistoryOp, pending: Option<PendingSel>, epoch_now: u64, view_shown: bool, current_kind: Option<&NodeKind>) {
         let history = match (hist, current_kind) {
-            (HistoryOp::Push(Here { sel, hex_space, hex_at, goto }), Some(kind)) => {
-                let e = HistEntry { kind: kind.clone(), sel, hex_space, hex_at, goto };
-                let pushed = self.history.last() != Some(&e);
-                if pushed {
-                    self.history.push(e);
+            (HistoryOp::Push(h), Some(kind)) => {
+                if self.push(HistEntry::at(kind.clone(), h)) {
+                    Applied::Pushed
+                } else {
+                    Applied::None
                 }
-                self.cap();
-                if pushed { Applied::Pushed } else { Applied::None }
             }
             (HistoryOp::Popped(h), _) => Applied::Popped(Box::new(h)),
             _ => Applied::None,
         };
         self.inflight = Some(InFlight { req, target, guard_epoch: view_shown.then_some(epoch_now), history, pending });
+    }
+
+    /// Pushes an entry unless it equals the top one (no duplicate steps). Returns true if pushed.
+    pub(super) fn push(&mut self, e: HistEntry) -> bool {
+        let pushed = self.history.last() != Some(&e);
+        if pushed {
+            self.history.push(e);
+        }
+        self.cap();
+        pushed
+    }
+
+    /// A file switch: the request in flight belonged to the old file (its replies are dropped by
+    /// the generation); the history survives.
+    pub(super) fn drop_inflight(&mut self) {
+        self.inflight = None;
+    }
+
+    /// The user leaves for another file while a request is in flight: it is undone like an
+    /// overtaken one — a Back's popped entry goes back on the stack (architect should-fix 6).
+    pub(super) fn undo_inflight(&mut self) {
+        if let Some(f) = self.inflight.take()
+            && let Applied::Popped(h) = f.history
+        {
+            self.history.push(*h);
+            self.cap();
+        }
     }
 
     fn cap(&mut self) {
@@ -171,7 +227,7 @@ impl Navigation {
         ViewReply::Accepted { pending: f.pending.filter(|p| p.epoch == epoch_now).map(Box::new) }
     }
 
-    /// The file closed: no history, nothing in flight.
+    /// A new root context (folder or file opened by path): no history, nothing in flight.
     pub(super) fn reset(&mut self) {
         *self = Navigation::default();
     }
@@ -181,7 +237,7 @@ impl Navigation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Arrival {
     /// Back: the exact previous selection, byte-view position and Go-to text.
-    Restore(Here),
+    Restore(Box<Here>),
     /// A field row.
     Field { row: usize, origin: SelOrigin, anchor: Option<Span> },
     /// Structure bytes that are not one field; `reveal`: move the byte view to them.
@@ -195,7 +251,7 @@ pub enum Arrival {
 /// without a span selects the whole structure (`extent`).
 pub fn plan_arrival(p: PendingSel, select: Option<SelectHint>, view: &View, extent: Option<Span>) -> Arrival {
     if let Some(here) = p.restore {
-        return Arrival::Restore(here);
+        return Arrival::Restore(Box::new(here));
     }
     let hint = select.or(p.hint).unwrap_or(SelectHint { at: None, span: None });
     if let Some((space, off)) = hint.at
@@ -241,7 +297,7 @@ mod tests {
     use crate::model::{Field, Row, SpaceInfo, SpaceMap};
 
     fn here(at: u64) -> Here {
-        Here { sel: SelSnapshot::default(), hex_space: Space::File, hex_at: at, goto: format!("0x{at:x}") }
+        Here { file: PathBuf::from("/f"), sel: SelSnapshot::default(), hex_space: Space::File, hex_at: at, goto: format!("0x{at:x}"), map: None, table_scroll: 0.0 }
     }
     fn node() -> ViewTarget {
         ViewTarget::Node(NodeKind::SstFooter)
@@ -341,6 +397,6 @@ mod tests {
         // Back: restore wins over every hint.
         let mut r = p(SelOrigin::Row, None, span(Span::file(0x100, 0x10)));
         r.restore = Some(here(0x104));
-        assert_eq!(plan_arrival(r, at, &view, ext), Arrival::Restore(here(0x104)));
+        assert_eq!(plan_arrival(r, at, &view, ext), Arrival::Restore(Box::new(here(0x104))));
     }
 }

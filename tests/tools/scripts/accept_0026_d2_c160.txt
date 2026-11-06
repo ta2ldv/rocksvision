@@ -1,0 +1,24 @@
+front
+winsize 1400 900
+sleep 1.5
+move 700 880
+click 700 880
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 1.5
+shot j2_05_C_1400_zoomed
+winsize 900 700
+sleep 2
+move 500 640
+shot j2_06_C_900x700_after_zoom

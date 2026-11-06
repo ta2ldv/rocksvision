@@ -1,0 +1,20 @@
+front
+click 446 118
+sleep 3
+click 700 700
+key tab
+sleep 0.4
+shot kb3_0_tab
+key up
+sleep 0.5
+shot kb3_1_up
+key up
+sleep 0.5
+shot kb3_2_up_again
+key return
+sleep 2.5
+shot kb3_3_enter
+click 460 150
+sleep 2
+move 700 900
+shot kb3_4_back

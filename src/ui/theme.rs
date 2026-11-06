@@ -106,6 +106,18 @@ pub struct Palette {
     pub lsm_bg: Color32,
     pub lsm_present: Color32,
     pub lsm_missing: Color32,
+    // tooltips (0026 item 3): their own fill, text and border, distinct from menus/windows
+    pub tip_bg: Color32,
+    pub tip_fg: Color32,
+    /// Fact labels in tooltips.
+    pub tip_muted: Color32,
+    pub tip_border: Color32,
+    /// Drop-shadow colour (black, alpha per theme).
+    pub tip_shadow: Color32,
+    /// LSM Map lane bands (0026 D2 F4): alternating, each ≥ 1.3:1 against `data`, with
+    /// `text_muted` ≥ 4.5:1 on them.
+    pub lane_a: Color32,
+    pub lane_b: Color32,
 }
 
 /// Font family ids ("proportional" / "monospace" = egui's bundled families) and sizes in points.
@@ -142,6 +154,8 @@ pub struct WidgetStyle {
     pub header_rule: bool,
     /// Line between the side panels and the center (Wooden: 2 px brass inlay).
     pub separator: Stroke,
+    /// Corner radius of tooltips (points; non-zero in every theme).
+    pub tip_rounding: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +182,11 @@ const fn c(v: u32) -> Color32 {
 const fn sep(width: f32, v: u32) -> Stroke {
     Stroke { width, color: c(v) }
 }
+
+/// Drop shadow of tooltips: 2 pt down, blur 10 (0026 §3.2); the colour is `tip_shadow`.
+pub const TIP_SHADOW: egui::Shadow = egui::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha(110) };
+/// Inner margin of tooltips (points, x and y).
+pub const TIP_MARGIN: [f32; 2] = [8.0, 6.0];
 
 const TYPE_UI: Typography = Typography { ui_family: "proportional", mono_family: "monospace", body: 14.5, mono: 13.5, small: 12.0, header: 15.5, heading: 18.5 };
 const TYPE_MONO_UI: Typography = Typography { ui_family: "monospace", mono_family: "monospace", body: 14.0, mono: 13.5, small: 12.0, header: 15.0, heading: 18.0 };
@@ -231,6 +250,13 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_bg: c(0x2B2927),
             lsm_present: c(0xC39B7B),
             lsm_missing: c(0x857B71),
+            tip_bg: c(0x4A423B),
+            tip_fg: c(0xF4EFE9),
+            tip_muted: c(0xD2C6BA),
+            tip_border: c(0xC39B7B),
+            lane_a: c(0x3D3935),
+            lane_b: c(0x47413C),
+            tip_shadow: Color32::from_black_alpha(110),
         },
         typography: TYPE_UI,
         widgets: WidgetStyle {
@@ -243,6 +269,7 @@ pub static THEMES: &[ThemeDefinition] = &[
             scroll_bar_width: 10.0,
             header_rule: false,
             separator: sep(1.0, 0x51473F),
+            tip_rounding: 6.0,
         },
         decoration: Decoration::None,
     },
@@ -292,6 +319,13 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_bg: c(0x071007),
             lsm_present: c(0xB6FF00),
             lsm_missing: c(0x3E8F2A),
+            tip_bg: c(0x0F2A0F),
+            tip_fg: c(0xB6FF00),
+            tip_muted: c(0x8FD45A),
+            tip_border: c(0x3E8F2A),
+            lane_a: c(0x13290F),
+            lane_b: c(0x193513),
+            tip_shadow: Color32::from_black_alpha(110),
         },
         typography: TYPE_MONO_UI,
         widgets: WidgetStyle {
@@ -304,6 +338,7 @@ pub static THEMES: &[ThemeDefinition] = &[
             scroll_bar_width: 10.0,
             header_rule: false,
             separator: sep(1.0, 0x1E4A14),
+            tip_rounding: 6.0,
         },
         decoration: Decoration::None,
     },
@@ -362,6 +397,13 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_bg: c(0x0F2A5A),
             lsm_present: c(0xFFAA33),
             lsm_missing: c(0x8FA8D4),
+            tip_bg: c(0xF2F2F2),
+            tip_fg: c(0x0B1F4A),
+            tip_muted: c(0x2E3F66),
+            tip_border: c(0x6B7A99),
+            lane_a: c(0x1F4384),
+            lane_b: c(0x27519B),
+            tip_shadow: Color32::from_black_alpha(110),
         },
         typography: TYPE_UI,
         widgets: WidgetStyle {
@@ -374,6 +416,7 @@ pub static THEMES: &[ThemeDefinition] = &[
             scroll_bar_width: 6.0,
             header_rule: false,
             separator: sep(1.0, 0x0B1F4A),
+            tip_rounding: 6.0,
         },
         decoration: Decoration::None,
     },
@@ -432,6 +475,13 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_bg: c(0xF2F4F3),
             lsm_present: c(0x2454A4),
             lsm_missing: c(0x4F5A5D),
+            tip_bg: c(0x1F2729),
+            tip_fg: c(0xF2F4F3),
+            tip_muted: c(0xC9D0CE),
+            tip_border: c(0x6E7779),
+            lane_a: c(0xBABFBD),
+            lane_b: c(0xB3B8B6),
+            tip_shadow: Color32::from_black_alpha(60),
         },
         typography: TYPE_UI,
         widgets: WidgetStyle {
@@ -444,6 +494,7 @@ pub static THEMES: &[ThemeDefinition] = &[
             scroll_bar_width: 10.0,
             header_rule: true,
             separator: sep(1.0, 0x9AA1A0),
+            tip_rounding: 6.0,
         },
         decoration: Decoration::None,
     },
@@ -493,6 +544,13 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_bg: c(0x101A1E),
             lsm_present: c(0x8BBFC8),
             lsm_missing: c(0x527A83),
+            tip_bg: c(0x1C3540),
+            tip_fg: c(0xE6F6F7),
+            tip_muted: c(0x9FC6CC),
+            tip_border: c(0x8BB4BB),
+            lane_a: c(0x16262C),
+            lane_b: c(0x1D333B),
+            tip_shadow: Color32::from_black_alpha(110),
         },
         typography: TYPE_UI,
         widgets: WidgetStyle {
@@ -505,6 +563,7 @@ pub static THEMES: &[ThemeDefinition] = &[
             scroll_bar_width: 10.0,
             header_rule: false,
             separator: sep(1.0, 0x527A83),
+            tip_rounding: 6.0,
         },
         decoration: Decoration::None,
     },
@@ -554,6 +613,13 @@ pub static THEMES: &[ThemeDefinition] = &[
             lsm_bg: c(0x2A2018),
             lsm_present: c(0xD4AE6A),
             lsm_missing: c(0x8A7458),
+            tip_bg: c(0x5A4430),
+            tip_fg: c(0xF2E4C9),
+            tip_muted: c(0xD9C4A0),
+            tip_border: c(0xD4AE6A),
+            lane_a: c(0x3C2F24),
+            lane_b: c(0x47382B),
+            tip_shadow: Color32::from_black_alpha(110),
         },
         typography: TYPE_UI,
         widgets: WidgetStyle {
@@ -566,6 +632,7 @@ pub static THEMES: &[ThemeDefinition] = &[
             scroll_bar_width: 10.0,
             header_rule: false,
             separator: sep(2.0, 0xA8854F),
+            tip_rounding: 6.0,
         },
         decoration: Decoration::WoodGrain,
     },
@@ -573,7 +640,7 @@ pub static THEMES: &[ThemeDefinition] = &[
 
 /// Every non-ASCII glyph used in UI text (status symbols, links, paging, toolbar). Each must
 /// render in the bundled proportional and monospace fonts (tested); e.g. U+2192 "→" does not.
-pub const UI_GLYPHS: &str = "✔○≈⚠✖✂⛔⏹›◀▶−–·…Δ📂📄⌘◽";
+pub const UI_GLYPHS: &str = "✔○≈⚠✖✂⛔⏹›◀▶−–·…Δ📂📄⌘◽×—";
 
 /// Looks up a theme by stable id; unknown ids fall back to `DEFAULT_THEME` (XCopy). The
 /// default is registered (tested); `THEMES[0]` is only a guard that never panics.
@@ -653,6 +720,20 @@ impl Tokens {
         }
     }
 
+    /// The one tooltip frame (0026 item 3): egui's popup frame (`Frame::popup`: the style's menu
+    /// margin) with the tooltip tokens: `tip_bg` fill, 1 pt `tip_border`, `tip_rounding`
+    /// corners and a soft drop shadow. Applied by the tooltip gate (`panels::TipExt`) through
+    /// `Tooltip::popup.frame(..)` (egui 0.36 containers/popup.rs 367–372, 603), so menus and
+    /// windows keep `window_fill`.
+    pub fn tip_frame(&self, style: &egui::Style) -> egui::Frame {
+        egui::Frame::popup(style)
+            .fill(self.p.tip_bg)
+            .stroke(Stroke::new(1.0, self.p.tip_border))
+            .corner_radius(CornerRadius::same(self.w.tip_rounding.round().clamp(1.0, 24.0) as u8))
+            .inner_margin(egui::Margin::symmetric(TIP_MARGIN[0] as i8, TIP_MARGIN[1] as i8))
+            .shadow(egui::Shadow { color: self.p.tip_shadow, ..TIP_SHADOW })
+    }
+
     /// Hover outline of a popup / menu item (Copy… popup, in-window fallback menu, context
     /// menus): the same `outline` stroke buttons get from `apply_theme`. Needed because egui's
     /// menu style (`egui::containers::menu::menu_style`, egui 0.36) sets `hovered.bg_stroke` to
@@ -681,6 +762,20 @@ impl Tokens {
         painter.line_segment([r.right_top(), r.right_bottom()], d);
         painter.line_segment([r.right_bottom(), r.left_bottom()], d);
     }
+    /// Sunken bevel (light and dark edges swapped): a latched toggle (LSM Map active, the
+    /// selected Table | Map segment). No-op for flat themes.
+    pub fn bevel_sunken(&self, painter: &egui::Painter, rect: egui::Rect) {
+        if self.w.bevel != Bevel::Raised {
+            return;
+        }
+        let r = rect.shrink(0.5);
+        let l = Stroke::new(1.0, self.w.bevel_light);
+        let d = Stroke::new(1.0, self.w.bevel_dark);
+        painter.line_segment([r.left_bottom(), r.left_top()], d);
+        painter.line_segment([r.left_top(), r.right_top()], d);
+        painter.line_segment([r.right_top(), r.right_bottom()], l);
+        painter.line_segment([r.right_bottom(), r.left_bottom()], l);
+    }
 }
 
 fn family(id: &str) -> FontFamily {
@@ -708,6 +803,7 @@ pub fn apply_theme(ctx: &egui::Context, def: &'static ThemeDefinition, cache: &m
         st.text_styles.insert(TextStyle::Small, FontId::new(ty.small, ui_f.clone()));
         st.text_styles.insert(TextStyle::Heading, FontId::new(ty.heading, ui_f.clone()));
         st.text_styles.insert(TextStyle::Name("Header".into()), FontId::new(ty.header, ui_f));
+        super::panels::tip_timing(st);
         st.spacing.scroll.foreground_color = false;
         st.spacing.scroll.floating = false;
         st.spacing.scroll.bar_width = w.scroll_bar_width;
@@ -888,8 +984,80 @@ mod tests {
             chk("scroll_thumb/track", p.scroll_thumb, p.scroll_track, 3.0);
             chk("lsm_present/lsm_bg", p.lsm_present, p.lsm_bg, 3.0);
             chk("lsm_missing/lsm_bg", p.lsm_missing, p.lsm_bg, 3.0);
+            // 0024 LSM Map pairs (UI advice §7.18): box text, selected box, focus ring, latched
+            // LSM Map button, the "○ missing" header colour and the disabled button text.
+            chk("map: text/lsm_bg", p.text, p.lsm_bg, 4.5);
+            chk("map: text_muted/lsm_bg", p.text_muted, p.lsm_bg, 4.5);
+            chk("map: sel_fg/sel_bg", p.sel_fg, p.sel_bg, 4.5);
+            chk("map: lsm_present/lsm_bg", p.lsm_present, p.lsm_bg, 3.0);
+            chk("map: lsm_missing/lsm_bg", p.lsm_missing, p.lsm_bg, 3.0);
+            chk("map: focus/lsm_bg", p.focus, p.lsm_bg, 3.0);
+            // D3: the ring is drawn INSIDE the box: on `lsm_bg` (checked above), or on a selected
+            // box's `sel_bg` together with a `sel_fg` line (sel_fg/sel_bg ≥ 4.5) because
+            // focus/sel_bg is 1.0–1.9 in five themes; on a hovered box over `hover_bg`.
+            chk("map: focus/data (map background)", p.focus, p.data, 3.0);
+            chk("map: focus/hover_bg", p.focus, p.hover_bg, 3.0);
+            // A selected missing box keeps its dashes in `sel_fg` (sel_fg/sel_bg ≥ 4.5, checked
+            // above): lsm_missing/sel_bg is 1.0–2.3 in five themes incl. XCopy.
+            chk("map: active_fg/active_bg", p.active_fg, p.active_bg, 4.5);
+            chk("map: status(NotPresent)/panel", p.status.of(Status::NotPresent), p.panel, 4.5);
+            chk("map: text_muted/toolbar", p.text_muted, p.toolbar, 4.5);
         }
         assert!(fails.is_empty(), "contrast failures:\n{}", fails.join("\n"));
+    }
+
+    /// 0026 item 3: every theme has its tooltip tokens: text ≥ 4.5:1 on `tip_bg`, a border
+    /// ≥ 3:1 on it, a fill distinct (≥ 1.25:1) from the panel, explain, menu/window, data and
+    /// LSM box fills it is drawn over, and rounded corners (XCopy included); the frame the gate
+    /// uses carries exactly these tokens.
+    #[test]
+    fn tooltip_tokens_exist_and_pass_contrast_in_every_theme() {
+        let mut fails = Vec::new();
+        let style = egui::Style::default();
+        for t in THEMES {
+            let p = &t.palette;
+            let mut chk = |what: &str, a: Color32, b: Color32, min: f32| {
+                let r = contrast(a, b);
+                if r < min {
+                    fails.push(format!("{}: {what} = {r:.2} < {min}", t.id));
+                }
+            };
+            // §3.3: text ≥ 7 (target; 4.5 is the floor), muted labels ≥ 4.5, border ≥ 3 on the
+            // tooltip and on the map background, fill distinct from every surface it covers.
+            chk("tip_fg/tip_bg", p.tip_fg, p.tip_bg, 7.0);
+            chk("tip_muted/tip_bg", p.tip_muted, p.tip_bg, 4.5);
+            chk("tip_border/tip_bg", p.tip_border, p.tip_bg, 3.0);
+            chk("tip_border/data", p.tip_border, p.data, 3.0);
+            for (n, bg) in [("panel", p.panel), ("explain", p.explain), ("menu (window fill)", p.menu), ("data", p.data), ("lsm_bg", p.lsm_bg)] {
+                chk(&format!("tip_bg/{n} (distinct)"), p.tip_bg, bg, 1.25);
+            }
+            // §7.7 map pairs: level title, caption on lane bands, frame stroke, WAL states.
+            chk("map: heading/data (level title)", p.heading, p.data, 4.5);
+            chk("map: text_muted/stripe_b (caption, empty band)", p.text_muted, p.stripe_b, 4.5);
+            chk("map: text_muted/stripe_a", p.text_muted, p.stripe_a, 4.5);
+            // D2 F4: lane bands visible on the map background, text readable on them.
+            for (n, lane) in [("lane_a", p.lane_a), ("lane_b", p.lane_b)] {
+                chk(&format!("map: {n}/data (band visible)"), lane, p.data, 1.3);
+                chk(&format!("map: text_muted/{n}"), p.text_muted, lane, 4.5);
+                chk(&format!("map: text/{n}"), p.text, lane, 4.5);
+                chk(&format!("map: lsm_present/{n} (box edge)"), p.lsm_present, lane, 3.0);
+            }
+            chk("map: text_muted/lsm_bg (dimmed WAL)", p.text_muted, p.lsm_bg, 4.5);
+            // D6: the "none seen" WAL box stroke is `text_muted` (was `border`, invisible in
+            // Wooden and Autistic).
+            chk("map: text_muted/lsm_bg (none-seen WAL stroke)", p.text_muted, p.lsm_bg, 3.0);
+            for (i, s) in p.status.all().into_iter().enumerate() {
+                chk(&format!("map: status{i}/lsm_bg (WAL state)"), s, p.lsm_bg, 4.5);
+            }
+            if t.widgets.tip_rounding != 6.0 {
+                fails.push(format!("{}: tip_rounding {} is not 6", t.id, t.widgets.tip_rounding));
+            }
+            let f = Tokens::from_def(t).tip_frame(&style);
+            assert_eq!((f.fill, f.stroke.color, f.shadow.color), (p.tip_bg, p.tip_border, p.tip_shadow), "{}", t.id);
+            assert!(f.corner_radius.nw == 6 && f.shadow.blur == 10 && f.inner_margin == egui::Margin::symmetric(8, 6), "{}", t.id);
+        }
+        assert!(theme_by_id("xcopy").widgets.tip_rounding > 0.0);
+        assert!(fails.is_empty(), "{}", fails.join("\n"));
     }
 
     /// Glyphs in `UI_GLYPHS` must not fall back to egui's replacement box.
@@ -953,6 +1121,35 @@ mod tests {
             chk(t.id, "chevron text/hover", p.text, p.hover_bg, 4.5);
             chk(t.id, "chip file/data", p.hex_file_space, p.data, 4.5);
             chk(t.id, "chip derived/data", p.hex_derived_space, p.data, 4.5);
+        }
+        assert!(fails.is_empty(), "{}", fails.join("\n"));
+    }
+
+    /// 0030 §D-11: the pairs the map changes draw, in every theme: the density count (`text` on
+    /// `lsm_bg` and on `hover_bg`), the axis thumb (`scroll_thumb` / `focus` on `scroll_track`,
+    /// ≥ 3:1), the map focus ring (`focus` on `data`, ≥ 3:1), the dimmed (○) WAL card stroke
+    /// (`text_muted` on `data`, ≥ 3:1) and the unknown (?) card's normal stroke
+    /// (`border_control` on `data`, ≥ 3:1), and the tooltip text on its frame.
+    #[test]
+    fn map_0030_contrast_pairs() {
+        let mut fails = Vec::new();
+        for t in THEMES {
+            let p = &t.palette;
+            for (what, fg, bg, min) in [
+                ("density count text/lsm_bg", p.text, p.lsm_bg, 4.5),
+                ("density count text/hover_bg", p.text, p.hover_bg, 4.5),
+                ("axis thumb/scroll_track", p.scroll_thumb, p.scroll_track, 3.0),
+                ("axis thumb hot (focus)/scroll_track", p.focus, p.scroll_track, 3.0),
+                ("map focus ring/data", p.focus, p.data, 3.0),
+                ("○ card stroke text_muted/data", p.text_muted, p.data, 3.0),
+                ("? card stroke border_control/data", p.border_control, p.data, 3.0),
+                ("tooltip text/tooltip frame", p.tip_fg, p.tip_bg, 4.5),
+            ] {
+                let r = contrast(fg, bg);
+                if r < min {
+                    fails.push(format!("{}: {what} = {r:.2} < {min}", t.id));
+                }
+            }
         }
         assert!(fails.is_empty(), "{}", fails.join("\n"));
     }

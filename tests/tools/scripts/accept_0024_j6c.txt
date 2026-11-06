@@ -1,0 +1,33 @@
+# J6c: Amiga Tool Style (light) interaction: items 2-4. 000013 is selected from j6a.
+front
+click 208 18
+sleep 0.6
+click 215 230
+sleep 0.6
+click 499 296
+sleep 1
+move 900 430
+sleep 0.6
+shot j6c_01_tool_map
+note ITEM3 View menu in Amiga Tool Style (LSM Map checked)
+click 208 18
+sleep 0.8
+shot j6c_02_viewmenu
+key esc
+sleep 0.5
+note ITEM4 click active LSM Map button -> table with same row
+click 443 119
+sleep 1.5
+move 900 700
+sleep 0.5
+shot j6c_03_table
+note click LSM Map again -> map
+click 443 119
+sleep 1.5
+move 900 700
+sleep 0.5
+shot j6c_04_map_again
+move 443 119
+sleep 1.8
+shot j6c_05_hover_active
+crop j6c_05_hover_active_crop 150 90 1000 160

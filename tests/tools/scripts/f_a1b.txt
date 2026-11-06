@@ -1,0 +1,9 @@
+front
+winsize 1400 900
+sleep 1.5
+move 1380 880
+shot a1_4_1400_bytes_shown
+click 549 842
+sleep 1.2
+move 1380 880
+shot a1_5_1400_bytes_hidden

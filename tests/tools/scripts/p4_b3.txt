@@ -1,0 +1,13 @@
+# P4 item 4: click the missing box 000013 (cf_a), check dashed outline + Derivation.
+front
+move 1000 600
+sleep 0.4
+shot p4_11_before
+crop p4_11_box_before 700 280 540 60
+click 991 308
+sleep 0.8
+move 900 650
+sleep 0.5
+shot p4_11_selected
+crop p4_11_box_selected 700 280 540 60
+crop p4_11_expl 1160 150 290 600

@@ -1,0 +1,13 @@
+front
+click 864 454
+sleep 1
+move 1100 800
+wheel 1382 700 0 -400
+sleep 0.7
+shot j1_13_sst_card_scroll1
+wheel 1382 700 0 -400
+sleep 0.7
+shot j1_14_sst_card_scroll2
+wheel 1382 700 0 -400
+sleep 0.7
+shot j1_15_sst_card_scroll3

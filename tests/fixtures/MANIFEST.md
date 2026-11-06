@@ -384,3 +384,22 @@ Appended after the 72-file set (Total: 73 files; SHA256SUMS has 73 lines). Hand-
 | empty/000001.log | 0 | empty WAL: must show 'Empty file (0 bytes): no records', no Truncated/Unknown/Diagnosis |
 
 SHA-256: empty/000001.log `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (SHA-256 of the empty string).
+
+
+## db-checkpoint/
+Added for task 0011 (handoff 0024). A REAL RocksDB 10.4.2 checkpoint: `fixture-gen checkpoint <out>` (rocksdb 0.24.0 / librocksdb-sys 0.17.3) builds a small DB `ckpt-src` (3 CFs, auto compactions off, 64 KiB write buffer, 40 short keys per flush) and, with the DB still open, calls `Checkpoint::new(&db)?.create_checkpoint(<out>/ckpt)`. `ckpt` was then PLAIN-COPIED here (9 files, 25802 bytes). The source DB `ckpt-src` stays out of Git (kept in /private/tmp/rocksvision-0024/ckpt for the hard-link end-to-end check). The layout is indistinguishable from a normal DB directory; nothing here proves checkpoint provenance except this section. Full evidence written by the generator: `checkpoint.md` (not committed).
+
+Hard-link proof (generator run, ckpt vs ckpt-src, same device): every .sst has the same inode and nlink 2 in both directories (000009 ino 132990884, 000011 132990886, 000013 132990888, 000015 132990890, 000017 132990892). OPTIONS-000007 is also linked (nlink 2). CURRENT, MANIFEST-000005 and 000016.log are NEW files (nlink 1). CURRENT = `MANIFEST-000005\n`. A 0-byte WAL `000016.log` is present (the live memtable's log); the checkpoint code does not need a WAL, absence would also be normal.
+
+`DB::live_files()` of the source (= the checkpoint's live set):
+
+| CF | level | file | size | smallest | largest | entries |
+|---|---|---|---|---|---|---|
+| default | L0 | 000009.sst | 1506 | d-000 | d-039 | 40 |
+| cf_a | L0 | 000011.sst | 1508 | a-000 | a-039 | 40 |
+| cf_a | L0 | 000013.sst | 1503 | a-020 | a-059 | 40 |
+| cf_b | L1 | 000015.sst | 1504 | b-000 | b-039 | 40 |
+| cf_b | L1 | 000017.sst | 1507 | b-040 | b-079 | 40 |
+
+cf_a has two overlapping L0 files; cf_b's two flushes did not overlap so `compact_range` moved them to L1 unmerged (two disjoint L1 files). File bytes are not reproducible across runs (inodes, DB id, OPTIONS): use `SHA256SUMS` (now 82 lines; db-checkpoint/ = 9 lines).
+Sizes: 000009.sst 1506, 000011.sst 1508, 000013.sst 1503, 000015.sst 1504, 000016.log 0, 000017.sst 1507, CURRENT 16, MANIFEST-000005 946, OPTIONS-000007 17312.

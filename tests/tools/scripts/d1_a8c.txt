@@ -1,0 +1,34 @@
+# A8 redo of the Map split: Map handle at screen y 651 -> drag to 790; Table (split kept at its own value); Map (kept); dblclick Table handle; Map intact; Reset View
+front
+click 557 151
+sleep 1.0
+drag 832 651 832 790
+sleep 0.8
+move 1380 880
+shot a8_13_map_dragged
+click 517 151
+sleep 1.0
+move 1380 880
+shot a8_14_table_after_map_drag
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8_15_map_split_kept
+click 517 151
+sleep 0.8
+dclick 832 600
+sleep 0.8
+move 1380 880
+shot a8_16_table_dblclick
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8_17_map_after_table_dblclick
+click 1512 120
+sleep 1.0
+move 1380 880
+shot a8_18_map_after_reset_view
+click 517 151
+sleep 1.0
+move 1380 880
+shot a8_19_table_after_reset_view

@@ -340,6 +340,8 @@ pub enum FieldKind {
     /// No kind-specific behaviour.
     #[default]
     Other,
+    /// Level / column family of an SST from its directory's MANIFEST (0030 A7; external).
+    ManifestEvidence,
     Magic,
     /// format_version>=6 footer part-2 marker.
     ExtendedMagic,
@@ -632,6 +634,9 @@ pub struct Field {
     /// Extra "Other byte interpretations" rows supplied by the presenter (label, value), e.g.
     /// the internal and user key bytes of an entry.
     pub interp: Vec<(&'static str, String)>,
+    /// Where a value without bytes in this file comes from (0030 B-8 / A7), e.g. "from the
+    /// folder's MANIFEST (read …)"; None: the generic byte-less sentence.
+    pub no_bytes_source: Option<String>,
 }
 
 impl Field {
@@ -655,6 +660,7 @@ impl Field {
             value_bytes: None,
             key_bytes: None,
             interp: Vec::new(),
+            no_bytes_source: None,
         }
     }
     pub fn enc(mut self, e: impl Into<String>) -> Self {
@@ -737,6 +743,7 @@ impl From<Fact> for Field {
             value_bytes: f.bytes,
             key_bytes: None,
             interp: Vec::new(),
+            no_bytes_source: None,
         }
     }
 }
@@ -890,8 +897,13 @@ pub struct View {
     pub location: Vec<WhereLine>,
     /// File range of the structure shown, when it is one physical structure.
     pub extent: Option<Span>,
-    /// Observed-levels files for the LSM box diagram (row index into `rows` + typed cells).
-    pub lsm: Vec<LsmFile>,
+    /// Observed-levels inventory (CF → level → live SST), the one typed source of the levels
+    /// table rows and the LSM Map; empty for every other view.
+    pub lsm: LsmInventory,
+    /// Why the live SST files of this file cannot be observed (CURRENT names a missing MANIFEST,
+    /// CURRENT invalid): the typed reason the LSM Map availability reads (never parsed back from
+    /// cells or notes).
+    pub lsm_blocked: Option<String>,
     /// Problems found while decoding the structure shown (not printed by the text dump).
     pub diagnostics: Vec<Diagnostic>,
     /// Check-status counts of every structure this table stands for (all pages; cache only),
@@ -900,21 +912,559 @@ pub struct View {
     /// Current tallies of the table view nodes of this file (node kind → counts, cache only),
     /// applied to the tree whenever any view is shown (review S2). Not printed by the dump.
     pub tallies: Vec<(NodeKind, RowTally)>,
+    /// WAL files of the levels view's folder (0026 item 4; None: not looked at). Listed by the
+    /// file facade with the same bounded folder listing as the WAL count; the session takes it
+    /// over as its WAL inventory (summaries are added there). Not printed by the dump.
+    pub wals: Option<WalInventory>,
 }
 
-/// One live SST file of the observed LSM shape, as shown in the box diagram.
-#[derive(Clone, Debug)]
+// ---------------- WAL overview (0026 item 4) ----------------
+
+/// The log numbers a MANIFEST replay recorded, the evidence of a WAL's lifecycle. Source:
+/// RocksDB 10.4.2 db/version_edit_handler.cc 566–576 (kLogNumber applies to the edit's CF and
+/// is kept only when it does not decrease), db/version_set.h 1424–1462
+/// (`MinLogNumberWithUnflushedData` = min of the live CFs' log numbers).
+/// Note (D5 nit 8): the replay applies every complete VersionEdit in file order, including the
+/// edits of an incomplete trailing atomic group that RocksDB would discard (the same
+/// pre-existing rule as for the live files).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ManifestLogNumbers {
+    /// Log number per live (not dropped) CF.
+    pub per_cf: std::collections::BTreeMap<u32, u64>,
+    /// Live CFs whose edits recorded no log number.
+    pub without: std::collections::BTreeSet<u32>,
+    /// kMinLogNumberToKeep (largest seen; 2PC), when recorded.
+    pub min_to_keep: Option<u64>,
+    /// kPrevLogNumber of the last edit that carried it (legacy).
+    pub prev: Option<u64>,
+    /// The MANIFEST is the one CURRENT names (otherwise nothing is inferred from it).
+    pub active: bool,
+}
+
+impl ManifestLogNumbers {
+    /// `MinLogNumberWithUnflushedData` (None when no live CF recorded a log number).
+    pub fn min_unflushed(&self) -> Option<u64> {
+        self.per_cf.values().copied().min()
+    }
+}
+
+/// A WAL relative to the MANIFEST's log numbers (never from the file name alone, never
+/// "memtable", never WAL-to-SST ancestry).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WalLifecycle {
+    /// The WAL number is below every live CF's log number: per the MANIFEST its writes of every
+    /// CF are already in SST files (recovery skips them, write_batch.cc 2203–2213).
+    FlushedPerManifest,
+    /// At or above the log number of these CFs: the WAL may hold writes of them that are not in
+    /// any SST (recovery would replay them).
+    MayHoldUnflushed { cfs: Vec<u32> },
+    /// Not decidable (why).
+    Unknown(LifecycleUnknown),
+}
+
+/// Why a WAL's lifecycle is unknown (typed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleUnknown {
+    NoNumber,
+    NotActive,
+    NoLogNumbers,
+}
+
+impl LifecycleUnknown {
+    pub fn text(&self) -> &'static str {
+        match self {
+            LifecycleUnknown::NoNumber => "the file name carries no WAL number",
+            LifecycleUnknown::NotActive => "this MANIFEST is not confirmed as the active one",
+            LifecycleUnknown::NoLogNumbers => "no column family log numbers in the MANIFEST",
+        }
+    }
+}
+
+impl WalLifecycle {
+    /// Lifecycle of WAL `number` from the MANIFEST's log numbers (db/version_set.h 1448–1462).
+    pub fn of(number: Option<u64>, ln: &ManifestLogNumbers) -> WalLifecycle {
+        let Some(n) = number else { return WalLifecycle::Unknown(LifecycleUnknown::NoNumber) };
+        if !ln.active {
+            return WalLifecycle::Unknown(LifecycleUnknown::NotActive);
+        }
+        if ln.per_cf.is_empty() || !ln.without.is_empty() {
+            return WalLifecycle::Unknown(LifecycleUnknown::NoLogNumbers);
+        }
+        let cfs: Vec<u32> = ln.per_cf.iter().filter(|(_, l)| n >= **l).map(|(c, _)| *c).collect();
+        if cfs.is_empty() { WalLifecycle::FlushedPerManifest } else { WalLifecycle::MayHoldUnflushed { cfs } }
+    }
+}
+
+/// Counts of a (partial) WAL scan. `cfs` are the column family ids of the WriteBatch
+/// operations seen; `seq` the smallest batch sequence and the largest sequence consumed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WalStats {
+    pub records: u64,
+    pub batches: u64,
+    pub cfs: std::collections::BTreeSet<u32>,
+    pub seq: Option<(u64, u64)>,
+    /// File bytes covered by the scan.
+    pub bytes_scanned: u64,
+}
+
+/// Background summary of one WAL file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WalSummary {
+    /// Not scanned (why).
+    NotScanned(NotScannedWhy),
+    Scanning,
+    /// The whole file was read and every batch decoded: `cfs` is complete.
+    Done(WalStats),
+    /// Counts of the part read; `cfs` may miss ids.
+    Partial {
+        stats: WalStats,
+        why: PartialWhy,
+    },
+    /// The log ends in a record of an older log (recyclable header with another log number):
+    /// RocksDB 10.4.2 db/log_reader.cc 600–607 returns kOldRecord and 273–295 treats it as the
+    /// end of the log, so the records before `at` are this WAL's whole contents.
+    StaleTail {
+        stats: WalStats,
+        at: u64,
+    },
+    /// A record failed its checksum or framing at `at`; counts are of the records before it.
+    /// `recycled`: the log uses recyclable records, so the bytes may be a previous use's
+    /// leftover (log_reader.cc 324–328 treats a bad checksum there as the end only in
+    /// kTolerateCorruptedTailRecords mode, so this is not called a normal end).
+    Corrupt {
+        stats: WalStats,
+        at: u64,
+        recycled: bool,
+        reason: String,
+    },
+    Unreadable(String),
+}
+
+/// Why a WAL summary is partial (typed; the text is derived).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartialWhy {
+    /// The per-WAL byte bound was reached (bytes read of the file size).
+    Bound { read: u64, size: u64 },
+    /// The last record is incomplete at the end of the file.
+    TruncatedTail,
+    /// A record larger than the summary keeps (CF ids of it may be missing).
+    LargeRecord { at: u64 },
+    /// A batch with more operations than are listed.
+    ManyOps { at: u64 },
+    /// More CF ids than are collected.
+    ManyCfs,
+}
+
+impl PartialWhy {
+    pub fn text(&self) -> String {
+        match self {
+            PartialWhy::Bound { read, size } => format!("summary stops after {read} of {size} bytes (bound)"),
+            PartialWhy::TruncatedTail => "the last record is incomplete at the end of the file".into(),
+            PartialWhy::LargeRecord { at } => format!("record at 0x{at:x} is larger than the summary keeps; its column families may be incomplete"),
+            PartialWhy::ManyOps { at } => format!("record at 0x{at:x} has more operations than are listed"),
+            PartialWhy::ManyCfs => format!("more than {} column family ids", crate::limits::WAL_SUMMARY_CFS),
+        }
+    }
+}
+
+impl WalSummary {
+    pub fn stats(&self) -> Option<&WalStats> {
+        match self {
+            WalSummary::Done(s) | WalSummary::Partial { stats: s, .. } | WalSummary::Corrupt { stats: s, .. } | WalSummary::StaleTail { stats: s, .. } => Some(s),
+            _ => None,
+        }
+    }
+    /// The CF set of the stats is the WAL's whole set (Done, or the records before a stale
+    /// tail, which ends the log).
+    pub fn complete(&self) -> bool {
+        matches!(self, WalSummary::Done(_) | WalSummary::StaleTail { .. })
+    }
+    /// How far a complete scan read, for the "none seen" sentence (0030 A6; one source for the
+    /// tooltip and the Explanation): Done reads to the end of the file; a stale tail ends the
+    /// log (RocksDB stops there), so the scan is complete without reading the old bytes.
+    pub fn complete_scan_text(&self) -> Option<String> {
+        match self {
+            WalSummary::Done(_) => Some("complete scan to the end of the file".into()),
+            WalSummary::StaleTail { at, .. } => Some(format!("complete scan of this log's records, which end at the old-record tail at 0x{at:X}")),
+            _ => None,
+        }
+    }
+    /// The same extent as the subject of a lifecycle clause ("… found no cf_users records").
+    pub fn complete_scan_clause(&self) -> Option<String> {
+        match self {
+            WalSummary::Done(_) => Some("a complete scan".into()),
+            WalSummary::StaleTail { at, .. } => Some(format!("a complete scan of this log's records (ending at the old-record tail at 0x{at:X})")),
+            _ => None,
+        }
+    }
+    /// Membership of column family `cf` (unknown unless scanned; absent only after a complete
+    /// scan).
+    pub fn membership(&self, cf: u32) -> CfMembership {
+        match self.stats() {
+            Some(s) if s.cfs.contains(&cf) => CfMembership::Observed,
+            Some(_) if self.complete() => CfMembership::ObservedAbsent,
+            _ => CfMembership::Unknown,
+        }
+    }
+    /// Not scanned yet, or left unscanned by a cancel / refused job: a new request may summarise
+    /// it (never a Done / Partial / Corrupt one again).
+    pub fn rescannable(&self) -> bool {
+        matches!(self, WalSummary::NotScanned(NotScannedWhy::Pending | NotScannedWhy::Cancelled | NotScannedWhy::Failed(_)))
+    }
+}
+
+/// Why a WAL has no summary (typed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NotScannedWhy {
+    /// Not requested yet.
+    Pending,
+    /// Cancel / Esc / a file switch stopped the job.
+    Cancelled,
+    /// Beyond `WAL_SUMMARY_FILES` (the highest numbers are summarised).
+    BeyondCap,
+    /// A symlink: listed, never followed.
+    Symlink,
+    /// The job could not run (bounded message, e.g. too many background reads).
+    Failed(String),
+}
+
+impl NotScannedWhy {
+    pub fn text(&self) -> Option<String> {
+        match self {
+            NotScannedWhy::Pending => None,
+            NotScannedWhy::Cancelled => Some("summary cancelled".into()),
+            NotScannedWhy::BeyondCap => Some(format!("only the {} highest-numbered WAL files are summarised", crate::limits::WAL_SUMMARY_FILES)),
+            NotScannedWhy::Symlink => Some("symlink (not followed)".into()),
+            NotScannedWhy::Failed(e) => Some(e.clone()),
+        }
+    }
+}
+
+/// Whether a WAL holds writes of one column family (the band dims `ObservedAbsent`, never hides).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CfMembership {
+    Observed,
+    ObservedAbsent,
+    Unknown,
+}
+
+/// External MANIFEST evidence about one SST (0030 A7): the column family and level that the
+/// active MANIFEST of the SST's own directory (named by its CURRENT) lists for this file
+/// number. Not stored in the SST; absent when there is no such evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SstManifestEvidence {
+    /// The MANIFEST file name (e.g. "MANIFEST-000005").
+    pub manifest: String,
+    pub number: u64,
+    pub cf_id: u32,
+    pub cf_name: String,
+    pub level: u32,
+    /// When the MANIFEST was read (UTC seconds since the epoch), for the Explanation.
+    pub read_at: Option<u64>,
+}
+
+/// What the SST's own directory says about it (0030 A7): evidence, or why there is none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SstManifestContext {
+    /// The active MANIFEST lists this file number as live.
+    Listed(SstManifestEvidence),
+    /// The active MANIFEST (named) was replayed completely and does not list this number.
+    NotListed { manifest: String, number: u64 },
+    /// The active MANIFEST (named) could not be read or replayed completely.
+    Untrusted { manifest: String },
+    /// No CURRENT / active MANIFEST next to the file, or no numbered `<n>.sst` name: a
+    /// standalone SST.
+    Standalone,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WalFile {
+    /// From the file name ("NNNNNN.log"); None for another *.log name.
+    pub number: Option<u64>,
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub mtime: Option<std::time::SystemTime>,
+    /// A symlink: listed, never followed (not summarised, not opened).
+    pub symlink: bool,
+    pub summary: WalSummary,
+}
+
+/// WAL files of one folder, by number (unnumbered names last).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WalInventory {
+    pub files: Vec<WalFile>,
+    /// More than `MAX_WAL_LISTED` WAL files, or the folder listing itself was truncated.
+    pub truncated: bool,
+}
+
+impl WalInventory {
+    pub fn by_number(&self, n: u64) -> Option<&WalFile> {
+        self.files.iter().find(|f| f.number == Some(n))
+    }
+    /// Summaries of `old` for the same files (path, size, mtime), so a re-shown levels view
+    /// does not rescan (a Scanning file stays Scanning: its job of this file generation still
+    /// answers by path). Indexed by path (D3 N4: no quadratic search at the 1000-file cap).
+    pub fn keep_summaries(&mut self, old: &WalInventory) {
+        let by_path: std::collections::HashMap<&std::path::Path, &WalFile> = old.files.iter().map(|o| (o.path.as_path(), o)).collect();
+        for f in &mut self.files {
+            if let Some(o) = by_path.get(f.path.as_path()).filter(|o| o.size == f.size && o.mtime == f.mtime) {
+                f.summary = o.summary.clone();
+            }
+        }
+    }
+}
+
+/// "1 file" / "N files" (CF selector, level header, Explanation summary, density bar).
+pub fn files_word(n: usize) -> String {
+    if n == 1 { "1 file".into() } else { format!("{n} files") }
+}
+
+/// Neutral wording of a folder's WAL count (levels note and folder note share it): absence is
+/// normal (a checkpoint or a flushed DB).
+pub fn wal_words(n: usize) -> String {
+    match n {
+        0 => "no WAL (normal for a checkpoint or a flushed DB)".into(),
+        1 => "1 WAL".into(),
+        n => format!("{n} WAL"),
+    }
+}
+
+/// Key order of a column family's comparator, for range placement (MANIFEST kComparator,
+/// db/version_edit.h). Only the two built-in byte orders are understood; any other comparator
+/// is `Unsupported(name)`, and no recorded comparator is `Unknown`: neither is ever placed or
+/// compared as bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum KeyOrder {
+    /// "leveldb.BytewiseComparator" (util/comparator.cc BytewiseComparatorImpl::Name).
+    Bytewise,
+    /// "rocksdb.ReverseBytewiseComparator" (util/comparator.cc ReverseBytewiseComparatorImpl).
+    ReverseBytewise,
+    /// The MANIFEST recorded no comparator for the CF (order unknown).
+    #[default]
+    Unknown,
+    /// Any other comparator name (order unknown to RocksVision).
+    Unsupported(String),
+}
+
+impl KeyOrder {
+    pub fn from_comparator(name: Option<&str>) -> KeyOrder {
+        match name {
+            Some("leveldb.BytewiseComparator") => KeyOrder::Bytewise,
+            Some("rocksdb.ReverseBytewiseComparator") => KeyOrder::ReverseBytewise,
+            Some(n) => KeyOrder::Unsupported(n.to_string()),
+            None => KeyOrder::Unknown,
+        }
+    }
+    /// Key ranges of this order can be placed and compared (byte order, possibly reversed).
+    pub fn ordered(&self) -> bool {
+        matches!(self, KeyOrder::Bytewise | KeyOrder::ReverseBytewise)
+    }
+    /// Comparator sentence for notes, explanations and the map legend.
+    pub fn describe(&self) -> String {
+        match self {
+            KeyOrder::Bytewise => "bytewise (leveldb.BytewiseComparator)".into(),
+            KeyOrder::ReverseBytewise => "reverse bytewise (rocksdb.ReverseBytewiseComparator)".into(),
+            KeyOrder::Unknown => "not recorded in the MANIFEST (order unknown)".into(),
+            KeyOrder::Unsupported(n) => format!("{n} (not supported: key order unknown)"),
+        }
+    }
+    /// The LSM Map's x-axis sentence (full text; strip, Explanation and tooltip).
+    pub fn legend(&self) -> String {
+        match self {
+            KeyOrder::Bytewise => "x: user-key order (bytewise comparator), boxes placed by key rank, not to scale".into(),
+            KeyOrder::ReverseBytewise => "x: user-key order (reverse bytewise comparator: larger keys on the left), not to scale".into(),
+            KeyOrder::Unknown => "x: file number order. Comparator not recorded, so key order, overlap and gaps are not shown; boxes are equal in size.".into(),
+            KeyOrder::Unsupported(n) => format!("x: file number order. Comparator '{n}' is not supported, so key order, overlap and gaps are not shown; boxes are equal in size."),
+        }
+    }
+    /// Comparator order of two user keys (bytewise, or reversed); None for an unknown order.
+    pub fn cmp_keys(&self, a: &[u8], b: &[u8]) -> Option<std::cmp::Ordering> {
+        match self {
+            KeyOrder::Bytewise => Some(a.cmp(b)),
+            KeyOrder::ReverseBytewise => Some(b.cmp(a)),
+            _ => None,
+        }
+    }
+    /// First and last boundary key of these files in comparator order (observed smallest /
+    /// largest keys only); None for an unknown order or no files.
+    pub fn span<'a>(&self, files: impl Iterator<Item = &'a LsmFile>) -> Option<(&'a [u8], &'a [u8])> {
+        let mut out: Option<(&[u8], &[u8])> = None;
+        for f in files {
+            for k in [f.smallest.as_slice(), f.largest.as_slice()] {
+                out = Some(match out {
+                    None => (k, k),
+                    Some((lo, hi)) => {
+                        let lo = if self.cmp_keys(k, lo)?.is_lt() { k } else { lo };
+                        let hi = if self.cmp_keys(k, hi)?.is_gt() { k } else { hi };
+                        (lo, hi)
+                    }
+                });
+            }
+        }
+        self.cmp_keys(b"", b"")?;
+        out
+    }
+    /// Short legend for a narrow strip.
+    pub fn short_legend(&self) -> &'static str {
+        match self {
+            KeyOrder::Bytewise => "x: key order (bytewise)",
+            KeyOrder::ReverseBytewise => "x: key order (reverse bytewise)",
+            KeyOrder::Unknown | KeyOrder::Unsupported(_) => "x: file number order",
+        }
+    }
+}
+
+/// One live SST file observed from the MANIFEST (typed; the levels table row is derived from
+/// the same values).
+#[derive(Clone, Debug, PartialEq)]
 pub struct LsmFile {
-    /// Index of the corresponding table row.
-    pub row: usize,
-    pub cf: String,
-    pub level: String,
-    pub file: String,
-    pub size: String,
-    pub smallest: String,
-    pub largest: String,
-    pub overlap: String,
+    pub number: u64,
+    pub size: u64,
+    /// Smallest / largest USER key (internal key minus its 8-byte trailer).
+    pub smallest: Vec<u8>,
+    pub largest: Vec<u8>,
+    /// Escaped previews of the internal keys (`ikey_preview`: user key, seq, type).
+    pub smallest_preview: String,
+    pub largest_preview: String,
+    pub seq: Option<(u64, u64)>,
+    /// Same-level / next-level overlap counts; None when not computed (unsupported key order,
+    /// level above `OVERLAP_MAX_FILES`).
+    pub overlap_same: Option<u32>,
+    pub overlap_next: Option<u32>,
+    /// Present (on disk) or NotPresent (missing from the directory).
     pub status: Status,
+    /// Index of the levels table row.
+    pub row: usize,
+    /// Path to open (on disk only).
+    pub path: Option<std::path::PathBuf>,
+    /// Horizontal slots [start, end) on its level's scale (`LsmLevel::scale`): ranks of the
+    /// smallest/largest user key among the CF's distinct boundary keys in comparator order
+    /// (end = rank(largest) + 1), or the file's index in number order for an unknown order.
+    pub slots: (u32, u32),
+    /// Overlap lane within the level (greedy interval colouring; 0 for an unknown order).
+    pub lane: u32,
+}
+
+impl LsmFile {
+    pub fn on_disk(&self) -> bool {
+        self.status == Status::Present
+    }
+    pub fn name(&self) -> String {
+        format!("{:06}.sst", self.number)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LsmLevel {
+    pub level: u32,
+    pub files: Vec<LsmFile>,
+    pub bytes: u64,
+    pub on_disk: usize,
+    /// Slot count of the x scale (the CF's distinct boundary keys, or the level's file count
+    /// for an unknown order).
+    pub scale: u32,
+    /// Overlap lanes used (1 for a non-overlapping level).
+    pub lanes: u32,
+    /// Unexpected overlap: an L1+ level whose files overlap each other (ordered keys only; L0
+    /// overlap is normal and never sets it).
+    pub overlaps: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LsmCf {
+    pub id: u32,
+    pub name: String,
+    pub levels: Vec<LsmLevel>,
+    /// The CF's comparator (MANIFEST kComparator) and its key order.
+    pub comparator: Option<String>,
+    pub order: KeyOrder,
+}
+
+impl LsmCf {
+    pub fn files(&self) -> usize {
+        self.levels.iter().map(|l| l.files.len()).sum()
+    }
+    pub fn bytes(&self) -> u64 {
+        self.levels.iter().map(|l| l.bytes).sum()
+    }
+}
+
+/// Observed live SSTs grouped by CF and level, with the comparator's key order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LsmInventory {
+    pub cfs: Vec<LsmCf>,
+    /// The MANIFEST stopped tracking files at `MAX_LIVE_FILES` (listing truncated).
+    pub truncated: bool,
+    /// Per-CF log numbers of the replay (the WAL lifecycle evidence).
+    pub log_numbers: ManifestLogNumbers,
+}
+
+impl LsmInventory {
+    pub fn is_empty(&self) -> bool {
+        self.cfs.iter().all(|c| c.levels.is_empty())
+    }
+    /// The comparator sentence(s) (0030 A8-3): one line when every CF has the same key order
+    /// (`Comparator (all 3 CFs): …`), else one line per CF. Levels notes and Explanation share it.
+    pub fn comparator_lines(&self) -> Vec<String> {
+        match self.cfs.as_slice() {
+            [] => Vec::new(),
+            [c] => vec![format!("Comparator of CF {} {}: {}", c.id, c.name, c.order.describe())],
+            [first, rest @ ..] if rest.iter().all(|c| c.order == first.order) => vec![format!("Comparator (all {} CFs): {}", self.cfs.len(), first.order.describe())],
+            cfs => cfs.iter().map(|c| format!("Comparator of CF {} {}: {}", c.id, c.name, c.order.describe())).collect(),
+        }
+    }
+    /// The x-axis sentence(s): once when every CF has the same key order, else per CF.
+    pub fn legend_lines(&self) -> Vec<String> {
+        match self.cfs.as_slice() {
+            [] => Vec::new(),
+            [first, rest @ ..] if rest.iter().all(|c| c.order == first.order) => vec![first.order.legend()],
+            cfs => cfs.iter().map(|c| format!("CF {} {}: {}", c.id, c.name, c.order.legend())).collect(),
+        }
+    }
+    /// Every file, in table-row order.
+    pub fn iter(&self) -> impl Iterator<Item = &LsmFile> {
+        self.cfs.iter().flat_map(|c| c.levels.iter().flat_map(|l| l.files.iter()))
+    }
+    pub fn cf(&self, id: u32) -> Option<&LsmCf> {
+        self.cfs.iter().find(|c| c.id == id)
+    }
+    /// (CF, level, file) of table row `row`.
+    pub fn by_row(&self, row: usize) -> Option<(&LsmCf, &LsmLevel, &LsmFile)> {
+        self.locate(|f| f.row == row)
+    }
+    /// (CF, level, file) of file number `n`.
+    pub fn by_number(&self, n: u64) -> Option<(&LsmCf, &LsmLevel, &LsmFile)> {
+        self.locate(|f| f.number == n)
+    }
+    fn locate(&self, pred: impl Fn(&LsmFile) -> bool) -> Option<(&LsmCf, &LsmLevel, &LsmFile)> {
+        self.cfs.iter().find_map(|c| c.levels.iter().find_map(|l| l.files.iter().find(|f| pred(f)).map(|f| (c, l, f))))
+    }
+    /// The Overlap cell / fact of a file.
+    pub fn overlap_text(cf: &LsmCf, level: &LsmLevel, f: &LsmFile) -> String {
+        match (f.overlap_same, f.overlap_next) {
+            (Some(s), n) if level.level == 0 => format!("{s} in L0 (allowed){}", n.map(|n| format!(", {n} in L1")).unwrap_or_default()),
+            (Some(s), n) => format!("{s} same level{}{}", if s > 0 { " (unexpected)" } else { "" }, n.map(|n| format!(", {n} in L{}", level.level.saturating_add(1))).unwrap_or_default()),
+            (None, _) if !cf.order.ordered() => format!("not computed (comparator {})", cf.comparator.as_deref().unwrap_or("not recorded")),
+            (None, _) => "not computed (resource limit)".to_string(),
+        }
+    }
+    /// Facts of one file (Explanation card and map tooltip share them): label → value.
+    pub fn facts(cf: &LsmCf, level: &LsmLevel, f: &LsmFile) -> Vec<(&'static str, String)> {
+        let overlap = Self::overlap_text(cf, level, f);
+        vec![
+            ("File", f.name()),
+            ("Column family", format!("{} {}", cf.id, cf.name)),
+            ("Level", format!("L{}", level.level)),
+            ("Size", crate::util::human_size(f.size)),
+            ("Smallest", f.smallest_preview.clone()),
+            ("Largest", f.largest_preview.clone()),
+            ("Seq range", f.seq.map(|(a, b)| format!("{a}..{b}")).unwrap_or_else(|| "-".into())),
+            ("Overlap", overlap),
+            ("Key order", cf.order.describe()),
+            ("On disk", if f.on_disk() { "yes".into() } else { "missing from this directory".into() }),
+        ]
+    }
 }
 
 /// What a tree child stands for. Physical structures appear once, in file order; views and
@@ -1046,6 +1596,10 @@ impl RowTally {
         }
     }
 }
+
+/// Where the levels view's values come from when they have no bytes in the open file (0030
+/// B-8: "No bytes in this file: from the MANIFEST.").
+pub const NO_BYTES_MANIFEST: &str = "from the MANIFEST";
 
 /// Status word of bytes that are in range but were not checked (no glyph, no status claimed).
 /// "Checked" means only "checksum and trailer verified" (design A1).

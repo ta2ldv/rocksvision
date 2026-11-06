@@ -1,0 +1,17 @@
+# 0030 hero capture step 1: full-display window (1728x1079 pt) at the top-left below the menu bar, open the copied example folder
+# via the path bar, LSM Map. Placeholders: DIR (/private/tmp/rocksvision-hero/examples/data/multilevel-advanced-db), PATHX PATHY GOX GOY MAPX MAPY PARKX PARKY
+front
+winpos 0 38
+winsize 1728 1079
+winpos 0 38
+winfo
+sleep 1
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{MAPX}} {{MAPY}}
+sleep 1.5
+move {{PARKX}} {{PARKY}}
+shot hero_explore

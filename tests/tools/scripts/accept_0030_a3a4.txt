@@ -1,0 +1,45 @@
+# 0030 phase 2 DRAFT A3 density bars + A4 axis thumb. Assumes: bar count text ("600 files"/"600"), click on a bar zooms to the bar range
+# (cursor ZoomIn), arrow into a merged file auto-zooms, 6 pt axis thumb (not a button): drag pans, Grab/Grabbing cursor, tooltip
+# "Visible part of the key range - drag to pan", "(file number order)" for unknown comparators.
+# Placeholders: DIR (many-sst), W H, TAG, PATHX PATHY GOX GOY MAPX MAPY PARKX PARKY, BARX BARY (a density bar), THUMBX THUMBY (thumb centre at x3), THUMB2X (drag target x)
+front
+winsize {{W}} {{H}}
+sleep 1
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{MAPX}} {{MAPY}}
+sleep 1.5
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_1_bars
+note A3 hover bar: tooltip "N files - click to zoom to these files"
+move {{BARX}} {{BARY}}
+sleep 1.2
+shot {{TAG}}_2_bar_hover
+note A3 click bar: zoom to the bar range
+click {{BARX}} {{BARY}}
+sleep 1.0
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_3_bar_click
+note A3 keyboard: Home then Right into merged files auto-zooms
+key home
+sleep 0.5
+key right
+sleep 0.8
+shot {{TAG}}_4_arrow_zoom
+note A4 thumb at x3 (zoom with + three times via key equal)
+key equal
+key equal
+key equal
+sleep 0.8
+shot {{TAG}}_5_thumb_x3
+move {{THUMBX}} {{THUMBY}}
+sleep 1.2
+shot {{TAG}}_6_thumb_hover
+note A4 drag the thumb: pan must change
+drag {{THUMBX}} {{THUMBY}} {{THUMB2X}} {{THUMBY}}
+sleep 0.8
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_7_thumb_dragged

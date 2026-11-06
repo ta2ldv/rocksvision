@@ -1,0 +1,6 @@
+# A1 probe: LSM Map via toolbar, shot with bytes shown (default)
+front
+click 445 120
+sleep 1.5
+move 1380 880
+shot a1_1_map_bytes_shown

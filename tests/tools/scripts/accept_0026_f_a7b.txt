@@ -1,0 +1,19 @@
+front
+click 1171 277
+sleep 0.5
+shot a7b_01_click_newest
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+sleep 0.5
+shot a7b_02_left_x7
+key left
+sleep 0.5
+shot a7b_03_left_x8
+key left
+sleep 0.5
+shot a7b_04_left_x9

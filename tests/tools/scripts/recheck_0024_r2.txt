@@ -1,0 +1,4 @@
+# R2: quit R1 app; (own PID script) -- first block quits the previous app.
+front
+key q cmd
+sleep 1

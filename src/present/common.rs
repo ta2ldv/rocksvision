@@ -170,6 +170,12 @@ pub fn current_view(raw: &[u8], target: Result<(PathBuf, bool), String>) -> View
             .enc("text line + \\n")
             .explain("CURRENT names the active MANIFEST (db/filename.cc SetCurrentFile)."),
     ];
+    // Typed reason for the LSM Map availability (0024 D2; never read back from the cells).
+    let blocked = match &target {
+        Ok((p, false)) => Some(super::manifest::manifest_missing(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+        Err(e) => Some(super::manifest::current_invalid(e)),
+        _ => None,
+    };
     match target {
         Ok((p, exists)) => {
             let mut fld = Field::new("referenced MANIFEST", Some(Span::file(0, raw.len().saturating_sub(1) as u64)), p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
@@ -182,7 +188,9 @@ pub fn current_view(raw: &[u8], target: Result<(PathBuf, bool), String>) -> View
         }
         Err(e) => f.push(Field::new("referenced MANIFEST", None, e).status(Status::Invalid)),
     }
-    of_fields("CURRENT", f)
+    let mut v = of_fields("CURRENT", f);
+    v.lsm_blocked = blocked;
+    v
 }
 
 pub fn text_view(r: &dyn RangeRead, kind: FileKind) -> View {

@@ -1,0 +1,13 @@
+# 0030 hero capture step 2 (run after hero_0030_open.txt in the same app): Hide bytes, select L1 box 000067, pointer parked in the
+# menu bar (outside every window, guard-safe), window-only capture to OUT (absolute path, no .png). Placeholders: HIDEX HIDEY, BOXX BOXY, PARKX PARKY, OUT
+front
+click {{HIDEX}} {{HIDEY}}
+sleep 1.0
+move {{PARKX}} {{PARKY}}
+shot hero_after_hide
+click {{BOXX}} {{BOXY}}
+sleep 0.8
+move {{PARKX}} {{PARKY}}
+sleep 0.8
+winshot {{OUT}}
+shot hero_final_ctx

@@ -1,0 +1,39 @@
+# P4 item 3: focus ring via keyboard on cf_users (first-lane box and rightmost box).
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+click 583 204
+sleep 0.8
+click 484 251
+sleep 1
+move 900 650
+sleep 0.4
+shot p4_06_entry
+note ITEM3 Home
+key home
+sleep 0.6
+shot p4_06_home
+crop p4_06_home_crop 430 220 820 125
+note ITEM3 Right
+key right
+sleep 0.6
+shot p4_06_right1
+crop p4_06_right1_crop 430 220 820 125
+note ITEM3 Right
+key right
+sleep 0.6
+shot p4_06_right2
+crop p4_06_right2_crop 430 220 820 125
+note ITEM3 Right
+key right
+sleep 0.6
+shot p4_06_right3
+crop p4_06_right3_crop 430 220 820 125
+crop p4_06_right3_edge 1080 220 170 125

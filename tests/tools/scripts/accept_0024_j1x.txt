@@ -1,0 +1,10 @@
+# J1x (XCopy, fresh HOME): item 1 full tooltip text, wide crop; also Option+Left with nothing open.
+front
+winsize 1400 900
+sleep 1
+move 440 119
+sleep 0.3
+move 443 119
+sleep 1.8
+shot j1x_01_hover
+crop j1x_01_hover_wide 150 90 1000 160

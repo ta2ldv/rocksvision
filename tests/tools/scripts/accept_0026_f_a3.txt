@@ -1,0 +1,35 @@
+front
+winsize 1400 900
+sleep 1.5
+move 700 800
+shot a3_01_w1400
+winsize 1250 900
+sleep 1.2
+shot a3_02_w1250
+winsize 1100 900
+sleep 1.2
+shot a3_03_w1100
+winsize 1000 900
+sleep 1.2
+shot a3_04_w1000
+winsize 900 900
+sleep 1.2
+shot a3_05_w900
+winsize 800 900
+sleep 1.2
+shot a3_06_w800
+winsize 1000 900
+sleep 1.2
+shot a3_07_back_w1000
+winsize 1250 900
+sleep 1.2
+shot a3_08_back_w1250
+winsize 1400 900
+sleep 1.2
+shot a3_09_back_w1400
+dclick 830 458
+sleep 2.5
+click 460 150
+shot a3_10_first_frame_after_back
+sleep 1.5
+shot a3_11_settled_after_back

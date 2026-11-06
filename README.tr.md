@@ -7,6 +7,10 @@
 
 [English](README.md) · [Türkçe](README.tr.md)
 
+[![multilevel-advanced-db örneğinin RocksVision LSM Map görünümü: default column family’nin L0–L2 seviyelerinin üstünde WAL dosyaları, seçili SST 000067 ve Explanation’da MANIFEST bilgileri](screenshots/lsm-map.png)](screenshots/highres/lsm-map_highres.png)
+
+RocksDB’yi LSM ağacından tek tek byte’lara kadar keşfedin: WAL ve SST dosyalarını inceleyin, MANIFEST’te kayıtlı column family’leri ve seviyeleri görün, çözümlenen alanları onları tutan byte’lara kadar izleyin.
+
 ## İçindekiler
 
 - [Hakkında](#hakkında)
@@ -64,7 +68,7 @@ Altı temanın ekran görüntüleri (önizleme; her biri tam çözünürlüklü 
 | Menü | İşlev |
 |---|---|
 | File | Open File ile tek dosya, Open Folder ile veritabanı klasörü açma; Go to Offset ile byte konumuna gitme |
-| View | Arama, zoom, tema, panel görünürlüğü ve Reset View |
+| View | Arama, zoom, tema, LSM Map, panel görünürlüğü, Show Tooltips ve Reset View |
 | Help | RocksVision Help ve Keyboard Shortcuts |
 | RocksVision (macOS) | About, uygulamayı gizleme ve çıkış |
 
@@ -77,32 +81,49 @@ macOS’ta menüler sistem menü çubuğundadır; diğer platformlarda pencere i
 
 ## Kullanım
 
-Aşağıdaki derleme adımlarından sonra uygulamayı açın ve şu örnekleri deneyin:
+Aşağıdaki derleme adımlarından sonra uygulamayı açın. Klasör veya dosyayı **Open Folder…** / **Open File…** ile açabilir ya da yolu yazıp **Go** düğmesine basabilirsiniz.
 
-| İşlem | Hazır örnek |
-|---|---|
-| **Open Folder…** | [`examples/data/basic-db/`](examples/data/basic-db/) — tam veritabanı klasörü |
-| **Open File…** | [`examples/files/sst-zstd/sst-zstd.sst`](examples/files/sst-zstd/sst-zstd.sst) — tek sıkıştırılmış SST |
-| **Open File…** | [`examples/files/wal-plain/000004.log`](examples/files/wal-plain/000004.log) — yanında başka dosya gerektirmeyen tek WAL |
+### Hazır örnekler
 
-Dosya yolunu yazıp **Go** düğmesine de basabilirsiniz. [Örnek rehberi](examples/README.md); Bloom filter, index çeşitleri, compression, çoklu LSM seviyeleri, parçalı WAL ve açıkça adlandırılmış bozuk dosya senaryolarını anlatır. Dosyalar hazırdır; veri üretmeniz gerekmez.
+- **`examples/data/`** tam veritabanı klasörlerini içerir (CURRENT, MANIFEST, SST ve WAL dosyaları). `multilevel-advanced-db` gibi bir senaryo klasörünü **Open Folder…** ile açın; üst klasör `data/`’yı değil.
+- **`examples/files/`** tek dosyaları içerir. `.sst`, `.log`, CURRENT veya MANIFEST dosyasının kendisini **Open File…** ile açın.
 
-### Hazır örneklerle nasıl kullanılır?
+İkisi de RocksDB kurmadan veya çalıştırmadan açılır; onları üreten araçlar ayrı geliştirici araçlarıdır. Her senaryo [örnek rehberinde](examples/README.md) anlatılır.
 
-İki örnek türü vardır:
+### Adım adım 1: LSM ağacı
 
-- **`examples/data/`**: Her alt klasör tam bir veritabanı örneğidir. CURRENT, MANIFEST ve senaryonun SST/WAL dosyaları birlikte bulunur. **Open Folder…** ile `data/` üst klasörünü değil, `basic-db` veya `multilevel-db` gibi bir senaryo klasörünü seçin. Dosyalar arasındaki ilişkileri ve MANIFEST’te kayıtlı seviyeleri böyle inceleyebilirsiniz.
-- **`examples/files/`**: Her alt klasör tek başına incelenebilen bir dosya içerir. **Open File…** ile klasörü değil, içindeki `.sst`, `.log`, CURRENT veya MANIFEST dosyasını seçin. Bağımsız SST/WAL için çalışan bir veritabanı veya yan dosyalar gerekmez; bağlam olmadan belirlenemeyen bilgiler tahmin edilmez.
+1. **Open Folder…** → [`examples/data/multilevel-advanced-db/`](examples/data/multilevel-advanced-db/).
+2. Toolbar’daki **LSM Map** düğmesine basın (⇧⌘M; Windows/Linux’ta Ctrl+Shift+M).
+3. Haritanın üstündeki seçiciden bir column family seçin.
+4. Tooltip için bir SST kutusunun veya WAL kartının üzerine gelin; bilgilerini Explanation’da görmek için tıklayın.
+5. Dosyayı açmak için çift tıklayın (veya Enter’a basın).
+6. **◀ Back** haritaya döner. **Table | Map**, harita ile seviye tablosu arasında geçiş yapar.
 
-1. İlk deneme için **Open Folder… → `examples/data/basic-db/`** seçin.
-2. Sol listeden CURRENT, MANIFEST, SST veya WAL dosyasına tıklayın; altındaki yapı ağacını genişletin.
-3. Ortadaki bir satırı seçin; altta ilgili byte’ları, sağda açıklamasını inceleyin.
-4. Bağımsız dosya denemek için **Open File… → `examples/files/sst-zstd/sst-zstd.sst`** açın. Sıkıştırılmış bir data block seçip **show decompressed block** düğmesiyle açılmış byte’lara geçin; **show file bytes** ile disk üzerindeki byte’lara dönün.
-5. WAL için **`examples/files/wal-plain/000004.log`** açın; fiziksel kayıtları ve çözümlenen işlemleri inceleyin.
+### Adım adım 2: SST’den byte’lara
+
+1. **Open File…** → [`examples/files/sst-zstd/sst-zstd.sst`](examples/files/sst-zstd/sst-zstd.sst).
+2. Yapı ağacında bir data block, ardından tabloda bir entry seçin.
+3. Byte’ları altta vurgulanır. Explanation, açılmış block içindeki offset’i ve onu tutan sıkıştırılmış block’un dosya aralığını gösterir.
+4. **show file bytes** diskte saklanan byte’ları gösterir; **show block@0x… (decompressed)** geri götürür.
+
+Bir veritabanı klasöründeki SST, klasörün CURRENT dosyasının gösterdiği MANIFEST onu listeliyorsa ayrıca `level (MANIFEST)` ve `column family (MANIFEST)` satırlarını gösterir (`--dump` da bunları yazar): bunlar SST’nin içinde saklanmayan dış kanıttır. Aksi hâlde `level` satırı, bu tek başına açılan örnekte olduğu gibi, seviyenin neden bilinmediğini (unknown) söyler.
+
+### Adım adım 3: WAL
+
+1. **Open File…** → [`examples/files/wal-plain/000004.log`](examples/files/wal-plain/000004.log).
+2. **Physical blocks** saklanan fragment’ları, **Logical records (reassembled view)** yeniden birleştirilmiş WriteBatch’leri listeler.
+3. Bir WriteBatch, ardından işlemlerinden birini ve key/value alanlarını seçin.
+4. Byte görünümü dosya offset’lerini (**FILE**) gösterir; **show record@0x… (reassembled)** kayıt offset’lerine (**RECORD+**) geçer.
+
+### Kısaca kontroller
+
+- **Arama:** arama kutusuna yazın; **Enter** / **Shift+Enter** veya **Next** / **Prev** eşleşmeler arasında gezinir.
+- **Harita ve uygulama zoom’u:** harita alanından büyük olduğunda üstünde **Center**, **Fit**, **−** ve **+** görünür ve yalnızca haritayı hareket ettirir; **A−** / **A+** tüm uygulamayı ölçekler.
+- **Harita klavyesi:** harita odaktayken oklar seçer, **Enter** açar, **Esc** haritadan çıkar, **0** Fit, **C** Center yapar. **LSM Map** (⇧⌘M) odağı haritaya geri verir.
+- **Tooltip’ler:** **View → Show Tooltips** tooltip’leri açıp kapatır; aynı bilgiler Explanation’da da vardır.
+- **Yerleşim:** **Reset View** panel yerleşimini ve %100 zoom’u geri getirir.
 
 Karşılaştırma için `data/bloom-full`, `data/bloom-absent`, `data/index-partitioned`, `data/codec-*` ve `data/multilevel-db` klasörlerini deneyin. `files/corrupt-*` örnekleri kasıtlı olarak bozuktur: ilgili hatalı öğeyi seçince mevcut **Diagnosis** bilgilerini inceleyin. Normal örnekler de vardır; bütün dosyalar bozuk değildir. Ayrıntılı senaryolar ve beklenen sonuçlar [örnek rehberinde](examples/README.md) yer alır.
-
-**RocksDB hiç kurmamış olsanız ve kendinize ait bir veritabanınız bulunmasa bile RocksVision’ı deneyebilirsiniz.** Depoda, gerçek RocksDB 10.4.2 ile önceden üretilmiş küçük örnek veri setleri bulunur. Bunlar öğrenmek ve uygulamayı denemek için hazırlanmış hazır dosyalardır; RocksVision ile açmanız yeterlidir. RocksDB kurmanız, bir veritabanı çalıştırmanız veya veri üretmeniz gerekmez. RocksVision örnek dosyaları değiştirmeden okur.
 
 ### Ekran yerleşimi
 
@@ -140,7 +161,9 @@ macOS’ta `.app` dosyasını Finder’dan, Windows’ta `.exe` dosyasını aç�
 
 ## Durum ve sınırlamalar
 
-**0.1.3**, erken aşamadaki bir inceleme aracıdır. Her dosya biçimi desteklenmez; desteklenmeyen özellikler ve eksik bağlam, bulunmayan veya bozuk veriden ayrı değerlendirilmelidir. Kontroller her bozulmanın tespit edileceğini garanti etmez.
+**0.1.4** (geliştirme aşamasında; son sürüm 0.1.3), erken aşamadaki bir inceleme aracıdır. Her dosya biçimi desteklenmez; desteklenmeyen özellikler ve eksik bağlam, bulunmayan veya bozuk veriden ayrı değerlendirilmelidir. Kontroller her bozulmanın tespit edileceğini garanti etmez.
+
+LSM Map, MANIFEST’in kaydettiği son durumu gösterir; memtable, flush veya compaction geçmişini göstermez ve WAL ile SST dosyaları arasında bağ kurmaz. Tek başına açılan bir SST’nin seviyesi yoktur: seviyeyi yalnızca klasörünün MANIFEST’i kaydeder. Biçimler, depodaki örnekler üzerinde RocksDB 10.4.2 için doğrulanmıştır; güncel sürüm için dört platformlu CI çalıştırması beklemektedir.
 
 Dar pencerede sayfalama düğmeleri, Matrix toolbar taşması ve eksik WAL fragment teşhisinin kök özete aktarılması bilinen takip işleridir. macOS paketleri ad-hoc imzalıdır; notarization yapılmamıştır. Platforma özgü sınırlamalar için [derleme rehberine](docs/BUILD.md) bakın.
 

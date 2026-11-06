@@ -1,0 +1,7 @@
+# P4 item 7 part 2: double-click 000014 row -> SST view.
+front
+dclick 632 302
+sleep 2
+move 900 750
+sleep 0.4
+shot p4_15_sst

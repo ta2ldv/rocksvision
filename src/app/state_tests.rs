@@ -57,6 +57,13 @@ impl IoBackend for SlowBackend {
     fn stat(&self, p: &Path) -> std::io::Result<(u64, Option<std::time::SystemTime>)> {
         FsBackend.stat(p)
     }
+    /// WAL summaries of paths containing "walgate" wait for the gate (0026 item 4).
+    fn open_read(&self, p: &Path) -> std::io::Result<Box<dyn crate::io::RangeRead>> {
+        if p.to_string_lossy().contains("walgate") {
+            self.0.wait();
+        }
+        FsBackend.open_read(p)
+    }
 }
 
 fn tmpdir(name: &str) -> PathBuf {
@@ -1585,4 +1592,580 @@ fn page_and_copy_reads_are_bounded() {
             assert_eq!(app.prefs().notice(), format!("Copied {cap} of {} bytes as hex (truncated: {} KiB copy cap / end of data)", cap + 50, cap / 1024));
         }
     }
+}
+
+// ---------------- task 0011 / handoff 0024: cross-file history and the LSM Map ----------
+
+fn levels_ready(app: &mut App) {
+    view_is(app, &NodeKind::ManifestLevels);
+}
+
+/// 0024 §4: CURRENT → Observed levels (Map, zoom/pan) → double-click an on-disk SST → Back
+/// returns to CURRENT's levels with the row selected and the map snapshot restored; a second
+/// Back reaches the CURRENT root; then Back is empty ("No previous view").
+#[test]
+fn back_across_files_restores_levels_row_and_map() {
+    let mut app = open_ready("tests/fixtures/db-levels/CURRENT");
+    let cur = app.session().file().unwrap().to_path_buf();
+    assert!(!app.navigation().can_go_back());
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    let v = app.session().view().unwrap();
+    let row = v.rows.iter().position(|r| r.field.open_path.is_some()).expect("on-disk row");
+    let sst = v.rows[row].field.open_path.clone().unwrap();
+    app.apply(Action::SelectRow(row));
+    app.apply(Action::SetMapMode(MapMode::Map));
+    app.apply(Action::MapZoom(MapZoom::In));
+    app.apply(Action::MapView { pan: (0.1, 12.0), zoom: 3.0 });
+    let snap = app.session().map().snapshot();
+    assert_eq!((snap.mode, snap.zoom), (MapMode::Map, 3.0));
+    assert!(app.session().map_shown());
+    app.apply(Action::FollowRow(row));
+    pump(&mut app, "sst opened", |a| a.session().file() == Some(sst.as_path()) && a.session().view().is_some() && a.navigation().pending_target().is_none());
+    assert!(app.navigation().can_go_back(), "the reported failure: Back after opening the SST");
+    assert_eq!(app.navigation().history_len(), 2, "levels entry on top of the root entry");
+    app.apply(Action::Back);
+    pump(&mut app, "back to CURRENT levels", |a| a.session().file() == Some(cur.as_path()) && a.session().view_kind() == Some(&NodeKind::ManifestLevels) && a.navigation().pending_target().is_none());
+    assert_eq!(app.selection().row(), Some(row), "row selected again");
+    assert_eq!(app.session().map().snapshot(), snap, "map mode/cf/pan/zoom/focus restored");
+    assert_eq!(app.navigation().history_len(), 1, "no duplicate entry");
+    app.apply(Action::Back);
+    pump(&mut app, "back to root", |a| a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none());
+    assert!(!app.navigation().can_go_back());
+    app.apply(Action::Back);
+    assert_eq!(app.session().status_msg(), crate::app::state::NO_PREVIOUS_VIEW);
+    // With a file open the status bar shows the transient notice (D2b finding 1).
+    assert_eq!(app.prefs().notice(), crate::app::state::NO_PREVIOUS_VIEW);
+}
+
+/// 0030 A7: an SST opened from the advanced example's map keeps the column family and level
+/// its folder's active MANIFEST lists (external evidence, Implicit, the Explanation says so);
+/// the same bytes elsewhere (no CURRENT) and a true standalone SST stay "unknown".
+#[test]
+fn sst_from_a_folder_shows_manifest_cf_and_level_standalone_stays_unknown() {
+    let mut app = open_ready("examples/data/multilevel-advanced-db/CURRENT");
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    let (cf, level, row) = app.session().view().unwrap().lsm.by_number(58).map(|(c, l, f)| (format!("{} {}", c.id, c.name), format!("L{}", l.level), f.row)).expect("000058 is live");
+    assert_eq!((cf.as_str(), level.as_str()), ("0 default", "L1"), "examples/README.md: round 3 compacts into L1 000058 (default)");
+    app.apply(Action::FollowRow(row));
+    let sst = fixture("examples/data/multilevel-advanced-db/000058.sst");
+    pump(&mut app, "sst opened", |a| a.session().file() == Some(sst.as_path()) && a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none());
+    let field = |app: &App, name: &str| app.session().view().unwrap().rows.iter().map(|r| &r.field).find(|f| f.name == name).cloned();
+    let f_cf = field(&app, "column family (MANIFEST)").expect("CF from the MANIFEST");
+    let f_lv = field(&app, "level (MANIFEST)").expect("level from the MANIFEST");
+    assert_eq!((f_cf.value.as_str(), f_lv.value.as_str()), (cf.as_str(), level.as_str()));
+    assert!(f_cf.span.is_none() && f_cf.status == Status::Implicit, "not stored in the SST: no bytes");
+    let ex = f_lv.explain.clone();
+    assert!(ex.starts_with("The level that MANIFEST-") && ex.contains("records for 000058.sst. An SST does not store its level."), "{ex}");
+    assert!(ex.contains("External MANIFEST evidence (MANIFEST-") && ex.contains(", live file 000058), not stored in the SST."), "{ex}");
+    assert!(f_cf.explain.ends_with("Agrees with the SST property rocksdb.column.family.name."), "{}", f_cf.explain);
+    assert!(f_lv.no_bytes_source.as_deref().is_some_and(|s| s.starts_with("from the folder's MANIFEST (read ")), "{:?}", f_lv.no_bytes_source);
+    assert!(field(&app, "level").is_none(), "no 'unknown for a standalone SST' row");
+    // The same file number in a folder without CURRENT: no inheritance from the earlier folder.
+    let d = tmpdir("a7-lone");
+    let lone = d.join("000058.sst");
+    std::fs::copy(&sst, &lone).unwrap();
+    for p in [lone, fixture("examples/files/sst-zstd/sst-zstd.sst")] {
+        app.apply(Action::OpenFile(p.clone()));
+        pump(&mut app, "standalone sst", |a| a.session().file() == Some(p.as_path()) && a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none());
+        assert!(field(&app, "column family (MANIFEST)").is_none() && field(&app, "level (MANIFEST)").is_none(), "{}", p.display());
+        let lv = field(&app, "level").expect("level row");
+        assert!(
+            lv.value == "unknown — a standalone SST has no MANIFEST context: no numbered name or no CURRENT next to it (only a MANIFEST records levels)" && lv.status == Status::Unknown,
+            "{}: {lv:?}",
+            p.display()
+        );
+    }
+}
+
+/// 0024 §2: the toolbar LSM Map entry from an SST opens the folder's CURRENT levels in Map mode
+/// with that SST focused and selected; repeated presses toggle Map/Table without history
+/// entries; Back returns to the SST. A path opened by the user starts a new history.
+#[test]
+fn lsm_map_entry_from_sst_focuses_it_without_duplicate_history() {
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    let sst = fixture("tests/fixtures/db-levels/000014.sst");
+    app.apply(Action::OpenPath(sst.clone()));
+    pump(&mut app, "sst + folder", |a| a.session().view().is_some() && a.navigation().pending_target().is_none() && !a.jobs().scanning() && !a.session().dir_entries().is_empty());
+    assert!(matches!(app.session().lsm_map_availability(), Ok(crate::app::lsm_map::MapEntry::Via { focus: Some(14), .. })), "{:?}", app.session().lsm_map_availability());
+    app.apply(Action::ShowLsmMap);
+    pump(&mut app, "levels via CURRENT", |a| a.session().view_kind() == Some(&NodeKind::ManifestLevels) && a.navigation().pending_target().is_none());
+    assert!(app.session().map_shown());
+    assert_eq!(app.session().map().focus(), Some(14));
+    let sel = app.selection().row().and_then(|r| app.session().view().unwrap().lsm.by_row(r)).map(|(_, _, f)| f.number);
+    assert_eq!(sel, Some(14), "the SST's box is selected");
+    let n = app.navigation().history_len();
+    assert_eq!(n, 1, "the SST view is the one entry");
+    for _ in 0..3 {
+        app.apply(Action::ShowLsmMap);
+    }
+    assert!(!app.session().map_shown(), "odd number of presses: table");
+    assert_eq!(app.navigation().history_len(), n, "mode toggles add no history");
+    app.apply(Action::ShowLsmMap);
+    assert!(app.session().map_shown());
+    app.apply(Action::Back);
+    pump(&mut app, "back to the SST", |a| a.session().file() == Some(sst.as_path()) && a.navigation().pending_target().is_none() && a.session().view().is_some());
+    assert!(!app.navigation().can_go_back());
+    // A lone SST elsewhere: unavailable, with the reason.
+    let d = tmpdir("lone-sst");
+    let lone = d.join("000014.sst");
+    std::fs::copy(&sst, &lone).unwrap();
+    app.apply(Action::OpenPath(lone.clone()));
+    pump(&mut app, "lone sst", |a| {
+        a.session().file() == Some(lone.as_path()) && a.session().view().is_some() && a.navigation().pending_target().is_none() && !a.jobs().scanning() && a.session().dir() == lone.parent()
+    });
+    let r = app.session().lsm_map_availability().unwrap_err();
+    assert!(r.0.starts_with("000014.sst was opened without its database folder"), "{r:?}");
+    assert!(!app.navigation().can_go_back(), "a new root context");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 0024 §3/§4: keyboard moves on the map select the neighbouring box's row; Table | Map keeps
+/// the selection; the tooltips preference is an action and part of the persisted prefs.
+#[test]
+fn map_keyboard_moves_and_tooltips_pref() {
+    let mut app = open_ready("tests/fixtures/db-levels/CURRENT");
+    app.apply(Action::ShowLsmMap);
+    levels_ready(&mut app);
+    assert!(app.session().map_shown());
+    app.apply(Action::MapMove(MapMove::Right));
+    let first = app.session().map().focus().expect("first box focused");
+    assert_eq!(app.selection().row().and_then(|r| app.session().view().unwrap().lsm.by_row(r)).map(|(_, _, f)| f.number), Some(first));
+    app.apply(Action::MapMove(MapMove::End));
+    let row = app.selection().row();
+    app.apply(Action::SetMapMode(MapMode::Table));
+    assert_eq!(app.selection().row(), row, "mode switch keeps the selection");
+    assert!(app.prefs().tooltips());
+    app.apply(Action::SetTooltips(false));
+    assert!(!app.prefs().tooltips() && !app.prefs().persisted().tooltips);
+}
+
+/// 0024 D2 (architect should-fix 5): after the map, the tree node "Observed levels" opens the
+/// Table (no map state carried); the LSM Map entry still opens the Map.
+#[test]
+fn tree_node_opens_the_table_after_the_map() {
+    let mut app = open_ready("tests/fixtures/db-levels/CURRENT");
+    app.apply(Action::ShowLsmMap);
+    levels_ready(&mut app);
+    assert!(app.session().map_shown());
+    app.apply(Action::SelectRoot);
+    pump(&mut app, "root", |a| a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none());
+    let node = app.session().node_of(&NodeKind::ManifestLevels).expect("levels tree node");
+    app.apply(Action::SelectNode(node));
+    levels_ready(&mut app);
+    assert!(!app.session().map_shown() && app.session().map().mode() == MapMode::Table, "tree node → Table");
+    app.apply(Action::ShowLsmMap);
+    assert!(app.session().map_shown(), "the entry → Map");
+}
+
+/// 0024 D2 (architect should-fix 6): a file switch while a cross-file Back is loading keeps the
+/// popped entry, so Back still reaches it.
+#[test]
+fn file_switch_during_back_keeps_the_popped_entry() {
+    let mut app = open_ready("tests/fixtures/db-levels/CURRENT");
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    let row = app.session().view().unwrap().rows.iter().position(|r| r.field.open_path.is_some()).unwrap();
+    app.apply(Action::SelectRow(row));
+    app.apply(Action::FollowRow(row));
+    pump(&mut app, "sst", |a| {
+        a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none() && a.session().file().is_some_and(|f| f.extension().is_some_and(|e| e == "sst"))
+    });
+    assert_eq!(app.navigation().history_len(), 2);
+    // Back (opens CURRENT again; the levels entry is popped and in flight), then at once another file.
+    app.apply(Action::Back);
+    assert_eq!(app.navigation().history_len(), 1);
+    let wal = fixture("tests/fixtures/db-levels/000025.log");
+    app.apply(Action::OpenFile(wal.clone()));
+    pump(&mut app, "wal", |a| a.session().file() == Some(wal.as_path()) && a.session().view().is_some() && a.navigation().pending_target().is_none());
+    assert_eq!(app.navigation().history_len(), 2, "the popped levels entry is back on the stack");
+    app.apply(Action::Back);
+    pump(&mut app, "back to levels", |a| a.session().view_kind() == Some(&NodeKind::ManifestLevels) && a.navigation().pending_target().is_none());
+    assert_eq!(app.selection().row(), Some(row));
+}
+
+/// 0024 D2 (tester observation 1): `OpenFile` of an SST outside the listed folder lists its
+/// folder like `OpenPath`, so both give the same availability (via its CURRENT).
+#[test]
+fn open_file_and_open_path_of_an_sst_agree_on_availability() {
+    let sst = fixture("tests/fixtures/db-checkpoint/000011.sst");
+    let mut got = Vec::new();
+    for open in [Action::OpenFile(sst.clone()), Action::OpenPath(sst.clone())] {
+        let gate = Gate::new();
+        gate.release();
+        let mut app = app_with(&gate);
+        app.apply(open);
+        pump(&mut app, "sst + its folder", |a| {
+            a.session().file() == Some(sst.as_path()) && a.session().view().is_some() && a.session().dir() == sst.parent() && !a.jobs().scanning() && a.navigation().pending_target().is_none()
+        });
+        settle(&mut app);
+        got.push(app.session().lsm_map_availability());
+    }
+    assert!(matches!(&got[0], Ok(crate::app::lsm_map::MapEntry::Via { focus: Some(11), .. })), "{:?}", got[0]);
+    assert_eq!(got[0], got[1]);
+}
+
+/// 0024 D2 (architect nit 11): pressing the LSM Map entry again while its levels view is loading
+/// does not replace the request (the SST focus survives).
+#[test]
+fn lsm_map_entry_is_a_no_op_while_its_levels_view_loads() {
+    let sst = fixture("tests/fixtures/db-levels/000014.sst");
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    app.apply(Action::OpenPath(sst.clone()));
+    pump(&mut app, "sst + folder", |a| a.session().file() == Some(sst.as_path()) && a.session().view().is_some() && !a.jobs().scanning() && a.navigation().pending_target().is_none());
+    settle(&mut app);
+    app.apply(Action::ShowLsmMap);
+    app.apply(Action::ShowLsmMap);
+    levels_ready(&mut app);
+    assert_eq!((app.session().map_shown(), app.session().map().focus()), (true, Some(14)));
+}
+
+/// 0024 D2b (finding 5): a folder whose CURRENT names a missing MANIFEST: the folder note says
+/// "CURRENT present" until CURRENT is read, then why the live files are unknown (never "active
+/// MANIFEST"); the LSM Map is unavailable with the shared sentence.
+#[test]
+fn folder_note_after_current_names_a_missing_manifest() {
+    let d = tmpdir("nomanifest");
+    let src = fixture("tests/fixtures/db-checkpoint");
+    for name in ["CURRENT", "000009.sst", "000016.log"] {
+        std::fs::copy(src.join(name), d.join(name)).unwrap();
+    }
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    app.apply(Action::OpenPath(d.clone()));
+    pump(&mut app, "CURRENT opened", |a| a.session().view().is_some() && a.navigation().pending_target().is_none() && !a.jobs().scanning());
+    settle(&mut app);
+    let why = "CURRENT names MANIFEST-000005, which is not in this folder. The live SST files cannot be observed.";
+    assert_eq!(app.session().lsm_map_availability(), Err(crate::app::lsm_map::Unavailable(why.into())));
+    let note = app.session().dir_note().to_string();
+    assert!(note.starts_with(&format!("CURRENT present · live SST files unknown: {why}")) && !note.contains("active MANIFEST"), "{note}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 0024 D3 (reviewer nit 8): Back to a file that no longer opens says so ("Previous view
+/// unavailable: …", not "No known structure holds this byte") and consumes the entry (no
+/// strand, no duplicate).
+#[test]
+fn back_to_a_deleted_file_is_reported_and_consumed() {
+    let d = tmpdir("deleted-back");
+    let a = d.join("a.log");
+    let b = d.join("b.log");
+    std::fs::copy(fixture("tests/fixtures/wal-basic/000004.log"), &a).unwrap();
+    std::fs::copy(fixture("tests/fixtures/wal-basic/000004.log"), &b).unwrap();
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    app.apply(Action::OpenFile(a.clone()));
+    pump(&mut app, "a", |x| x.session().view().is_some() && x.navigation().pending_target().is_none());
+    app.apply(Action::OpenFile(b.clone()));
+    pump(&mut app, "b", |x| x.session().file() == Some(b.as_path()) && x.session().view().is_some() && x.navigation().pending_target().is_none());
+    settle(&mut app);
+    assert_eq!(app.navigation().history_len(), 1);
+    std::fs::remove_file(&a).unwrap();
+    app.apply(Action::Back);
+    pump(&mut app, "back answered", |x| x.navigation().pending_target().is_none());
+    settle(&mut app);
+    assert!(app.session().status_msg().starts_with("Previous view unavailable: "), "{}", app.session().status_msg());
+    assert!(app.prefs().notice().starts_with("Previous view unavailable: "));
+    assert!(!app.session().status_msg().contains("No known structure"));
+    assert_eq!(app.navigation().history_len(), 0, "consumed, not put back");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 0024 D3 (UI expert final): choosing another CF on the map deselects a file of the previous
+/// CF (the Explanation shows the summary); a file of the chosen CF stays selected. A selected
+/// missing SST's Derivation says it is missing on disk. Plural wording.
+#[test]
+fn cf_change_clears_a_foreign_selection_and_missing_derivation() {
+    assert_eq!((crate::model::files_word(1), crate::model::files_word(0), crate::model::files_word(2)), ("1 file".into(), "0 files".into(), "2 files".into()));
+    let d = tmpdir("ckpt-missing");
+    let src = fixture("tests/fixtures/db-checkpoint");
+    for e in std::fs::read_dir(&src).unwrap() {
+        let e = e.unwrap();
+        if e.file_name() != "000013.sst" {
+            std::fs::copy(e.path(), d.join(e.file_name())).unwrap();
+        }
+    }
+    let gate = Gate::new();
+    gate.release();
+    let mut app = app_with(&gate);
+    app.apply(Action::OpenFile(d.join("CURRENT")));
+    pump(&mut app, "CURRENT", |a| a.session().view().is_some() && a.navigation().pending_target().is_none());
+    app.apply(Action::ShowLsmMap);
+    levels_ready(&mut app);
+    let inv = app.session().view().unwrap().lsm.clone();
+    let missing = inv.iter().find(|f| !f.on_disk()).expect("000013 missing");
+    let (mcf, _, _) = inv.by_row(missing.row).unwrap();
+    app.apply(Action::SelectRow(missing.row));
+    let card = crate::app::explanation::lsm_file_card(app.session(), missing.row).unwrap();
+    assert_eq!(card.derivation, "○ Missing on disk: the MANIFEST lists 000013.sst as live, but the file is not in this folder.");
+    // Same CF: kept; another CF: cleared.
+    app.apply(Action::MapSelectCf(mcf.id));
+    assert_eq!(app.selection().row(), Some(missing.row));
+    let other = inv.cfs.iter().find(|c| c.id != mcf.id).unwrap().id;
+    app.apply(Action::MapSelectCf(other));
+    assert_eq!(app.selection().row(), None, "a file of another CF is not left selected");
+    assert!(!crate::app::explanation::levels_summary(app.session()).is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Tester P4/P5 (A3): selecting a box of the CF shown keeps the map zoom; another CF fits.
+#[test]
+fn selecting_a_box_of_the_shown_cf_keeps_the_zoom() {
+    // Tester P4/P5 (A3, D2–D4): before a CF was chosen the map shows the first CF with
+    // `MapState::cf == None`; selecting one of its boxes was taken as a CF switch and fitted to ×1.
+    let mut app = open_ready("examples/data/multilevel-advanced-db/CURRENT");
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    app.apply(Action::SetMapMode(MapMode::Map));
+    assert_eq!(app.session().map().cf(), None, "no CF chosen yet");
+    let first = app.session().shown_cf().expect("a CF shown");
+    let row = app.session().view().unwrap().lsm.cf(first).and_then(|c| c.levels.iter().flat_map(|l| l.files.iter()).nth(1)).map(|f| f.row).unwrap();
+    app.apply(Action::MapView { pan: (0.3, 0.0), zoom: 3.0 });
+    app.apply(Action::SelectRow(row));
+    let map = app.session().map();
+    assert_eq!((map.zoom(), map.pan().0, map.cf()), (3.0, 0.3, Some(first)), "zoom and pan kept; the CF is now explicit");
+    assert!(map.focus().is_some());
+    // A box of another CF is a real switch: its whole width (×1).
+    let other = app.session().view().unwrap().lsm.cfs.iter().find(|c| c.id != first).and_then(|c| c.levels.iter().flat_map(|l| l.files.iter()).next()).map(|f| f.row).unwrap();
+    app.apply(Action::SelectRow(other));
+    assert_eq!(app.session().map().zoom(), 1.0);
+}
+
+/// 0024 D1: the LSM Map entry asks once for the map's keyboard focus (taken with the scroll
+/// requests while the map is drawn); a mode switch by the segment does not.
+#[test]
+fn lsm_map_entry_requests_keyboard_focus_once() {
+    let mut app = open_ready("tests/fixtures/db-levels/CURRENT");
+    let _ = app.take_scroll_request();
+    app.apply(Action::ShowLsmMap);
+    levels_ready(&mut app);
+    assert!(app.session().map().focus_requested());
+    assert!(app.take_scroll_request().map_focus, "taken once");
+    assert!(!app.take_scroll_request().map_focus);
+    app.apply(Action::SetMapMode(MapMode::Table));
+    app.apply(Action::SetMapMode(MapMode::Map));
+    assert!(!app.take_scroll_request().map_focus, "the segment keeps focus where it is");
+    app.apply(Action::ShowLsmMap); // back to the table
+    app.apply(Action::ShowLsmMap); // the shown levels view: Map again, focused
+    assert!(app.take_scroll_request().map_focus);
+}
+
+/// 0024 D1 (§4.6): Back restores the records table's scroll offset (same file and across
+/// files); a new view starts at the top; the restore is one-shot.
+#[test]
+fn back_restores_table_scroll_offset() {
+    let mut app = open_ready("tests/fixtures/db-levels/CURRENT");
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    assert_eq!(app.session().table_scroll(), 0.0, "a new table starts at the top");
+    app.apply(Action::SelectRow(1));
+    app.apply(Action::SetTableScroll(42.5));
+    // Same file: levels → root → Back.
+    app.apply(Action::SelectRoot);
+    pump(&mut app, "root", |a| a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none());
+    assert_eq!(app.session().table_scroll(), 0.0);
+    app.apply(Action::Back);
+    levels_ready(&mut app);
+    let r = app.take_scroll_request();
+    assert_eq!(r.table, Some(42.5), "offset restored");
+    assert!(r.row.is_some(), "the row request stays as the fallback");
+    assert_eq!(app.take_scroll_request().table, None, "one-shot");
+    assert_eq!((app.session().table_scroll(), app.selection().row()), (42.5, Some(1)));
+    // Across files: follow the on-disk row, then Back.
+    let row = app.session().view().unwrap().rows.iter().position(|r| r.field.open_path.is_some()).unwrap();
+    app.apply(Action::SelectRow(row));
+    app.apply(Action::SetTableScroll(17.0));
+    app.apply(Action::FollowRow(row));
+    pump(&mut app, "sst", |a| a.session().view_kind() == Some(&NodeKind::Root) && a.navigation().pending_target().is_none() && a.session().table_scroll() == 0.0);
+    app.apply(Action::Back);
+    pump(&mut app, "back to levels", |a| a.session().view_kind() == Some(&NodeKind::ManifestLevels) && a.navigation().pending_target().is_none());
+    assert_eq!(app.take_scroll_request().table, Some(17.0));
+}
+
+// ---------------- task 0012 / handoff 0026: WAL overview, conditional navigation ----------
+
+/// 0026 item 4: the levels view of db-levels lists its WAL (number from the name, listing size),
+/// summarises it in the background (Done: batches, CF 0, sequences), a click selects it (no
+/// levels row; the Explanation card has its facts), Open WAL is a file switch and Back restores
+/// the map with the WAL selected; a row selection clears the WAL.
+#[test]
+fn wal_overview_summary_select_open_and_back() {
+    let mut app = open_ready("tests/fixtures/wal-recycled/CURRENT");
+    let cur = app.session().file().unwrap().to_path_buf();
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    let w = app.session().wal_inventory().expect("inventory of the levels view's folder");
+    assert_eq!(w.files.iter().map(|f| (f.number, f.name.as_str())).collect::<Vec<_>>(), vec![(Some(11), "000011.log"), (Some(14), "000014.log")]);
+    let wal = w.files[1].path.clone();
+    assert_eq!(w.files[1].size, std::fs::metadata(&wal).unwrap().len());
+    pump(&mut app, "wal summary", |a| !a.session().wal_scan_pending() && !a.jobs().wal_scanning());
+    let w = app.session().wal_inventory().unwrap();
+    let ln = &app.session().view().unwrap().lsm.log_numbers;
+    // MANIFEST: both CFs at log number 14 (RocksDB 10.4.2 semantics: WAL 11 < 14 is flushed per
+    // the MANIFEST; WAL 14 may hold unflushed writes of CF 0 and 1).
+    assert_eq!((ln.per_cf.clone().into_iter().collect::<Vec<_>>(), ln.active), (vec![(0, 14), (1, 14)], true));
+    assert_eq!(WalLifecycle::of(w.files[0].number, ln), WalLifecycle::FlushedPerManifest);
+    assert_eq!(WalLifecycle::of(w.files[1].number, ln), WalLifecycle::MayHoldUnflushed { cfs: vec![0, 1] });
+    assert!(matches!(&w.files[0].summary, WalSummary::Done(s) if s.batches == 6 && s.cfs.len() == 2 && s.seq == Some((131, 136))), "{:?}", w.files[0].summary);
+    // The recycled WAL ends in leftover bytes of its previous use: counts before them.
+    assert!(matches!(&w.files[1].summary, WalSummary::Corrupt { stats, .. } if stats.batches == 9 && stats.seq == Some((137, 145))), "{:?}", w.files[1].summary);
+    app.apply(Action::SetMapMode(MapMode::Map));
+    app.apply(Action::SelectRow(0));
+    app.apply(Action::SelectWal(14));
+    assert_eq!((app.selection().row(), app.session().map().wal(), app.session().map().focus()), (None, Some(14), None));
+    let card = crate::app::explanation::map_card(app.session()).expect("WAL card");
+    assert_eq!((card.opens, card.title.as_str()), (Some(14), "000014.log"));
+    let get = |l: &str| card.facts.iter().find(|x| x.label == l).cloned().unwrap_or_else(|| panic!("fact {l}"));
+    use crate::app::map_facts::{Certainty, Source};
+    assert_eq!(get("Log number").source, Source::Name);
+    assert_eq!(get("Scan state").certainty, Certainty::Partial);
+    assert!(get("Scan state").value.contains("corrupt or recycled leftover at 0x742"), "{:?}", get("Scan state"));
+    assert_eq!(get("Shown CF").source, Source::Scan);
+    let life = get("Lifecycle");
+    assert!(life.source == Source::Derived && life.value.contains("per MANIFEST") && !life.value.contains("memtable"), "{life:?}");
+    assert!(!card.facts.iter().any(|x| x.value.contains("memtable") || x.value.contains(".sst")), "no memtable / SST ancestry claims");
+    // An unknown WAL number selects nothing.
+    app.apply(Action::SelectWal(99));
+    assert_eq!(app.session().map().wal(), Some(14));
+    let snap = app.session().map().snapshot();
+    app.apply(Action::OpenWal(14));
+    pump(&mut app, "wal opened", |a| a.session().file() == Some(wal.as_path()) && a.session().view().is_some() && a.navigation().pending_target().is_none());
+    assert!(app.session().wal_inventory().is_none(), "the inventory belongs to the levels view's file");
+    app.apply(Action::Back);
+    pump(&mut app, "back to the map", |a| a.session().file() == Some(cur.as_path()) && a.session().view_kind() == Some(&NodeKind::ManifestLevels) && a.navigation().pending_target().is_none());
+    assert_eq!(app.session().map().snapshot(), snap, "map with the WAL selected");
+    assert!(app.session().map_shown() && crate::app::explanation::map_card(app.session()).is_some());
+    // Keyboard (§4.9): Left/Right along the WALs, Down to the first box, Up back to the newest.
+    app.apply(Action::MapMove(MapMove::Left));
+    assert_eq!(app.session().map().wal(), Some(11));
+    app.apply(Action::MapMove(MapMove::Right));
+    assert_eq!(app.session().map().wal(), Some(14));
+    app.apply(Action::MapMove(MapMove::Down));
+    assert!(app.session().map().wal().is_none() && app.session().map().focus().is_some() && app.selection().row().is_some(), "Down: first box");
+    for _ in 0..8 {
+        app.apply(Action::MapMove(MapMove::Up));
+    }
+    assert_eq!(app.session().map().wal(), Some(14), "Up from the top level: the newest WAL");
+    // A level title and the older-WAL summary are picks with their own cards.
+    app.apply(Action::SelectMapPick(MapPick::Level(0)));
+    assert!(crate::app::explanation::map_card(app.session()).is_some_and(|c| c.facts.iter().any(|f| f.label == "Lanes")));
+    app.apply(Action::SelectMapPick(MapPick::OlderWals(11)));
+    assert!(crate::app::explanation::map_card(app.session()).is_some_and(|c| c.title == "+1 older WAL files" && c.facts.iter().any(|f| f.label == "Names" && f.value == "000011.log")));
+    app.apply(Action::SelectMapPick(MapPick::OlderWals(9)));
+    assert_eq!(app.session().map().pick(), Some(MapPick::OlderWals(11)), "only existing objects are picked");
+    // D3 N6: a CF change clears a level pick (it described the old CF's level).
+    app.apply(Action::SelectMapPick(MapPick::Level(0)));
+    let other = app.session().view().and_then(|v| v.lsm.cfs.iter().map(|c| c.id).find(|id| Some(*id) != app.session().map().shown_cf(&v.lsm)));
+    if let Some(o) = other {
+        app.apply(Action::MapSelectCf(o));
+        assert_eq!(app.session().map().pick(), None);
+    }
+    app.apply(Action::SelectRow(0));
+    assert_eq!(app.session().map().pick(), None, "a levels row replaces the pick");
+}
+
+/// 0026 item 4: WAL summaries run on the I/O pool (the UI thread never waits), are cancelled
+/// by Cancel (files go back to "not scanned" with the reason, the late reply is ignored) and by
+/// a file switch (generation); nothing is left Scanning.
+#[test]
+fn wal_summaries_are_background_cancellable_and_late_replies_ignored() {
+    let d = tmpdir("walgate");
+    for n in ["CURRENT", "MANIFEST-000005", "000025.log"] {
+        std::fs::copy(fixture(&format!("tests/fixtures/db-levels/{n}")), d.join(n)).unwrap();
+    }
+    let gate = Gate::new();
+    let mut app = app_with(&gate);
+    app.apply(Action::OpenFile(d.join("CURRENT")));
+    pump(&mut app, "opened", |a| a.session().view().is_some() && a.navigation().pending_target().is_none());
+    quick("levels request", || {
+        app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    });
+    levels_ready(&mut app);
+    assert!(app.session().wal_scan_pending() && app.jobs().wal_scanning(), "scan started, blocked on the gate");
+    quick("cancel", || {
+        app.apply(Action::CancelJobs);
+    });
+    assert!(!app.session().wal_scan_pending() && !app.jobs().wal_scanning());
+    let f = &app.session().wal_inventory().unwrap().files[0];
+    assert_eq!(f.summary, WalSummary::NotScanned(NotScannedWhy::Cancelled));
+    assert_eq!(f.summary.membership(0), CfMembership::Unknown, "a CF filter keeps the unscanned WAL");
+    gate.release();
+    settle(&mut app);
+    assert_eq!(app.session().wal_inventory().unwrap().files[0].summary, WalSummary::NotScanned(NotScannedWhy::Cancelled), "late reply ignored");
+    // D1 decision 3: showing the map again requests the cancelled summary once more.
+    app.apply(Action::SetMapMode(MapMode::Map));
+    pump(&mut app, "rescan", |a| !a.session().wal_scan_pending() && !a.jobs().wal_scanning());
+    assert!(matches!(app.session().wal_inventory().unwrap().files[0].summary, WalSummary::Done(_)), "summarised after the map was shown again");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 0026 D6 (UI expert final §5.1): multilevel-db, cf_users. The WAL is at or above cf_users'
+/// log number per MANIFEST, but the complete logical scan found no cf_users record: the band title no
+/// longer counts it ("1 may hold …"), and its lifecycle line says both facts.
+#[test]
+fn lifecycle_agrees_with_a_complete_scan_on_multilevel_db() {
+    let mut app = open_ready("examples/data/multilevel-db/CURRENT");
+    app.apply(Action::Navigate { target: NodeKind::ManifestLevels, span: None });
+    levels_ready(&mut app);
+    pump(&mut app, "wal summary", |a| !a.session().wal_scan_pending() && !a.jobs().wal_scanning());
+    let inv = &app.session().view().unwrap().lsm;
+    let users = inv.cfs.iter().find(|c| c.name.eq("cf_users")).map(|c| c.id).expect("cf_users");
+    let files = &app.session().wal_inventory().unwrap().files;
+    assert!(files.iter().all(|f| f.summary.membership(users) == CfMembership::ObservedAbsent), "fixture: no cf_users record in the WAL");
+    assert!(
+        files.iter().any(|f| matches!(WalLifecycle::of(f.number, &inv.log_numbers), WalLifecycle::MayHoldUnflushed { ref cfs } if cfs.contains(&users))),
+        "fixture: the MANIFEST rule alone says may hold"
+    );
+    assert_eq!(crate::app::map_facts::band_lifecycle(files, inv, Some(users)), None, "no \"1 may hold\" in the band title");
+    for f in files {
+        let life = crate::app::map_facts::wal_facts(f, inv, Some(users)).into_iter().find(|x| x.label == "Lifecycle").unwrap();
+        assert!(!life.value.starts_with("May hold unflushed writes for cf_users"), "{}", life.value);
+        if matches!(WalLifecycle::of(f.number, &inv.log_numbers), WalLifecycle::MayHoldUnflushed { ref cfs } if cfs.contains(&users)) {
+            let scan = f.summary.complete_scan_clause().expect("complete scan");
+            assert_eq!(life.value, format!("At or above cf_users's log number per MANIFEST; {scan} found no cf_users records."));
+        }
+    }
+}
+
+/// 0026 D7 (tester P6): multilevel-db CF 0: select 000014 (a box click) → Up enters the WAL
+/// band at the newest WAL (000023) → Enter opens it → Back restores the map with the WAL pick.
+#[test]
+fn keyboard_path_box_up_enter_back_on_multilevel_db() {
+    let mut app = open_ready("examples/data/multilevel-db/CURRENT");
+    let cur = app.session().file().unwrap().to_path_buf();
+    app.apply(Action::ShowLsmMap);
+    pump(&mut app, "map", |a| a.session().map_shown() && a.navigation().pending_target().is_none());
+    let (row, cf) = app.session().view().and_then(|v| v.lsm.by_number(14)).map(|(c, _, f)| (f.row, c.id)).expect("000014");
+    app.apply(Action::MapSelectCf(cf));
+    app.apply(Action::SelectRow(row));
+    assert_eq!(app.session().map().focus(), Some(14), "a box selection is also the map focus");
+    app.apply(Action::MapMove(MapMove::Up));
+    assert_eq!(app.session().map().wal(), Some(23), "Up from the top level enters the WAL band at the newest WAL");
+    let snap = app.session().map().snapshot();
+    app.apply(Action::FollowSelected);
+    pump(&mut app, "wal opened", |a| a.session().file().is_some_and(|f| f.ends_with("000023.log")) && a.session().view().is_some() && a.navigation().pending_target().is_none());
+    app.apply(Action::Back);
+    pump(&mut app, "back to the map", |a| a.session().file() == Some(cur.as_path()) && a.session().view_kind() == Some(&NodeKind::ManifestLevels) && a.navigation().pending_target().is_none());
+    assert_eq!(app.session().map().snapshot(), snap, "map with the WAL pick restored");
+    assert!(app.session().map_shown());
+    // Up with no focus and no selection enters the band at the newest WAL (not the first box).
+    app.apply(Action::SelectRow(row));
+    app.apply(Action::ClearSearch);
+    app.apply(Action::MapSelectCf(cf));
+    app.apply(Action::SetMapMode(MapMode::Table));
+    app.apply(Action::SetMapMode(MapMode::Map));
+    app.apply(Action::SelectWal(23));
+    app.apply(Action::MapMove(MapMove::Down));
+    assert!(app.session().map().wal().is_none() && app.session().map().focus().is_some(), "Down: first box");
+    app.apply(Action::SelectMapPick(crate::app::MapPick::Level(0)));
+    assert_eq!((app.session().map().focus(), app.selection().row()), (None, None), "a level pick: no focus, no row");
+    app.apply(Action::MapMove(MapMove::Up));
+    assert_eq!(app.session().map().wal(), Some(23), "Up with nothing focused: the newest WAL");
 }

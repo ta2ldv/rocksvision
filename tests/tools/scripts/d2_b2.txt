@@ -1,0 +1,10 @@
+front
+move 600 272
+sleep 1.6
+shot b_row_file_late
+move 1380 880
+move 620 300
+sleep 0.5
+move 622 301
+sleep 1.4
+shot b_row2_file

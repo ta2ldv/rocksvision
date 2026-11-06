@@ -1,0 +1,7 @@
+front
+winsize 1400 900
+sleep 1
+click 210 18
+sleep 0.6
+shot pers_2_menu_after_relaunch
+key esc

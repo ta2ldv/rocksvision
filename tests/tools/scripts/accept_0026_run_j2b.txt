@@ -1,0 +1,16 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+click 446 118
+sleep 4
+move 700 950
+shot j2_01_A_default
+winsize 900 700
+sleep 1.5
+move 500 950
+shot j2_02_B_900x700

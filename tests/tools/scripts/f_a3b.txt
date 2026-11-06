@@ -1,0 +1,12 @@
+front
+click 826 406
+sleep 1.0
+move 1380 880
+shot a3b_1_zoomed
+click 745 406
+sleep 1.0
+move 1380 880
+shot a3b_2_box_clicked
+key esc
+sleep 0.6
+shot a3b_3_esc

@@ -1,0 +1,11 @@
+# Task 0024 Back repro, pass 3: path + Go, click "Observed levels (via MANIFEST)" in the tree, shot (rows of the levels table). Then quit.
+front
+click 583 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+click 313 522
+sleep 1.5
+shot p3_01_levels
+key q cmd

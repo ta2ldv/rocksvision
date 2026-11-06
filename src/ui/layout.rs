@@ -6,6 +6,7 @@
 //! Panels are never hidden automatically: narrowing the window shrinks the hex rows first
 //! (16 → 8 → 4), then the Explanation panel, then Navigation, down to their minimums.
 
+use crate::app::view_prefs::SplitRole;
 use crate::model::ColumnRole;
 
 pub struct LayoutDefaults {
@@ -63,7 +64,31 @@ pub struct LayoutDefaults {
     pub remainder_min: f32,
     pub column_min: f32,
     pub selected_stripe: f32,
-    pub lsm_box_max_height: f32,
+    /// LSM Map (0026): lane gap, level frame inner padding, gap between level frames, minimum
+    /// drawn box width, the readable box width's padding (`map_readable_w` = width of "000000"
+    /// in Monospace + this), focus ring distance, points per key rank at the largest map zoom;
+    /// WAL box width [min, max] and gap, the band separator's space above/below, the map height
+    /// below which the band is one line of chips; map tooltip width [min, max] and the window
+    /// share of its maximum.
+    pub map_lane_gap: f32,
+    /// Lowest lane height of the Bar tier (0030 A1; `panels::lsm_map::tier_heights`:
+    /// Bar = max(this, 0.6 Small)).
+    pub map_lane_min_h: f32,
+    pub map_frame_pad: f32,
+    pub map_row_gap: f32,
+    pub map_min_box_w: f32,
+    pub map_readable_pad: f32,
+    pub map_focus_gap: f32,
+    pub map_slot_max_pt: f32,
+    pub map_wal_box_w: [f32; 2],
+    /// WAL card width tiers (0030 A5-2): below [0] only glyphs on line 2, from [1] the name and
+    /// the short state; from `map_wal_box_w[1]` the full state.
+    pub map_wal_tier_w: [f32; 2],
+    pub map_wal_gap: f32,
+    pub map_wal_sep_gap: f32,
+    pub map_chips_below_h: f32,
+    pub map_tip_w: [f32; 2],
+    pub map_tip_window_share: f32,
     pub about_logo: f32,
     pub about_width: f32,
     pub help_width: f32,
@@ -112,7 +137,21 @@ pub const LAYOUT: &LayoutDefaults = &LayoutDefaults {
     remainder_min: 160.0,
     column_min: 40.0,
     selected_stripe: 3.0,
-    lsm_box_max_height: 220.0,
+    map_lane_gap: 2.0,
+    map_lane_min_h: 8.0,
+    map_frame_pad: 6.0,
+    map_row_gap: 8.0,
+    map_min_box_w: 3.0,
+    map_readable_pad: 8.0,
+    map_focus_gap: 2.0,
+    map_slot_max_pt: 24.0,
+    map_wal_box_w: [56.0, 160.0],
+    map_wal_tier_w: [72.0, 120.0],
+    map_wal_gap: 6.0,
+    map_wal_sep_gap: 8.0,
+    map_chips_below_h: 220.0,
+    map_tip_w: [220.0, 380.0],
+    map_tip_window_share: 0.45,
     about_logo: 128.0,
     about_width: 360.0,
     help_width: 520.0,
@@ -223,6 +262,77 @@ pub fn split_heights(h: f32, ratio: f32, rec_min: f32, hex_min: f32) -> (f32, f3
     }
     let rec = (h * ratio.clamp(0.0, 1.0)).clamp(rec_min, h - hex_min);
     (rec, h - rec)
+}
+
+/// The LSM Map's split (0026 D2 F2): the bytes get `hex_keep` (their minimum + a row), never
+/// more than leaves the records `rec_min`; the records (the map) get the rest.
+pub fn map_first_split(h: f32, rec_min: f32, hex_keep: f32) -> (f32, f32) {
+    let h = h.max(0.0);
+    let hex = hex_keep.min((h - rec_min).max(0.0)).max(0.0);
+    (h - hex, hex)
+}
+
+/// The levels view's Table without a user split (0030 A8): the records get `rec_want` (what
+/// all its rows need), at most what leaves the bytes `hex_keep` (as under the Map), never less
+/// than the standard plan's `std_rec`; the bytes take the rest.
+pub fn levels_table_split(h: f32, std_rec: f32, rec_want: f32, hex_keep: f32) -> (f32, f32) {
+    let h = h.max(0.0);
+    let rec = rec_want.min((h - hex_keep).max(0.0)).max(std_rec).min(h);
+    (rec, h - rec)
+}
+
+/// What the records / bytes split of the center needs (points; architect N5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CenterInputs {
+    /// Height of the two panes together (without the split handle).
+    pub h: f32,
+    pub records_min_h: f32,
+    /// The byte pane's minimum, one byte row, and its preferred floor (six rows).
+    pub hex_min: f32,
+    pub hex_row_h: f32,
+    pub hex_floor: f32,
+    /// The records panel's measured overhead, the table with `TABLE_MIN_ROWS` and with all its
+    /// rows.
+    pub over: f32,
+    pub table_need: f32,
+    pub all_rows_need: f32,
+    /// Byte rows of the open file (`file_rows`).
+    pub file_rows: f32,
+}
+
+/// Records / bytes heights of the center for the split role shown (0026 D2 F2, 0030 A8): the
+/// user's split of that role; without one, the Map favours the map (the bytes keep their
+/// minimum + one row), the levels table gets all its rows with the same byte rows, the file
+/// views use the standard plan — and the byte pane is at most the open file's content
+/// (`bytes_min_rows` at least; the records get the rest).
+pub fn center_heights(role: SplitRole, user: Option<f32>, i: &CenterInputs) -> (f32, f32) {
+    let hex_keep = i.hex_min + i.hex_row_h;
+    let plan = |ratio: f32| {
+        let (r, x, _) = records_plan(i.h, ratio, i.records_min_h, i.hex_min, i.hex_floor, i.over, i.table_need);
+        (r, x)
+    };
+    let (rec, hex) = match (role, user) {
+        (SplitRole::Map, Some(r)) => split_heights(i.h, r, i.records_min_h, i.hex_min),
+        (SplitRole::Map, None) => map_first_split(i.h, i.records_min_h, hex_keep),
+        (SplitRole::LevelsTable, None) => levels_table_split(i.h, plan(crate::app::CENTER_SPLIT_DEFAULT).0, i.over + i.all_rows_need, hex_keep),
+        (_, r) => plan(r.unwrap_or(crate::app::CENTER_SPLIT_DEFAULT)),
+    };
+    if user.is_some() {
+        return (rec, hex);
+    }
+    let cap = i.hex_min + (i.file_rows - LAYOUT.bytes_min_rows).max(0.0) * i.hex_row_h;
+    cap_bytes(rec, hex, cap)
+}
+
+/// Byte rows the whole file needs at `bytes_per_row` (0030 A8-2).
+pub fn file_rows(file_len: u64, bytes_per_row: u64) -> f32 {
+    file_len.div_ceil(bytes_per_row.max(1)) as f32
+}
+
+/// The byte pane at most `cap` high (the open file's content), the records taking the rest.
+pub fn cap_bytes(rec: f32, hex: f32, cap: f32) -> (f32, f32) {
+    let give = (hex - cap).max(0.0);
+    (rec + give, hex - give)
 }
 
 /// Height the records table needs for its header and `rows` body rows (egui_extras adds the
@@ -506,8 +616,6 @@ pub fn tree_label_wraps(head_w: f32, avail: f32) -> bool {
 
 /// Lines an Explanation value may take before it ends in "…" (full text in the tooltip).
 pub const VALUE_MAX_LINES: usize = 4;
-/// Characters of a value's full text shown in its tooltip.
-pub const VALUE_TIP_CHARS: usize = 4096;
 
 /// Breaks a monospace value into lines of at most `cols` characters, never scrolling sideways
 /// (design C1–C3). Break points in order: a space (" · " included); after "/" (", " is a
@@ -638,6 +746,23 @@ impl Measured {
 mod tests {
     use super::*;
     use crate::app::ZoomFit;
+
+    /// 0030 A8 / architect N5: the center split rule per role, without the rig. 800 pt; bytes
+    /// minimum 60 + 20 per row; a small file (1 row) caps the bytes to the minimum without a
+    /// user split; a user split is kept as dragged; the Map keeps min + 1 row; the levels table
+    /// gets all its rows.
+    #[test]
+    fn center_heights_per_role() {
+        let i = CenterInputs { h: 800.0, records_min_h: 150.0, hex_min: 60.0, hex_row_h: 20.0, hex_floor: 120.0, over: 100.0, table_need: 200.0, all_rows_need: 500.0, file_rows: 1.0 };
+        assert_eq!(center_heights(SplitRole::Records, None, &i), (740.0, 60.0), "CURRENT-sized file: the byte minimum");
+        let big = CenterInputs { file_rows: 10_000.0, ..i };
+        let (r, x) = center_heights(SplitRole::Records, None, &big);
+        assert!((r - 800.0 * crate::app::CENTER_SPLIT_DEFAULT).abs() < 0.5 && (r + x - 800.0).abs() < 0.01, "a large file: the standard plan ({r}, {x})");
+        assert_eq!(center_heights(SplitRole::Records, Some(0.25), &i), (300.0, 500.0), "a user split (200) is kept uncapped, raised only to the records' need (100 + 200)");
+        assert_eq!(center_heights(SplitRole::Map, None, &big), (720.0, 80.0), "Map: minimum + one row");
+        assert_eq!(center_heights(SplitRole::LevelsTable, None, &big), (600.0, 200.0), "levels table: its rows (100 + 500)");
+        assert_eq!(center_heights(SplitRole::LevelsTable, None, &i), (740.0, 60.0), "capped by the small file");
+    }
     use crate::app::ZoomPolicy;
 
     /// 900 px / 110 %: the fields table hides Raw hex, then Encoding, then Len (in that order),
@@ -1040,6 +1165,7 @@ mod tests {
         let group = |items: &[f32]| items.iter().sum::<f32>() + gap * (items.len() as f32 - 1.0);
         let toolbar_groups = vec![
             group(&[btn("📂 Open Folder…"), btn("📄 Open File…")]),
+            btn("LSM Map"),
             group(&[LAYOUT.path_min, btn("Go")]),
             group(&[LAYOUT.search_width, sp.icon_width + tw("Hex bytes", 14.5) + gap, btn("Prev"), btn("Next"), btn("Clear search")]),
             btn("Copy…"),

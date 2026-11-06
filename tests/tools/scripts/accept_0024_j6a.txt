@@ -1,0 +1,22 @@
+# J6a (fresh HOME): theme submenu discovery on the map view.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+click 583 204
+sleep 0.8
+click 508 252
+sleep 1
+click 972 292
+sleep 0.8
+click 208 18
+sleep 0.8
+click 215 230
+sleep 0.8
+shot j6_00_theme_submenu

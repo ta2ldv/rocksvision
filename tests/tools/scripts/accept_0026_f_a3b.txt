@@ -1,0 +1,28 @@
+front
+winsize 1400 900
+sleep 1.2
+shot a3b_01_h900
+winsize 1400 800
+sleep 1.2
+shot a3b_02_h800
+winsize 1400 720
+sleep 1.2
+shot a3b_03_h720
+winsize 1400 640
+sleep 1.2
+shot a3b_04_h640
+winsize 1400 560
+sleep 1.2
+shot a3b_05_h560
+winsize 1400 640
+sleep 1.2
+shot a3b_06_back_h640
+winsize 1400 720
+sleep 1.2
+shot a3b_07_back_h720
+winsize 1400 800
+sleep 1.2
+shot a3b_08_back_h800
+winsize 1400 900
+sleep 1.2
+shot a3b_09_back_h900

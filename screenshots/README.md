@@ -15,3 +15,5 @@ Theme captures: the final build of handoff 0007 (bundle executable SHA-256 4d803
 | wooden.png | Wooden |
 | theme-menu.png | View › Theme menu |
 | about.png | About window |
+
+LSM Map hero (task 0014, handoff 0030): `lsm-map.png` (1400×664 px, 256-colour, 122 284 B) links to `highres/lsm-map_highres.png` (3456×1640 px, 797 174 B, window-only 2× capture, window 1728×820 pt). Package D4 (bundle executable SHA-256 1cbe22c8b630d126759bda9cdcd2b219452e88681b0ae708f46f650c5720ac41), XCopy, app zoom 100 %. Scene: examples/data/multilevel-advanced-db copied to /private/tmp/rocksvision-hero (hashes verified against examples/SHA256SUMS), LSM Map, CF 0 default, bytes hidden, L1 box 000067 selected, no tooltip, pointer outside the window.

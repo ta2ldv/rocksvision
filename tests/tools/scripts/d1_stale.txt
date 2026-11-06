@@ -1,0 +1,8 @@
+front
+move 682 283
+sleep 1.5
+shot stale_2_tip
+click 682 283
+sleep 0.8
+move 1380 880
+shot stale_3_selected

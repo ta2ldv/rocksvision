@@ -1,0 +1,21 @@
+# P4 item 1 (redo with a fresh shot before every crop): Fit, then + three times without moving the mouse.
+front
+click 1158 203
+sleep 0.8
+move 1130 203
+sleep 0.3
+shot p4_03_s0
+crop p4_03_strip0 1090 190 360 28
+note ITEM1 plus x3 same position
+click 1130 203
+sleep 0.7
+shot p4_03_s1
+crop p4_03_strip1 1090 190 360 28
+click 1130 203
+sleep 0.7
+shot p4_03_s2
+crop p4_03_strip2 1090 190 360 28
+click 1130 203
+sleep 0.7
+shot p4_03_s3
+crop p4_03_strip3 1090 190 360 28

@@ -1,0 +1,22 @@
+front
+click 208 18
+sleep 0.6
+click 214 230
+sleep 0.6
+click {{TX}} {{TY}}
+sleep 1.2
+move 700 880
+sleep 0.4
+shot {{N}}_a_map
+move 536 462
+sleep 2
+shot {{N}}_b_hover_empty
+move 700 880
+click 864 458
+sleep 1
+move 700 880
+sleep 0.4
+shot {{N}}_c_select
+move 498 330
+sleep 2
+shot {{N}}_d_hover_wal

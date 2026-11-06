@@ -1,0 +1,23 @@
+# J2k: item 8: select 000018, crop, dclick -> SST, Back -> compare crops, Option+Left (second back) -> table/CURRENT.
+front
+click 767 292
+sleep 0.8
+move 900 430
+sleep 0.6
+shot j2k_01_selected
+crop j2k_01_before 420 190 1180 130
+note DCLICK on-disk box 000018
+dclick 767 292
+sleep 2
+shot j2k_02_sst
+note BACK via button
+click 456 151
+sleep 2
+move 900 430
+sleep 0.6
+shot j2k_03_after_back
+crop j2k_03_after 420 190 1180 130
+note SECOND BACK via Option+Left key
+key left alt
+sleep 1.5
+shot j2k_04_second_back

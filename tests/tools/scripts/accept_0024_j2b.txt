@@ -1,0 +1,8 @@
+# J2b: CURRENT -> Observed levels (table) -> Map segment.
+front
+click 313 524
+sleep 1.5
+shot j2b_01_levels_table
+click 557 151
+sleep 1.5
+shot j2b_02_map

@@ -1,0 +1,33 @@
+# P4 item 3 (cf_users, 3 boxes, 2 lanes): focus the map by clicking empty map space, Home, Right x3.
+front
+click 583 204
+sleep 0.8
+shot p4_07_combo
+click 484 251
+sleep 1
+click 800 420
+sleep 0.5
+move 900 650
+sleep 0.4
+shot p4_07_entry
+note ITEM3 Home
+key home
+sleep 0.6
+shot p4_07_home
+crop p4_07_home_crop 430 220 820 125
+note ITEM3 Right
+key right
+sleep 0.6
+shot p4_07_right1
+crop p4_07_right1_crop 430 220 820 125
+note ITEM3 Right
+key right
+sleep 0.6
+shot p4_07_right2
+crop p4_07_right2_crop 430 220 820 125
+note ITEM3 Right
+key right
+sleep 0.6
+shot p4_07_right3
+crop p4_07_right3_crop 430 220 820 125
+crop p4_07_right3_edge 1080 220 170 125

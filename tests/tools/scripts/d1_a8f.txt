@@ -1,0 +1,10 @@
+front
+winsize 900 700
+sleep 1.5
+click 619 120
+key a cmd
+type {{DIR}}
+click 1039 120
+sleep 2.5
+move 880 680
+shot a8e_2_900x700_after_open

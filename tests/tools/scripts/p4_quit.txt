@@ -1,0 +1,4 @@
+# Quit the own app (own PID only).
+front
+key q cmd
+sleep 1

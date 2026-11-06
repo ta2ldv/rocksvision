@@ -2,7 +2,8 @@
 //! adapter. Each frame it applies job responses, syncs the native menu, reads keys, reports the
 //! layout measurements for the zoom ceiling, renders the panels and applies the `Action`s they
 //! return. Layout: toolbar → one-line status bar → navigation (left) → explanation (right) →
-//! center column split into records (top) and bytes (bottom) by `ViewPreferences::center_split`.
+//! center column split into records (top) and bytes (bottom) by the split of the view's
+//! `SplitRole` (file views, levels table, LSM Map; `ViewPreferences::split`).
 //! Panels are collapsed only by the user (chevrons, strips, View menu, Option+⌘1/2/3 or
 //! Ctrl+Alt+1/2/3); a collapsed side panel leaves a full-height restore strip, collapsed bytes a one-line strip.
 
@@ -29,7 +30,7 @@ use crate::limits::LIMITS;
 use eframe::egui;
 use layout::{LAYOUT, Measured, side_max};
 use menu::{MenuCmd, MenuNode};
-use panels::PanelMemory;
+use panels::{PanelMemory, TipExt};
 use platform::Platform;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,7 +63,7 @@ pub fn run(initial: Option<PathBuf>) -> eframe::Result<()> {
 /// empty id opens in `DEFAULT_THEME` (XCopy) through `theme_by_id`. The stored value is not
 /// rewritten here; on exit `save` stores the resolved id, as before.
 fn startup_actions(prefs: &Prefs, initial: Option<PathBuf>) -> Vec<Action> {
-    let mut acts = vec![Action::SetTheme(theme::theme_by_id(&prefs.theme).id), Action::SetZoom(prefs.zoom)];
+    let mut acts = vec![Action::SetTheme(theme::theme_by_id(&prefs.theme).id), Action::SetZoom(prefs.zoom), Action::SetTooltips(prefs.tooltips)];
     if let Some(p) = initial {
         acts.push(Action::OpenPath(p));
     }
@@ -152,6 +153,10 @@ impl App {
     /// Applies actions in order and executes the platform effects they request.
     fn dispatch(&mut self, ctx: &egui::Context, acts: Vec<Action>) {
         for a in acts {
+            // 0030 A2-4: the LSM Map entry (toolbar, View menu, Shift+⌘M) on a shown map that
+            // lost keyboard focus (Tab, a click elsewhere) gives it focus back; with focus it
+            // switches to the levels table as before.
+            let a = if a == Action::ShowLsmMap && self.st.session().map_shown() && !panels::lsm_map::has_focus(ctx, &self.st) { Action::FocusLsmMap } else { a };
             for e in self.st.apply(a) {
                 match e {
                     Effect::PickFolder(start) => {
@@ -261,7 +266,7 @@ impl eframe::App for App {
         std::time::Duration::from_secs(if self.window_unsaved() { RESIZE_SAVE_SECS } else { 30 })
     }
 
-    /// Only the theme id and zoom are persisted; panel layout persistence is deferred.
+    /// Only the theme id, zoom and tooltips are persisted; panel layout persistence is deferred.
     fn persist_egui_memory(&self) -> bool {
         false
     }
@@ -279,6 +284,8 @@ impl App {
         }
         self.sync_theme(&ctx);
         self.st.tick();
+        // The one tooltip gate reads this (View › Show Tooltips) and the theme's tooltip look.
+        panels::set_tooltips(&ctx, self.st.prefs().tooltips(), &self.tok);
         self.mem.follow_epoch(self.st.prefs().layout_epoch());
         // Native menu: state mirrored from the app (checkmarks every frame), chosen items
         // dispatched as actions.
@@ -448,10 +455,10 @@ impl App {
             let rec_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.right(), full.bottom() - strip_h));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rec_rect.shrink2(margin)), |ui| {
                 ui.set_clip_rect(rec_rect);
-                acts = panels::records::show(ui, &self.st, &self.tok, scroll.row);
+                acts = panels::records::show(ui, &self.st, &self.tok, scroll);
             });
             let strip = egui::Rect::from_min_max(egui::pos2(full.left(), full.bottom() - strip_h), full.max);
-            let resp = ui.interact(strip, ui.id().with("bytes_strip"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(show_hint(Panel::Bytes).1);
+            let resp = ui.interact(strip, ui.id().with("bytes_strip"), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).tip(show_hint(Panel::Bytes).1);
             ui.painter().rect_filled(strip, 0.0, if resp.hovered() { p.hover_bg } else { p.panel });
             if !resp.hovered() {
                 self.tok.paint_grain(ui.painter(), strip);
@@ -472,17 +479,39 @@ impl App {
         let table_need = layout::table_need_h(self.tok.header_height(ui), rh, ui.spacing().item_spacing.y, ui.spacing().scroll.allocated_width(), panels::records::TABLE_MIN_ROWS);
         let hex_floor = hex_min + (LAYOUT.hex_floor_rows - LAYOUT.bytes_min_rows).max(0.0) * measured.hex_row_h;
         // The records panel collapses its notes itself when this split leaves too little.
-        let (rec_h, hex_h, _) = layout::records_plan(full.height() - handle, self.st.prefs().center_split(), measured.records_min_h, hex_min, hex_floor, over, table_need);
+        // Each split role keeps its own user split (0026 D2 F2, 0030 A8); without one, the LSM
+        // Map favours the map (the bytes keep about four byte rows: their minimum + one row) and
+        // the levels table gets what all its rows need with the same byte rows, so switching
+        // Table ↔ Map keeps the pane sizes; the file views use the standard plan. Without a user
+        // split the byte pane holds at most the open file's bytes (0030 A8-2). The rule is the
+        // pure `layout::center_heights` (architect N5).
+        let role = self.st.session().split_role();
+        let rows = self.st.session().view().map(|v| v.rows.len()).unwrap_or(0) as f32;
+        let input = layout::CenterInputs {
+            h: (full.height() - handle).max(0.0),
+            records_min_h: measured.records_min_h,
+            hex_min,
+            hex_row_h: measured.hex_row_h,
+            hex_floor,
+            over,
+            table_need,
+            all_rows_need: layout::table_need_h(self.tok.header_height(ui), rh, ui.spacing().item_spacing.y, ui.spacing().scroll.allocated_width(), rows.max(panels::records::TABLE_MIN_ROWS)),
+            file_rows: layout::file_rows(self.st.session().file_len(), self.mem.hex.bytes_per_row),
+        };
+        let (rec_h, hex_h) = layout::center_heights(role, self.st.prefs().split(role), &input);
         let rec_rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), rec_h));
         let handle_rect = egui::Rect::from_min_size(egui::pos2(full.left(), rec_rect.bottom()), egui::vec2(full.width(), handle));
         let hex_rect = egui::Rect::from_min_size(egui::pos2(full.left(), handle_rect.bottom()), egui::vec2(full.width(), hex_h));
         ui.scope_builder(egui::UiBuilder::new().max_rect(rec_rect.shrink2(margin)), |ui| {
             ui.set_clip_rect(rec_rect);
-            acts = panels::records::show(ui, &self.st, &self.tok, scroll.row);
+            acts = panels::records::show(ui, &self.st, &self.tok, scroll);
         });
         // Split handle: 1 px border line in a hit strip; hover/drag → 2 px focus line; double-click resets.
         let id = egui::Id::new(("center_split", self.st.prefs().layout_epoch()));
-        let resp = ui.interact(handle_rect, id, egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text("Drag to resize records / bytes · double-click resets");
+        let resp = ui
+            .interact(handle_rect, id, egui::Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .tip("Drag to resize records / bytes (kept separately for Table and Map) · double-click resets");
         let active = resp.hovered() || resp.dragged();
         self.tok.paint_grain(ui.painter(), handle_rect);
         let y = handle_rect.center().y;
@@ -510,6 +539,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::prefs::{KEY_THEME, KEY_ZOOM};
+    use crate::app::view_prefs::SplitRole;
 
     /// Opens an app state with the given stored key/values, as `run` does at startup.
     fn open_with(stored: &[(String, String)]) -> AppState {
@@ -558,7 +588,7 @@ mod tests {
             let ctx = egui::Context::default();
             let worker = Worker::spawn(Arc::new(|| {}));
             let mut app = App::new(AppState::new(worker), Box::new(Headless));
-            let prefs = Prefs { theme: crate::app::prefs::DEFAULT_THEME.to_string(), zoom: stored_zoom };
+            let prefs = Prefs { zoom: stored_zoom, ..Prefs::default() };
             app.start(&ctx, &prefs, file.map(|f| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(f)));
             Rig { ctx, app, w, h }
         }
@@ -915,9 +945,730 @@ mod tests {
         }
     }
 
+    /// 0024 §2–3 (rendered, headless): the LSM Map of db-levels fills the records area at
+    /// 1400×900 and 900×560, draws file boxes (texts "000014" …), and its zoom changes only the
+    /// map zoom, never the app zoom.
+    #[test]
+    fn lsm_map_renders_and_zooms_map_only() {
+        let mut navigated = 0;
+        for (w, h, z) in [(1400.0, 900.0, 1.0), (900.0, 560.0, 1.0), (900.0, 560.0, 1.6)] {
+            let mut rig = Rig::new(w, h, z, Some("tests/fixtures/db-levels/CURRENT"));
+            rig.opened();
+            rig.act(vec![Action::ShowLsmMap]);
+            rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+            rig.frames(4);
+            let texts = rig.texts();
+            assert!(texts.iter().any(|t| t.2.contains("000014")), "{w}x{h}: box label drawn");
+            assert!(texts.iter().any(|t| t.2.starts_with("L0")), "{w}x{h}: level header drawn");
+            // 0026: the controls exist exactly in navigation mode (a fitting map is stationary).
+            let nav = rig.app.st.session().map().navigable();
+            assert_eq!(texts.iter().any(|t| t.2 == "Fit"), nav, "{w}x{h}@{z}: Fit shown = navigation mode");
+            // D2b finding 3: the full §3.7 legend when there is room (1400×900), short or
+            // Explanation-only at 900×560.
+            let full = "x: user-key order (bytewise comparator), boxes placed by key rank, not to scale";
+            let shown_full = texts.iter().any(|t| t.2 == full);
+            if z == 1.0 {
+                assert_eq!(shown_full, w > 1000.0, "{w}x{h}: full legend shown = {shown_full}");
+            }
+            if !nav {
+                continue;
+            }
+            navigated += 1;
+            let zoom = rig.app.st.prefs().zoom();
+            let plus = |rig: &Rig| rig.ctx.data(|d| d.get_temp::<egui::Rect>(panels::lsm_map::plus_rect_id())).expect("strip drawn");
+            let before = plus(&rig);
+            rig.act(vec![Action::MapZoom(crate::app::MapZoom::In)]);
+            rig.frames(2);
+            // D3: the `+` button does not move when the ×N label grows (×1 → ×1.5).
+            assert_eq!(plus(&rig), before, "{w}x{h}: + moved after a zoom step");
+            rig.act(vec![Action::MapView { pan: (0.0, 0.0), zoom: 1234.5 }]);
+            rig.frames(2);
+            assert_eq!(plus(&rig), before, "{w}x{h}: + moved at a 4-digit zoom");
+            rig.act(vec![Action::MapZoom(crate::app::MapZoom::Fit), Action::MapZoom(crate::app::MapZoom::In)]);
+            rig.frames(2);
+            assert!(rig.app.st.session().map().zoom() > 1.0 && (rig.app.st.prefs().zoom() - zoom).abs() < 1e-6, "map zoom only");
+        }
+        assert!(navigated > 0, "at least one setting overflows, so the zoom controls were exercised");
+    }
+
+    /// 0026 D2 F2: with the byte pane shown, the LSM Map takes all but about four byte rows of
+    /// the centre column, so multilevel-db cf_users (2 L0 files) fits at 1400×900 (no
+    /// navigation controls); Table restores the previous split; a drag in Map mode is the map's
+    /// own split. D2 F1: the Explanation facts of a selected box are consecutive rows with the
+    /// value on its label's line (Lane and Overlap visible without scrolling past blank space).
+    /// D4 (tester phase 3 N2): at 900×700 with the byte pane shown, db-levels has a CF in
+    /// navigation mode; its strip shows Center / Fit / − / +, and Fit keeps them (and the mode)
+    /// over the next frames: no oscillation.
+    #[test]
+    fn navigation_controls_stay_after_fit_at_900x700() {
+        let mut rig = Rig::new(900.0, 700.0, 1.0, Some("tests/fixtures/db-levels/CURRENT"));
+        rig.opened();
+        assert!(rig.app.st.prefs().show_hex(), "byte pane shown");
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        let ids: Vec<u32> = rig.app.st.session().view().map(|v| v.lsm.cfs.iter().map(|c| c.id).collect()).unwrap_or_default();
+        let controls = |t: &[(egui::Rect, egui::Rect, String)]| ["Center", "Fit", "−", "+"].iter().all(|s| t.iter().any(|x| x.2 == *s));
+        let mut found = false;
+        for id in ids {
+            rig.act(vec![Action::MapSelectCf(id)]);
+            rig.frames(4);
+            if !rig.app.st.session().map().navigable() {
+                assert!(!controls(&rig.texts()), "CF {id}: a fitting map shows no controls");
+                continue;
+            }
+            found = true;
+            assert!(controls(&rig.texts()), "CF {id}: Center / Fit / − / + in navigation mode");
+            rig.act(vec![Action::MapZoom(crate::app::MapZoom::In), Action::MapZoom(crate::app::MapZoom::Fit)]);
+            for frame in 0..2 {
+                let t = rig.texts();
+                assert!(controls(&t) && rig.app.st.session().map().navigable(), "CF {id} frame {frame} after Fit: controls stay");
+                assert_eq!(rig.app.st.session().map().zoom(), 1.0);
+            }
+        }
+        assert!(found, "db-levels has a CF in navigation mode at 900×700 with the byte pane shown");
+    }
+
+    /// D3 S3 (rendered): at 900×560 with 40 WALs the band folds the older ones into the
+    /// "+N older" box / chip; keyboard Left past the oldest visible WAL selects a folded WAL,
+    /// and the folded box then shows the selection (its text in `sel_fg`).
+    #[test]
+    fn folded_wal_selection_shows_on_the_older_box() {
+        let d = std::env::temp_dir().join(format!("rocksvision-ui-{}-manywal", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/db-levels");
+        for e in std::fs::read_dir(&src).unwrap().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n == "CURRENT" || n.starts_with("MANIFEST-") || n.ends_with(".sst") {
+                std::fs::copy(e.path(), d.join(&n)).unwrap();
+            }
+        }
+        for n in 100..140u64 {
+            std::fs::write(d.join(format!("{n:06}.log")), b"").unwrap();
+        }
+        let mut rig = Rig::new(900.0, 560.0, 1.0, Some(d.join("CURRENT").to_str().unwrap()));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map + summaries", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none() && !a.st.jobs().wal_scanning());
+        rig.frames(3);
+        rig.act(vec![Action::SelectWal(139)]);
+        for _ in 0..39 {
+            rig.act(vec![Action::MapMove(crate::app::MapMove::Left)]);
+        }
+        assert_eq!(rig.app.st.session().map().wal(), Some(100), "Left reaches the oldest WAL");
+        let sel_fg = rig.app.tok.p.sel_fg;
+        let z = rig.ctx.zoom_factor();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(rig.w / z, rig.h / z))), ..Default::default() };
+        let app = &mut rig.app;
+        let mut out = rig.ctx.run_ui(input, |ui| app.frame_ui(ui));
+        out.textures_delta.clear();
+        let older: Vec<(String, egui::Color32)> = out
+            .shapes
+            .into_iter()
+            .filter_map(|c| match c.shape {
+                egui::Shape::Text(t) if t.galley.text().starts_with('+') => Some((t.galley.text().to_string(), t.galley.job.sections.first().map(|s| s.format.color).unwrap_or_default())),
+                _ => None,
+            })
+            .collect();
+        assert!(!older.is_empty(), "the band folded the older WALs");
+        assert!(older.iter().any(|(_, c)| *c == sel_fg), "the older box shows the selection of a folded WAL: {older:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn map_mode_split_fits_multilevel_and_facts_rows_are_consecutive() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-db/CURRENT"));
+        rig.opened();
+        assert!(rig.app.st.prefs().show_hex(), "byte pane shown");
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        let id = rig.app.st.session().view().and_then(|v| v.lsm.cfs.iter().find(|c| c.name.eq("cf_users")).map(|c| c.id)).expect("cf_users");
+        rig.act(vec![Action::MapSelectCf(id)]);
+        rig.frames(6);
+        assert!(!rig.app.st.session().map().navigable(), "cf_users fits with the byte pane shown: {:?}", rig.app.st.session().map().measure());
+        let texts = rig.texts();
+        assert!(!texts.iter().any(|t| t.2 == "Fit"), "no navigation controls");
+        // F1: select 000018 (lane 2 of L0) and check the Explanation rows.
+        let row = rig.app.st.session().view().and_then(|v| v.lsm.by_number(18)).map(|(_, _, f)| f.row).expect("000018");
+        rig.act(vec![Action::SelectRow(row)]);
+        rig.frames(2);
+        let texts = rig.texts();
+        let y = |s: &str| texts.iter().find(|t| t.2.starts_with(s)).map(|t| t.1.top()).unwrap_or_else(|| panic!("{s} drawn"));
+        let (file_l, cf_l, lane_l, lane_v) = (y("File "), y("Column family "), y("Lane "), y("2 of 2 in L0"));
+        // The value nearest the label (the card heading also says 000018.sst).
+        let file_v = texts.iter().filter(|t| t.2 == "000018.sst").map(|t| t.1.top()).min_by(|a, b| (a - file_l).abs().total_cmp(&(b - file_l).abs())).expect("value drawn");
+        assert!((file_v - file_l).abs() < 4.0, "value on the label's line: {file_l} / {file_v}");
+        assert!((lane_v - lane_l).abs() < 4.0, "Lane value on its line: {lane_l} / {lane_v}");
+        assert!(cf_l - file_l > 0.0 && cf_l - file_l < 60.0, "consecutive rows: {file_l} → {cf_l}");
+        assert!(lane_l < 900.0, "Lane visible without scrolling: {lane_l}");
+        // Table keeps its own split; a drag in Map mode is the map's.
+        let table_split = rig.app.st.prefs().split(SplitRole::Records);
+        rig.act(vec![Action::SetCenterSplit(0.5)]);
+        assert_eq!((rig.app.st.prefs().split(SplitRole::Map), rig.app.st.prefs().split(SplitRole::Records)), (Some(0.5), table_split));
+        rig.act(vec![Action::SetMapMode(crate::app::MapMode::Table)]);
+        rig.act(vec![Action::SetCenterSplit(0.3)]);
+        // 0030 A8: the levels table has its own split; the file views' is untouched.
+        assert_eq!((rig.app.st.prefs().split(SplitRole::Map), rig.app.st.prefs().split(SplitRole::LevelsTable), rig.app.st.prefs().split(SplitRole::Records)), (Some(0.5), Some(0.3), table_split));
+    }
+
+    /// 0026 §1–§6 (rendered, headless): level frames with titles in the frame (no header
+    /// column), the axis row, the WAL band with its title and the separator caption; the strip
+    /// shows Center/Fit/−/+ exactly while the map is in navigation mode; the measure reached the
+    /// state; app zoom untouched.
+    #[test]
+    fn lsm_map_frames_axis_band_and_conditional_controls() {
+        for (w, h) in [(1400.0, 900.0), (900.0, 560.0)] {
+            let mut rig = Rig::new(w, h, 1.0, Some("tests/fixtures/db-levels/CURRENT"));
+            rig.opened();
+            rig.act(vec![Action::ShowLsmMap]);
+            rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+            rig.frames(6);
+            let texts = rig.texts();
+            let has = |s: &str| texts.iter().any(|t| t.2 == s);
+            let starts = |s: &str| texts.iter().any(|t| t.2.starts_with(s));
+            assert!(starts("L0 · "), "{w}x{h}: level title in the frame");
+            assert!(has("key rank, not to scale ->"), "{w}x{h}: axis row");
+            if has("WAL:") {
+                // Map height under 220 pt: the band is one line of chips (§4.8).
+                assert!(h < 700.0 && starts("000025.log"), "{w}x{h}: chip of the WAL");
+            } else {
+                assert!(has("SST levels (live per MANIFEST)"), "{w}x{h}: band separator caption");
+                assert!(starts("WAL · 1 file"), "{w}x{h}: WAL band title");
+            }
+            assert!(rig.app.st.session().map().measure().is_some(), "{w}x{h}: measured");
+            let nav = rig.app.st.session().map().navigable();
+            assert_eq!((has("Fit"), has("Center")), (nav, nav), "{w}x{h}: controls only in navigation mode");
+            assert!(!texts.iter().any(|t| t.2.contains("u-009") || t.2.to_lowercase().contains("missing keys")));
+        }
+    }
+
+    /// One frame with these key presses (no modifiers).
+    fn press(rig: &mut Rig, keys: &[egui::Key]) {
+        let z = rig.ctx.zoom_factor();
+        let events = keys.iter().map(|k| egui::Event::Key { key: *k, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }).collect();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(rig.w / z, rig.h / z))), events, ..Default::default() };
+        let app = &mut rig.app;
+        let mut out = rig.ctx.run_ui(input, |ui| app.frame_ui(ui));
+        out.textures_delta.clear();
+    }
+
+    /// One frame with these pointer events.
+    fn pointer(rig: &mut Rig, events: Vec<egui::Event>) {
+        let z = rig.ctx.zoom_factor();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(rig.w / z, rig.h / z))), events, ..Default::default() };
+        let app = &mut rig.app;
+        let mut out = rig.ctx.run_ui(input, |ui| app.frame_ui(ui));
+        out.textures_delta.clear();
+    }
+
+    /// 0026 D7 (tester P6, rendered): multilevel-db CF 0 at 1400×900: a real click on the
+    /// 000014 box selects it and gives the map keyboard focus; Up enters the WAL band at the
+    /// newest WAL (000023); Enter opens it; Back returns to the map with the WAL pick.
+    #[test]
+    fn map_click_up_enter_back_reaches_the_wal_band() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-db/CURRENT"));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none() && !a.st.jobs().wal_scanning());
+        rig.frames(4);
+        let t = rig.texts();
+        // The map box (right of the Navigation panel, which lists 000014.sst too).
+        let nav_right = rig.app.mem.left_w + 8.0;
+        let at = t.iter().find(|x| x.2.starts_with("000014") && x.1.left() > nav_right).map(|x| x.1.center()).expect("000014 box drawn");
+        let btn = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        pointer(&mut rig, vec![egui::Event::PointerMoved(at)]);
+        pointer(&mut rig, vec![btn(true)]);
+        pointer(&mut rig, vec![btn(false)]);
+        rig.frames(2);
+        let row = rig.app.st.session().view().and_then(|v| v.lsm.by_number(14)).map(|(_, _, f)| f.row);
+        assert_eq!(rig.app.st.selection().row(), row, "the click selected 000014");
+        assert!(rig.ctx.memory(|m| m.has_focus(panels::lsm_map::map_id())), "the click gave the map keyboard focus");
+        press(&mut rig, &[egui::Key::ArrowUp]);
+        rig.frames(1);
+        assert_eq!(rig.app.st.session().map().wal(), Some(23), "Up from the top level: the newest WAL");
+        press(&mut rig, &[egui::Key::Enter]);
+        rig.until("wal opened", |a| a.st.session().file().is_some_and(|f| f.ends_with("000023.log")) && a.st.navigation().pending_target().is_none());
+        rig.act(vec![Action::Back]);
+        rig.until("back", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        assert_eq!(rig.app.st.session().map().wal(), Some(23), "Back restores the WAL pick");
+    }
+
+    /// 0024 D1 (advice §4.4/§6.4): the LSM Map entry gives the map keyboard focus, so Right
+    /// (through `keys`, `Keys::map_focused`) moves the map focus at once; Tab leaves the map and
+    /// Tab reaches it again (it is in the Tab order); without focus Right is the tree's again.
+    #[test]
+    fn lsm_map_takes_keyboard_focus_and_is_in_the_tab_order() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("tests/fixtures/db-levels/CURRENT"));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        rig.frames(3);
+        let id = panels::lsm_map::map_id();
+        assert!(rig.ctx.memory(|m| m.has_focus(id)), "the entry focused the map");
+        assert_eq!(rig.app.st.session().map().focus(), None);
+        press(&mut rig, &[egui::Key::ArrowRight]);
+        rig.frames(1);
+        let first = rig.app.st.session().map().focus();
+        assert!(first.is_some(), "Right moved the map focus");
+        press(&mut rig, &[egui::Key::ArrowDown]);
+        rig.frames(1);
+        assert_ne!(rig.app.st.session().map().focus(), first, "the box in the level below");
+        assert!(rig.ctx.memory(|m| m.has_focus(id)), "arrows did not move egui's focus away");
+        // Tab leaves the map; repeated Tab comes back to it.
+        press(&mut rig, &[egui::Key::Tab]);
+        rig.frames(1);
+        assert!(!rig.ctx.memory(|m| m.has_focus(id)), "Tab left the map");
+        let mut back = false;
+        for _ in 0..80 {
+            press(&mut rig, &[egui::Key::Tab]);
+            if rig.ctx.memory(|m| m.has_focus(id)) {
+                back = true;
+                break;
+            }
+        }
+        assert!(back, "Tab reaches the map");
+    }
+
+    /// 0024 D1 (§4.6): Back restores the records table's scroll offset (rendered): a far row of a
+    /// long WAL table scrolls the table, a navigation leaves it, Back shows the same offset.
+    #[test]
+    fn back_restores_the_table_scroll_offset() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("tests/fixtures/wal-fragmented/000004.log"));
+        rig.opened();
+        let list = crate::model::NodeKind::LogRecords { start: 0, page: 0 };
+        rig.show(list.clone());
+        rig.frames(2);
+        let n = rig.app.st.session().view().map(|v| v.rows.len()).unwrap_or(0);
+        assert!(n > 40, "a long table: {n}");
+        rig.act(vec![Action::SelectRow(n - 5)]);
+        // egui animates scroll_to_row: wait until the offset is steady.
+        for _ in 0..200 {
+            let before = rig.app.st.session().table_scroll();
+            rig.frame();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            if before > 0.0 && (rig.app.st.session().table_scroll() - before).abs() < 0.01 {
+                break;
+            }
+        }
+        let y = rig.app.st.session().table_scroll();
+        assert!(y > 50.0, "the table scrolled to the far row: {y}");
+        rig.show(crate::model::NodeKind::Root);
+        rig.frames(2);
+        assert!(rig.app.st.session().table_scroll() < y, "another table");
+        rig.act(vec![Action::Back]);
+        rig.until("back", move |a| a.st.navigation().pending_target().is_none() && a.st.session().view_kind() == Some(&list));
+        rig.frames(4);
+        assert!((rig.app.st.session().table_scroll() - y).abs() < 1.0, "restored {} vs {y}", rig.app.st.session().table_scroll());
+        assert_eq!(rig.app.st.selection().row(), Some(n - 5));
+    }
+
+    /// 0030 A8 (rendered, 1400×900, advanced example): the levels table showed 6 rows before
+    /// and after the Map — not a stale Map split but the file views' default split (0.42) with
+    /// the table floor of `TABLE_MIN_ROWS`. Now the levels table has its own split role: without
+    /// a user split it gets its rows with the bytes keeping the Map's byte rows, so Table ↔ Map
+    /// keeps the pane sizes; a user split in either mode survives the round trip; the file
+    /// views keep theirs; the split handle's reset (and Reset View) clears all three.
+    #[test]
+    fn levels_table_keeps_its_rows_and_split_across_the_map() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-advanced-db/CURRENT"));
+        rig.opened();
+        rig.frames(6);
+        let shot = |rig: &Rig| rig.shot(0.0);
+        let root_rows = shot(&rig).table_rows;
+        let file_split = rig.app.st.prefs().split(SplitRole::Records);
+        rig.show(crate::model::NodeKind::ManifestLevels);
+        rig.frames(6);
+        let before = shot(&rig);
+        let n = rig.app.st.session().view().map(|v| v.rows.len()).unwrap_or(0) as f32;
+        eprintln!("A8 root rows {root_rows}; levels table before map: {before:?} of {n} rows");
+        assert!(before.table_rows > panels::records::TABLE_MIN_ROWS, "more than the table floor: {before:?}");
+        assert!(before.table_rows >= n.min(15.0), "the levels table shows its rows: {before:?} of {n}");
+        assert!(before.byte_rows >= LAYOUT.bytes_min_rows, "the bytes keep their minimum: {before:?}");
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        rig.frames(6);
+        let in_map = shot(&rig);
+        rig.act(vec![Action::SetMapMode(crate::app::MapMode::Table)]);
+        rig.frames(6);
+        let after = shot(&rig);
+        eprintln!("A8 map bytes {} rows; table after map: {after:?}", in_map.byte_rows);
+        assert_eq!(after.table_rows, before.table_rows, "rows before == rows after the Map");
+        assert_eq!(after.byte_rows, in_map.byte_rows, "Table ↔ Map keep the byte pane size");
+        // A user split in the levels table survives Map and back; the Map's and the file views'
+        // splits are separate.
+        rig.act(vec![Action::SetCenterSplit(0.3)]);
+        rig.frames(4);
+        let user = shot(&rig);
+        assert!(user.table_rows < before.table_rows, "the user's smaller split applies: {user:?}");
+        rig.act(vec![Action::SetMapMode(crate::app::MapMode::Map)]);
+        rig.frames(4);
+        assert_eq!(rig.app.st.prefs().split(SplitRole::Map), None, "the Map keeps its automatic split");
+        rig.act(vec![Action::SetCenterSplit(0.6)]);
+        rig.act(vec![Action::SetMapMode(crate::app::MapMode::Table)]);
+        rig.frames(4);
+        assert_eq!(shot(&rig).table_rows, user.table_rows, "the levels table's user split survived the round trip");
+        let p = rig.app.st.prefs();
+        assert_eq!((p.split(SplitRole::LevelsTable), p.split(SplitRole::Map), p.split(SplitRole::Records)), (Some(0.3), Some(0.6), file_split));
+        rig.act(vec![Action::ResetCenterSplit]);
+        rig.frames(4);
+        let p = rig.app.st.prefs();
+        assert_eq!((p.split(SplitRole::LevelsTable), p.split(SplitRole::Map)), (None, Some(0.6)), "the handle's double-click resets only the mode shown");
+        assert_eq!(shot(&rig).table_rows, before.table_rows, "reset restores the automatic levels split");
+        rig.act(vec![Action::ResetView]);
+        rig.frames(4);
+        let p = rig.app.st.prefs();
+        assert_eq!((p.split(SplitRole::LevelsTable), p.split(SplitRole::Map), p.split(SplitRole::Records)), (None, None, None), "Reset View resets every role");
+        // 0030 A8-2: CURRENT (16 B) without a user split: the byte pane holds its content
+        // (the byte minimum), the records the rest; an SST data view keeps the standard plan.
+        rig.show(crate::model::NodeKind::Root);
+        rig.frames(6);
+        let cur = shot(&rig);
+        assert_eq!(cur.byte_rows, LAYOUT.bytes_min_rows, "CURRENT: the byte minimum: {cur:?}");
+        assert!(cur.table_rows > root_rows || cur.table_rows >= rig.app.st.session().view().map(|v| v.rows.len()).unwrap_or(0) as f32, "the records got the rest: {cur:?} (was {root_rows})");
+    }
+
+    /// 0030 A1 (tester P1: at 900×588 Fit changed nothing): the advanced example's CF 0 map at
+    /// 900×588 overflows; entering it applies Fit once, which picks a smaller lane tier so every
+    /// level frame shows (titles drawn); zoom-in returns to Full; Fit again picks the tier;
+    /// Center keeps zoom and tier.
+    #[test]
+    fn fit_shows_every_level_at_900x588() {
+        let mut rig = Rig::new(900.0, 588.0, 1.0, Some("examples/data/multilevel-advanced-db/CURRENT"));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        rig.frames(8);
+        let map = rig.app.st.session().map();
+        let m = map.measure().expect("measured");
+        eprintln!("A1 900x588: nav {:?} tier {:?} heights {:?} view_h {} pan {:?}", map.nav(), map.tier(), map.heights(), m.view_h, map.pan());
+        assert!(map.navigable(), "the Full scene overflows here");
+        let fitted = map.tier();
+        assert_ne!(fitted, crate::app::lsm_map::LaneTier::Full, "Fit reduced the lane detail");
+        let h = map.heights().expect("tier heights");
+        assert!(h[fitted.index()] <= m.view_h + 0.5 || fitted == crate::app::lsm_map::LaneTier::Bar, "every level fits: {h:?} in {}", m.view_h);
+        // Reviewer N2: the rendered path centres the overflowing Bar scene vertically (top-aligned
+        // when it fits).
+        assert_eq!(map.pan().1, ((h[fitted.index()] - m.view_h) / 2.0).max(0.0), "Fit's vertical position");
+        let texts = rig.texts();
+        for l in ["L0 · ", "L1 · ", "L2 · "] {
+            assert!(texts.iter().any(|t| t.2.starts_with(l)), "{l} title drawn");
+        }
+        rig.act(vec![Action::MapZoom(crate::app::MapZoom::In)]);
+        rig.frames(2);
+        assert_eq!(rig.app.st.session().map().tier(), crate::app::lsm_map::LaneTier::Full, "zoom-in: Full");
+        rig.act(vec![Action::MapZoom(crate::app::MapZoom::Center)]);
+        assert_eq!(rig.app.st.session().map().tier(), crate::app::lsm_map::LaneTier::Full, "Center keeps the tier");
+        rig.act(vec![Action::MapZoom(crate::app::MapZoom::Fit)]);
+        rig.frames(2);
+        let map = rig.app.st.session().map();
+        assert_eq!((map.tier(), map.zoom()), (fitted, 1.0), "Fit again");
+        // No control flicker after Fit: the decision does not change over idle frames.
+        let nav = map.navigable();
+        for _ in 0..20 {
+            rig.frame();
+            assert_eq!(rig.app.st.session().map().navigable(), nav);
+        }
+    }
+
+    /// 0030 A2-4/2: the LSM Map entry on a shown map that lost keyboard focus (Tab) gives it
+    /// focus back and keeps the map (pick kept); with focus it switches to the table. While the
+    /// map has focus the status bar shows its keys.
+    #[test]
+    fn lsm_map_entry_returns_focus_after_tab() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-advanced-db/CURRENT"));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none() && !a.st.jobs().wal_scanning());
+        rig.frames(3);
+        let id = panels::lsm_map::map_id();
+        assert!(rig.ctx.memory(|m| m.has_focus(id)));
+        assert!(rig.texts().iter().any(|t| t.2.starts_with("Map: arrows select")), "status-bar focus hint");
+        press(&mut rig, &[egui::Key::ArrowUp]);
+        rig.frames(1);
+        let pick = rig.app.st.session().map().wal();
+        assert!(pick.is_some(), "Up reached the WAL band");
+        press(&mut rig, &[egui::Key::Tab]);
+        rig.frames(1);
+        assert!(!rig.ctx.memory(|m| m.has_focus(id)), "Tab left the map");
+        assert!(!rig.texts().iter().any(|t| t.2.starts_with("Map: arrows select")), "no hint without focus");
+        let mut out = Vec::new();
+        rig.app.dispatch(&rig.ctx, vec![Action::ShowLsmMap]);
+        out.push(rig.app.st.session().map_shown());
+        rig.frames(2);
+        assert!(rig.app.st.session().map_shown() && rig.ctx.memory(|m| m.has_focus(id)), "the entry gave the map focus back: {out:?}");
+        assert_eq!(rig.app.st.session().map().wal(), pick, "pick kept");
+        rig.app.dispatch(&rig.ctx, vec![Action::ShowLsmMap]);
+        assert!(!rig.app.st.session().map_shown(), "with focus: the levels table");
+    }
+
+    /// Tester P3 B gap: a still pointer over a new cell of a hovered row gets that cell's tip after
+    /// the delay, with frames only as the event loop schedules them (`on_demand`): (a) from a cell
+    /// without a tip in the same row, (b) from a cell with a tip to the next row.
+    #[test]
+    fn a_still_pointer_on_a_new_cell_of_a_hovered_row_gets_its_tip() {
+        // Tester P3 B gap: the row is hovered at a cell without a tooltip for 1 s; then one
+        // pointer move to the File cell of the same row and a still pointer for 1 s: its tip.
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-advanced-db/CURRENT"));
+        rig.opened();
+        rig.show(crate::model::NodeKind::ManifestLevels);
+        rig.frames(4);
+        let nav_right = rig.app.mem.left_w;
+        let texts = rig.texts();
+        let cf = texts.iter().find(|t| t.1.left() > nav_right && t.2 == "0 default").map(|t| t.1.left_center() + egui::vec2(3.0, 0.0)).expect("CF cell");
+        let file = texts
+            .iter()
+            .filter(|x| (x.1.center().y - cf.y).abs() < 3.0 && x.2.len() == 6 && x.2.chars().all(|c| c.is_ascii_digit()))
+            .map(|x| (x.1.left_center() + egui::vec2(3.0, 0.0), x.2.clone()))
+            .next()
+            .expect("File cell in the row");
+        // The next row's File cell.
+        let file2 = texts
+            .iter()
+            .filter(|x| x.1.center().y > cf.y + 8.0 && (x.1.left() - (file.0.x - 3.0)).abs() < 2.0 && x.2.len() == 6)
+            .min_by(|a, b| a.1.top().total_cmp(&b.1.top()))
+            .map(|x| (x.1.left_center() + egui::vec2(3.0, 0.0), x.2.clone()))
+            .expect("File cell of the next row");
+        let file_tip = |rig: &mut Rig, f: &str| rig.texts().iter().any(|x| x.2.starts_with(&format!("{f}.sst · Enter / double-click opens it")));
+        // (a) The Level cell (between them) has no tooltip; a jump to the File cell of the same
+        // row with a still pointer, frames only as the event loop would run them.
+        let level = egui::pos2((cf.x + file.0.x) / 2.0 + 20.0, cf.y);
+        on_demand(&mut rig, vec![egui::Event::PointerMoved(level)], 1.0);
+        assert_eq!(tooltip_layers(&rig), 0, "no tooltip on the Level cell");
+        let n = on_demand(&mut rig, vec![egui::Event::PointerMoved(file.0)], 1.2);
+        assert!(file_tip(&mut rig, &file.1), "(a) the File cell's tip on a still pointer ({n} frames)");
+        // (b) From a cell with a tooltip (CF) to the File cell of the NEXT row.
+        on_demand(&mut rig, vec![egui::Event::PointerMoved(cf)], 1.0);
+        assert_eq!(tooltip_layers(&rig), 1, "CF tip");
+        let n = on_demand(&mut rig, vec![egui::Event::PointerMoved(file2.0)], 1.2);
+        assert!(file_tip(&mut rig, &file2.1), "(b) the next row's File tip ({n} frames)");
+    }
+
+    /// 0030 B-2/B-6: in the levels table the CF cell explains the column family (three lines,
+    /// comparator from the MANIFEST), and moving along the row to the File cell updates the
+    /// tooltip in place (the open hint), without a click.
+    #[test]
+    fn levels_cf_cell_explains_and_row_tooltip_follows_the_pointer() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-advanced-db/CURRENT"));
+        rig.opened();
+        rig.show(crate::model::NodeKind::ManifestLevels);
+        rig.frames(4);
+        let nav_right = rig.app.mem.left_w;
+        let texts = rig.texts();
+        let at = |s: &str| texts.iter().find(|t| t.1.left() > nav_right && t.2 == s && t.0.contains(t.1.left_center() + egui::vec2(3.0, 0.0))).map(|t| t.1.left_center() + egui::vec2(3.0, 0.0));
+        let cf = at("0 default").expect("CF cell");
+        let delay = (panels::TIP_DELAY_S * 60.0) as usize * 2;
+        pointer(&mut rig, vec![egui::Event::PointerMoved(cf)]);
+        rig.frames(delay);
+        let t = rig.texts();
+        assert_eq!(tooltip_layers(&rig), 1);
+        assert!(t.iter().any(|x| x.2 == "Column family 0 \"default\" (per MANIFEST)."), "CF meaning");
+        // Same row, File column (to the right of the CF cell).
+        let file = texts
+            .iter()
+            .filter(|x| (x.1.center().y - cf.y).abs() < 3.0 && x.2.len() == 6 && x.2.chars().all(|c| c.is_ascii_digit()))
+            .map(|x| (x.1.left_center() + egui::vec2(3.0, 0.0), x.2.clone()))
+            .next()
+            .expect("File cell in the row");
+        pointer(&mut rig, vec![egui::Event::PointerMoved(file.0)]);
+        rig.frames(3);
+        let t = rig.texts();
+        assert_eq!(tooltip_layers(&rig), 1, "one tooltip");
+        assert!(
+            t.iter().any(|x| x.2.starts_with(&format!("{}.sst · Enter / double-click opens it", file.1))),
+            "content follows the pointer: {:?}",
+            t.iter().map(|x| &x.2).filter(|s| s.contains(".sst")).collect::<Vec<_>>()
+        );
+    }
+
+    /// 0030 A4: dragging the axis overview thumb pans the map (zoomed in, navigation mode).
+    #[test]
+    fn axis_thumb_drag_pans_the_map() {
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some("examples/data/multilevel-advanced-db/CURRENT"));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        rig.frames(4);
+        if !rig.app.st.session().map().navigable() {
+            // Fitting at this size: make it overflow with a short window.
+            rig.h = 588.0;
+            rig.frames(6);
+        }
+        assert!(rig.app.st.session().map().navigable(), "navigation mode");
+        rig.act(vec![Action::MapView { pan: (0.0, 0.0), zoom: 3.0 }]);
+        rig.frames(2);
+        let texts = rig.texts();
+        let axis_y = texts.iter().find(|t| t.2 == "key rank, not to scale ->").map(|t| t.1.bottom() + 3.0).expect("axis row");
+        let nav_right = rig.app.mem.left_w;
+        let x0 = nav_right + 30.0;
+        let p0 = egui::pos2(x0, axis_y);
+        let btn = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let before = rig.app.st.session().map().pan().0;
+        pointer(&mut rig, vec![egui::Event::PointerMoved(p0)]);
+        pointer(&mut rig, vec![btn(p0, true)]);
+        for k in 1..=10 {
+            pointer(&mut rig, vec![egui::Event::PointerMoved(p0 + egui::vec2(k as f32 * 30.0, 0.0))]);
+        }
+        pointer(&mut rig, vec![btn(p0 + egui::vec2(300.0, 0.0), false)]);
+        rig.frames(2);
+        let after = rig.app.st.session().map().pan().0;
+        assert!(after > before + 0.05, "the drag panned: {before} -> {after}");
+    }
+
+    /// Tester P4/P5 (A3, packages D2–D4): a click on the "600 files" bar zooms in; a click on one
+    /// revealed box then keeps the zoom, selects that file and focuses it (ring). Rendered, with
+    /// real pointer events through the painter. Uses the many-sst scratch of
+    /// tests/tools/mk-wal-fixtures-0026.sh (600 L0 SSTs; skipped when it is absent).
+    #[test]
+    fn box_click_after_bar_zoom_keeps_the_zoom() {
+        let dir = std::path::Path::new("/private/tmp/rocksvision-wal0026/many-sst");
+        if !dir.join("CURRENT").exists() {
+            eprintln!("SKIP: {} missing (bash tests/tools/mk-wal-fixtures-0026.sh)", dir.display());
+            return;
+        }
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, Some(dir.join("CURRENT").to_str().unwrap()));
+        rig.opened();
+        rig.act(vec![Action::ShowLsmMap]);
+        rig.until("map", |a| a.st.session().map_shown() && a.st.navigation().pending_target().is_none());
+        rig.frames(6);
+        let click = |rig: &mut Rig, at: egui::Pos2| {
+            let btn = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            pointer(rig, vec![egui::Event::PointerMoved(at)]);
+            pointer(rig, vec![btn(true)]);
+            pointer(rig, vec![btn(false)]);
+            rig.frames(4);
+        };
+        let texts = rig.texts();
+        let bar = texts.iter().find(|t| t.2 == "600 files" && t.1.left() > rig.app.mem.left_w).map(|t| t.1.center()).expect("the 600-files bar");
+        click(&mut rig, bar);
+        let z = rig.app.st.session().map().zoom();
+        eprintln!("A3 after bar click: zoom {z} pan {:?}", rig.app.st.session().map().pan());
+        assert!(z > 1.5, "the bar click zoomed: {z}");
+        // A revealed box: the boxes now fill the L0 lane where the bar was (consecutive ranks).
+        // A pause first, so the two clicks are not one double click (which opens the file).
+        rig.frames(40);
+        click(&mut rig, bar);
+        let map = rig.app.st.session().map();
+        eprintln!("A3 after box click: zoom {} pan {:?} focus {:?} sel {:?}", map.zoom(), map.pan(), map.focus(), rig.app.st.selection().row());
+        let number = map.focus().expect("a file is focused");
+        assert!((map.zoom() - z).abs() < 1e-3, "the zoom is kept: {z} -> {}", map.zoom());
+        let row = rig.app.st.session().view().and_then(|v| v.lsm.by_number(number)).map(|(_, _, f)| f.row);
+        assert_eq!(rig.app.st.selection().row(), row, "that file is selected");
+        // The ring: the focused box is drawn with the focus ring (2 pt: the click gave the map
+        // keyboard focus).
+        assert!(rig.ctx.memory(|m| m.has_focus(panels::lsm_map::map_id())), "the map has keyboard focus");
+    }
+
+    /// Frames as a real event loop runs them (tester P3 B gap): one frame with `events`, then
+    /// frames only when egui asked for a repaint (`repaint_delay`), with real time steps, for
+    /// `secs` seconds. Returns how many frames ran.
+    fn on_demand(rig: &mut Rig, events: Vec<egui::Event>, secs: f64) -> usize {
+        let z = rig.ctx.zoom_factor();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(rig.w / z, rig.h / z));
+        let mut t = rig.ctx.input(|i| i.time) + 1.0 / 60.0;
+        let end = t + secs;
+        let mut events = Some(events);
+        let mut n = 0;
+        loop {
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(t), events: events.take().unwrap_or_default(), ..Default::default() };
+            let app = &mut rig.app;
+            let mut out = rig.ctx.run_ui(input, |ui| app.frame_ui(ui));
+            out.textures_delta.clear();
+            n += 1;
+            let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(std::time::Duration::MAX);
+            if delay == std::time::Duration::MAX || t + delay.as_secs_f64() > end {
+                return n;
+            }
+            t += delay.as_secs_f64().max(1.0 / 120.0);
+        }
+    }
+
+    /// Tooltip layers shown in the last frame.
+    fn tooltip_layers(rig: &Rig) -> usize {
+        rig.ctx.memory(|m| m.areas().visible_layer_ids().into_iter().filter(|l| l.order == egui::Order::Tooltip).count())
+    }
+
+    /// 0030 B (owner's double popup, rendered): in the advanced example's WAL table an elided
+    /// Field cell ("log number (from fil…") hovered without a click shows exactly ONE tooltip
+    /// with the full text after the central delay (not before it); a fully visible
+    /// self-explanatory cell ("file") shows none; a cell with an explanation ("—" without
+    /// bytes) shows that explanation; Tooltips off shows nothing.
+    #[test]
+    fn table_cell_hover_shows_one_useful_tooltip_without_a_click() {
+        let mut rig = Rig::new(1000.0, 700.0, 1.0, Some("examples/data/multilevel-advanced-db/000150.log"));
+        rig.opened();
+        rig.frames(4);
+        let nav_right = rig.app.mem.left_w;
+        let texts = rig.texts();
+        // A visible table body cell: below the "Field" header, above the byte pane, its text's
+        // left part inside its clip.
+        let y_of = |s: &str| texts.iter().find(|t| t.2 == s).map(|t| t.1.center().y).unwrap_or_else(|| panic!("{s} drawn: {:?}", texts.iter().map(|t| (&t.2, t.1.left())).collect::<Vec<_>>()));
+        let (top, bottom) = (y_of("Field") + 4.0, y_of("File bytes"));
+        let cell = |p: &dyn Fn(&str) -> bool| {
+            texts
+                .iter()
+                .find(|t| t.1.left() > nav_right && (top..bottom).contains(&t.1.center().y) && p(&t.2) && t.0.contains(t.1.left_center() + egui::vec2(4.0, 0.0)))
+                .map(|t| (t.1.left_center() + egui::vec2(4.0, 0.0), t.2.clone()))
+        };
+        let (elided_at, elided) = cell(&|s| s.len() > 4 && s.ends_with('…')).unwrap_or_else(|| panic!("an elided value cell: {:?}", texts.iter().map(|t| (&t.2, t.0, t.1)).collect::<Vec<_>>()));
+        let stem = elided.trim_end_matches('…');
+        let full = rig.app.st.session().view().and_then(|v| v.rows.iter().flat_map(|r| r.cells.iter()).find(|c| c.starts_with(stem) && c.len() > stem.len()).cloned()).expect("the cell's full text");
+        let full = full.as_str();
+        let count = |texts: &[(egui::Rect, egui::Rect, String)], s: &str| texts.iter().filter(|t| t.2 == s).count();
+        // Hover only: one frame moving there, then the pointer rests (1/60 s per frame).
+        let sel0 = rig.app.st.selection().row();
+        pointer(&mut rig, vec![egui::Event::PointerMoved(elided_at)]);
+        let delay_frames = (panels::TIP_DELAY_S * 60.0) as usize;
+        rig.frames(delay_frames / 2);
+        assert_eq!(tooltip_layers(&rig), 0, "no tooltip before the delay");
+        rig.frames(delay_frames);
+        let t = rig.texts();
+        assert_eq!(tooltip_layers(&rig), 1, "exactly one tooltip popup for {elided:?}");
+        assert_eq!(count(&t, full), 1, "the full text once (egui's own elided tooltip is off)");
+        assert_eq!(rig.app.st.selection().row(), sel0, "hover alone, no click: the selection is unchanged");
+        // A fully visible, self-explanatory cell: no tooltip.
+        let (file_at, _) = cell(&|s| s == "file").unwrap_or_else(|| panic!("'file' cell {top}..{bottom} {nav_right}: {:?}", texts.iter().filter(|t| t.2 == "file").collect::<Vec<_>>()));
+        pointer(&mut rig, vec![egui::Event::PointerMoved(file_at)]);
+        rig.frames(2 * delay_frames);
+        assert_eq!(tooltip_layers(&rig), 0, "no tooltip on a fully visible cell without extra information");
+        // A cell with an explanation: the explanation, once.
+        let (dash_at, _) = cell(&|s| s == "—").expect("a '—' cell");
+        pointer(&mut rig, vec![egui::Event::PointerMoved(dash_at)]);
+        rig.frames(2 * delay_frames);
+        let t = rig.texts();
+        assert_eq!(tooltip_layers(&rig), 1, "the explanation of a byte-less cell");
+        assert_eq!(t.iter().filter(|x| x.2.starts_with("No bytes in the file")).count(), 1);
+        // Tooltips off: nothing.
+        rig.act(vec![Action::SetTooltips(false)]);
+        pointer(&mut rig, vec![egui::Event::PointerMoved(elided_at)]);
+        rig.frames(2 * delay_frames);
+        assert_eq!(tooltip_layers(&rig), 0, "View › Show Tooltips off");
+    }
+
+    /// 0024 §5: View › Show Tooltips off is saved by `App::save` and restored at startup; the
+    /// menu item toggles it and shows it checked; the per-frame gate follows the preference.
+    fn startup_tooltips_off_survives_restart() {
+        use crate::app::prefs::KEY_TOOLTIPS;
+        assert!(open_with(&[]).prefs().tooltips(), "default on");
+        let mut rig = Rig::new(1400.0, 900.0, 1.0, None);
+        rig.frame();
+        assert!(panels::tooltips_on(&rig.ctx));
+        let a = MenuCmd::ToggleTooltips.action(&rig.app.st).unwrap();
+        assert_eq!(a, Action::SetTooltips(false));
+        rig.act(vec![a]);
+        rig.frame();
+        assert!(!panels::tooltips_on(&rig.ctx) && MenuCmd::ToggleTooltips.state(&rig.app.st) == (true, false));
+        let mut s = MemStorage::default();
+        eframe::App::save(&mut rig.app, &mut s);
+        use eframe::Storage as _;
+        assert_eq!(s.get_string(KEY_TOOLTIPS).as_deref(), Some("false"));
+        let st = open_with(&[(KEY_TOOLTIPS.to_string(), "false".to_string())]);
+        assert!(!st.prefs().tooltips(), "restart keeps tooltips off");
+    }
+
     /// 0017 A: missing → XCopy, unknown → XCopy, saved Matrix survives store/load and reopen.
     #[test]
     fn startup_theme_default_fallback_and_saved_choice() {
+        startup_tooltips_off_survives_restart();
         assert_eq!(AppState::idle_for_tests().prefs().theme_id(), "xcopy");
         assert_eq!(open_with(&[]).prefs().theme_id(), "xcopy");
         let unknown = [(KEY_THEME.to_string(), "no-such-theme".to_string())];

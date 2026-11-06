@@ -1,0 +1,26 @@
+# P4 item 2: select a cf_users box, change CF to cf_events, then back to cf_users.
+front
+click 1158 203
+sleep 0.8
+shot p4_04_fit
+click 745 300
+sleep 0.8
+move 900 600
+sleep 0.5
+shot p4_04_selected
+note ITEM2 choose cf_events
+click 583 204
+sleep 0.8
+click 489 272
+sleep 1
+move 900 600
+sleep 0.5
+shot p4_04_events
+note ITEM2 choose cf_users again
+click 583 204
+sleep 0.8
+click 484 251
+sleep 1
+move 900 600
+sleep 0.5
+shot p4_04_users_again

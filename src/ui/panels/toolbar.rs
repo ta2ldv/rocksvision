@@ -1,10 +1,10 @@
-//! Toolbar (spec §6.6): [Open Folder… · Open File…] [path · Go] [search · Hex bytes · Prev ·
-//! Next · Clear search] [Copy…] [A− zoom A+ · Reset View]. The five groups are atomic: rows are
+//! Toolbar (spec §6.6): [Open Folder… · Open File…] [LSM Map] [path · Go] [search · Hex bytes ·
+//! Prev · Next · Clear search] [Copy…] [A− zoom A+ · Reset View]. The six groups are atomic: rows are
 //! planned from last frame's measured widths (`layout::pack_rows`) and the path field takes the
 //! rest of its row. View/Theme/About live in the menu bar; without a native menu bar the same
 //! menu tree is offered as an in-window "Menu" button.
 
-use super::{PanelMemory, btn, status_text};
+use super::{PanelMemory, TipExt, btn, disabled_btn, latched_btn, status_text};
 use crate::app::{Action, AppState, CopyKind};
 use crate::model::Status;
 use crate::ui::layout::{LAYOUT, PACK_SLACK, pack_rows};
@@ -17,14 +17,16 @@ const SEARCH_HELP: &str = "Search the current table's decoded cells and this fil
 const HEX_HELP: &str = "Read the query as hex byte values, e.g. 4d 41 4e (\"MAN\"). Search scope is unchanged.";
 pub const SEARCH_ID: &str = "search";
 
-/// Number of toolbar groups (open, path, search, copy, zoom).
-pub const GROUPS: usize = 5;
+/// Number of toolbar groups (open, LSM Map, path, search, copy, zoom).
+pub const GROUPS: usize = 6;
+/// Index of the path group (its field takes the leftover width of its row).
+pub const PATH_GROUP: usize = 2;
 
 pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMemory, fallback_menu: Option<&[MenuNode]>, view_is_default: bool) -> Vec<Action> {
     show_groups(ui, st, tok, mem, fallback_menu, view_is_default).0
 }
 
-/// `show` plus the rects of the five groups (tests check that none ends past the toolbar).
+/// `show` plus the rects of the six groups (tests check that none ends past the toolbar).
 fn show_groups(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMemory, fallback_menu: Option<&[MenuNode]>, view_is_default: bool) -> (Vec<Action>, [egui::Rect; GROUPS]) {
     let mut acts = Vec::new();
     let mut rects = [egui::Rect::NOTHING; GROUPS];
@@ -34,7 +36,7 @@ fn show_groups(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMe
     let starts = pack_rows(&mem.toolbar_w, gap, avail);
     let row_of = |g: usize| starts.iter().rposition(|&s| s <= g).unwrap_or(0);
     // The path field gets the leftover width of its row.
-    let path_row = row_of(1);
+    let path_row = row_of(PATH_GROUP);
     let row_end = starts.get(path_row + 1).copied().unwrap_or(GROUPS);
     let used: f32 = mem.toolbar_w[starts[path_row]..row_end].iter().sum::<f32>() + gap * (row_end - starts[path_row]).saturating_sub(1) as f32;
     let path_w = LAYOUT.path_min + (avail - PACK_SLACK - used).max(0.0);
@@ -48,7 +50,7 @@ fn show_groups(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, mem: &mut PanelMe
                     let resp = ui.horizontal(|ui| group(ui, g, st, tok, &mut acts, fallback_menu, path_w, view_is_default));
                     rects[g] = resp.response.rect;
                     // The path group is measured at its minimum (the field shrinks first).
-                    measured[g] = if g == 1 { resp.response.rect.width() - path_w + LAYOUT.path_min } else { resp.response.rect.width() };
+                    measured[g] = if g == PATH_GROUP { resp.response.rect.width() - path_w + LAYOUT.path_min } else { resp.response.rect.width() };
                 }
             });
             row_h = row_h.max(row.response.rect.height());
@@ -81,14 +83,15 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
                 });
                 tok.bevel(ui.painter(), r.response.rect);
             }
-            if btn(ui, tok, "📂 Open Folder…").on_hover_text(menu::tip("Open a RocksDB data folder", MenuCmd::OpenFolder)).clicked() {
+            if btn(ui, tok, "📂 Open Folder…").tip(menu::tip("Open a RocksDB data folder", MenuCmd::OpenFolder)).clicked() {
                 acts.push(Action::PickFolder);
             }
-            if btn(ui, tok, "📄 Open File…").on_hover_text(menu::tip("Open a WAL, SST, MANIFEST or CURRENT file", MenuCmd::OpenFile)).clicked() {
+            if btn(ui, tok, "📄 Open File…").tip(menu::tip("Open a WAL, SST, MANIFEST or CURRENT file", MenuCmd::OpenFile)).clicked() {
                 acts.push(Action::PickFile);
             }
         }
-        1 => {
+        1 => lsm_map_button(ui, st, tok, acts),
+        PATH_GROUP => {
             let mut path = st.session().path_input().to_string();
             // TextEdit draws its frame margins outside `desired_width`.
             let w = path_w - 2.0 * ui.spacing().button_padding.x;
@@ -101,11 +104,11 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
                 acts.push(Action::GoPathInput);
             }
         }
-        2 => {
+        3 => {
             let font = egui::TextStyle::Body.resolve(ui.style());
             let hint_w = ui.fonts_mut(|f| f.layout_no_wrap(SEARCH_HINT.into(), font, tok.p.text_muted).size().x) + 16.0;
             let mut q = st.search().query().to_string();
-            let sr = ui.add(egui::TextEdit::singleline(&mut q).id(egui::Id::new(SEARCH_ID)).hint_text(SEARCH_HINT).desired_width(hint_w.max(LAYOUT.search_width))).on_hover_text(SEARCH_HELP);
+            let sr = ui.add(egui::TextEdit::singleline(&mut q).id(egui::Id::new(SEARCH_ID)).hint_text(SEARCH_HINT).desired_width(hint_w.max(LAYOUT.search_width))).tip(SEARCH_HELP);
             if sr.changed() {
                 acts.push(Action::SetSearch(q));
             }
@@ -115,7 +118,7 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
                 sr.request_focus();
             }
             let mut hex = st.search().hex_mode();
-            if ui.checkbox(&mut hex, "Hex bytes").on_hover_text(HEX_HELP).changed() {
+            if ui.checkbox(&mut hex, "Hex bytes").tip(HEX_HELP).changed() {
                 acts.push(Action::SetSearchHex(hex));
             }
             // Disabled for an empty query or an invalid hex sequence (they would do nothing).
@@ -123,19 +126,19 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
             if ui
                 .add_enabled_ui(step, |ui| btn(ui, tok, "Prev"))
                 .inner
-                .on_hover_text(format!("Previous match ({} / Shift+F3 / Shift+Enter)", menu::shortcut_text(MenuCmd::FindPrev).unwrap_or_default()))
+                .tip(format!("Previous match ({} / Shift+F3 / Shift+Enter)", menu::shortcut_text(MenuCmd::FindPrev).unwrap_or_default()))
                 .clicked()
             {
                 acts.push(Action::SearchPrev);
             }
-            if ui.add_enabled_ui(step, |ui| btn(ui, tok, "Next")).inner.on_hover_text(format!("Next match ({} / F3 / Enter)", menu::shortcut_text(MenuCmd::FindNext).unwrap_or_default())).clicked() {
+            if ui.add_enabled_ui(step, |ui| btn(ui, tok, "Next")).inner.tip(format!("Next match ({} / F3 / Enter)", menu::shortcut_text(MenuCmd::FindNext).unwrap_or_default())).clicked() {
                 acts.push(Action::SearchNext);
             }
-            if btn(ui, tok, "Clear search").on_hover_text("Clear search text and match highlights. Selection is kept.").clicked() {
+            if btn(ui, tok, "Clear search").tip("Clear search text and match highlights. Selection is kept.").clicked() {
                 acts.push(Action::ClearSearch);
             }
         }
-        3 => {
+        4 => {
             let copy = ui.menu_button("Copy…", |ui| {
                 let has_sel = st.selection().span().is_some();
                 let has_field = st.selected_field().is_some();
@@ -164,7 +167,7 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
             tok.bevel(ui.painter(), copy.response.rect);
         }
         _ => {
-            if btn(ui, tok, "A−").on_hover_text(menu::tip("Zoom out", MenuCmd::ZoomOut)).clicked() {
+            if btn(ui, tok, "A−").tip(menu::tip("Zoom out", MenuCmd::ZoomOut)).clicked() {
                 acts.push(Action::ZoomOut);
             }
             ui.label(format!("{:.0}%", st.prefs().zoom() * 100.0));
@@ -172,23 +175,59 @@ fn group(ui: &mut egui::Ui, g: usize, st: &AppState, tok: &Tokens, acts: &mut Ve
             if can {
                 let plus = ui.button("A+");
                 tok.bevel(ui.painter(), plus.rect);
-                if plus.on_hover_text(menu::tip("Zoom in", MenuCmd::ZoomIn)).clicked() {
+                if plus.tip(menu::tip("Zoom in", MenuCmd::ZoomIn)).clicked() {
                     acts.push(Action::ZoomIn);
                 }
             } else {
                 // Disabled A+: muted text, no fill, a thin outline only, no hover effect.
-                let plus = ui.add_enabled(false, egui::Button::new(egui::RichText::new("A+").color(tok.p.text_muted)).frame(false));
-                ui.painter().rect_stroke(plus.rect, tok.w.rounding, egui::Stroke::new(1.0, tok.p.border_control), egui::StrokeKind::Inside);
-                plus.on_disabled_hover_text(zoom_limit_tip(st.prefs().zoom_ceiling()));
+                let plus = disabled_btn(ui, tok, "A+");
+                plus.tip_disabled(zoom_limit_tip(st.prefs().zoom_ceiling()));
             }
             let reset = ui.add_enabled(!view_is_default, egui::Button::new("Reset View"));
             tok.bevel(ui.painter(), reset.rect);
-            if reset.on_hover_text(menu::tip(RESET_VIEW_TIP, MenuCmd::ResetView)).on_disabled_hover_text(RESET_VIEW_DEFAULT_TIP).clicked() {
+            if reset.tip(menu::tip(RESET_VIEW_TIP, MenuCmd::ResetView)).tip_disabled(RESET_VIEW_DEFAULT_TIP).clicked() {
                 acts.push(Action::ResetView);
             }
         }
     }
 }
+
+/// Tooltip of the LSM Map button in each state (UI advice 0024 §1.6–1.7); the disabled reason
+/// is the one availability text (`DocumentSession::lsm_map_availability`).
+pub fn lsm_map_tip(st: &AppState) -> (bool, bool, String) {
+    use crate::app::lsm_map::MapEntry;
+    let key = menu::shortcut_text(MenuCmd::LsmMap).unwrap_or_default();
+    // Enabled/active from the one rule the menu item uses too; only the wording is the toolbar's.
+    let (enabled, active) = st.session().lsm_map_entry_state();
+    let tip = match (active, st.session().lsm_map_availability()) {
+        (true, _) => format!("LSM Map ({key}) — also returns keyboard focus to the map; when the map has focus, shows the levels table"),
+        (false, Ok(MapEntry::Via { from: Some(name), .. })) => format!("Show this folder's LSM map and locate {name} ({key})"),
+        (false, Ok(_)) => format!("{} ({key})", menu::LSM_MAP_TIP),
+        // "… Open Folder… (Shift+⌘O), or …" (Ctrl+Shift+O elsewhere), advice §1.6.
+        (false, Err(r)) => crate::app::lsm_map::with_open_folder_key(&r.0, &menu::shortcut_text(MenuCmd::OpenFolder).unwrap_or_default()),
+    };
+    (enabled, active, tip)
+}
+
+/// The LSM Map entry: latched while the map is shown, disabled with the reason when there is no
+/// trustworthy MANIFEST. Button, menu item and Shift+⌘M dispatch the same action.
+fn lsm_map_button(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec<Action>) {
+    let (enabled, active, tip) = lsm_map_tip(st);
+    let r = if active {
+        latched_btn(ui, tok, LSM_MAP_LABEL)
+    } else if enabled {
+        btn(ui, tok, LSM_MAP_LABEL)
+    } else {
+        disabled_btn(ui, tok, LSM_MAP_LABEL)
+    };
+    let r = if enabled { r.tip(tip) } else { r.tip_disabled(tip) };
+    if r.clicked() {
+        acts.push(Action::ShowLsmMap);
+    }
+}
+
+/// The LSM Map button label (text only; no glyph is free of other meanings).
+pub const LSM_MAP_LABEL: &str = "LSM Map";
 
 /// Tooltip of the disabled A+ at the layout-aware zoom ceiling.
 pub fn zoom_limit_tip(ceiling: f32) -> String {
@@ -199,6 +238,26 @@ pub fn zoom_limit_tip(ceiling: f32) -> String {
 mod tests {
     use super::*;
     use crate::ui::theme::{THEMES, apply_theme};
+
+    /// 0024 §1: the LSM Map group sits right after Open (index 1, the path group moved to 2) and
+    /// is disabled with the availability reason when nothing is open.
+    #[test]
+    fn lsm_map_group_and_disabled_reason() {
+        assert_eq!((GROUPS, PATH_GROUP), (6, 2));
+        let st = AppState::idle_for_tests();
+        let (enabled, active, tip) = lsm_map_tip(&st);
+        let key = menu::shortcut_text(MenuCmd::OpenFolder).unwrap();
+        assert_eq!((enabled, active), (false, false));
+        assert_eq!(tip, format!("LSM Map needs a RocksDB folder. Open Folder… ({key}), or open its CURRENT or MANIFEST file."), "advice §1.6 exact text");
+        if cfg!(target_os = "macos") {
+            assert_eq!(tip, "LSM Map needs a RocksDB folder. Open Folder… (Shift+⌘O), or open its CURRENT or MANIFEST file.");
+        }
+        assert_eq!(
+            crate::app::lsm_map::with_open_folder_key(crate::app::lsm_map::NEED_FOLDER, "Ctrl+Shift+O"),
+            "LSM Map needs a RocksDB folder. Open Folder… (Ctrl+Shift+O), or open its CURRENT or MANIFEST file."
+        );
+        assert_eq!(menu::MenuCmd::LsmMap.state(&st), (false, false));
+    }
 
     #[test]
     fn disabled_zoom_in_tooltip_names_the_limit() {
@@ -261,6 +320,10 @@ mod tests {
                     let (nw, nh) = crate::ui::measure_layout(ui, &tok, &mem, 0, true).need(true, true);
                     c = ZoomPolicy::DEFAULT.ceiling(ZoomFit { at_zoom: z, avail_w: w / z, avail_h: h / z, need_w: nw, need_h: nh });
                     eprintln!("{w}x{h} measured at {:.0}%: need {nw:.1}x{nh:.1} → ceiling {:.0}%", z * 100.0, c * 100.0);
+                    // 0024 D2b: the sixth group (LSM Map) never binds the ceiling — the widest
+                    // group on a row of its own stays below the side-panel/8-byte width need.
+                    let widest = mem.toolbar_w.iter().copied().fold(0.0, f32::max) + 2.0 * LAYOUT.center_margin[0] + PACK_SLACK;
+                    assert!(widest < nw, "{w}x{h} at {z}: widest toolbar group {widest:.1} binds the width need {nw:.1}");
                 });
                 at.push((z, c));
             }
@@ -272,6 +335,9 @@ mod tests {
             out.push(c100);
         }
         eprintln!("shell ceilings (1400x900, 900x700, 900x560): {out:?}");
+        // Same as 0.1.3 (`rendered_layout_at_the_zoom_ceilings`): 160 % at 1400×900, the 100 %
+        // floor at 900 pt (bound by side panels + 8 bytes per row since 0019 §3, not the toolbar).
+        assert_eq!(out, vec![1.6, 1.0, 1.0], "ceilings unchanged by the LSM Map group");
     }
 
     /// Spec §6.6 / 0009 item 2: every group (incl. A− 100% A+ · Reset View) ends inside the

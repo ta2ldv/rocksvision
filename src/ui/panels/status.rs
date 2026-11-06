@@ -5,6 +5,7 @@
 //! the hint is truncated (then dropped) first, then the search segment, the selection and the
 //! file label are elided in that order; every elided segment shows its full text on hover.
 
+use super::{Elided, TipExt};
 use crate::app::{Action, AppState};
 use crate::model::Status;
 use crate::ui::layout::{LAYOUT, StatusWidths, nb_units, status_widths};
@@ -34,7 +35,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
         Some(p) => kind_and_name(doc.file_label(), &p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
         None => doc.status_msg().to_string(),
     };
+    // 0030 A2-2: while the LSM Map has keyboard focus, its keys (words: the fonts have no
+    // arrow glyphs) take the hint slot.
+    let map_focused = super::lsm_map::has_focus(ui.ctx(), st);
     let (hint, hint_full) = match hidden {
+        _ if map_focused => (super::lsm_map::FOCUS_HINT.to_string(), String::new()),
         [] => (String::new(), String::new()),
         [(name, how)] => (format!("{name} hidden"), how.clone()),
         many => (format!("{} hidden", many.iter().map(|x| x.0).collect::<Vec<_>>().join(", ")), many.iter().map(|x| x.1.clone()).collect::<Vec<_>>().join("\n")),
@@ -67,7 +72,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
             ui.allocate_ui_with_layout(egui::vec2(width, h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // Status colour only on a flat data fill, never directly on chrome.
                 let t = if warn { RichText::new(text).color(tok.status(Status::Unsupported)).background_color(tok.p.data) } else { RichText::new(text).color(tok.p.text) };
-                ui.add(egui::Label::new(t).truncate()).on_hover_text(text);
+                ui.add(Elided::new(egui::Label::new(t)));
             });
             true
         };
@@ -98,7 +103,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
         } else if let Some(what) = st.busy_label() {
             ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Body)));
             ui.label(what);
-            if ui.small_button("Cancel").on_hover_text("Cancel decoding, folder scan, byte reads and copies (Esc)").clicked() {
+            if ui.small_button("Cancel").tip("Cancel decoding, folder scan, byte reads and copies (Esc)").clicked() {
                 acts.push(Action::CancelJobs);
             }
         }
@@ -110,7 +115,8 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, hidden: &[(&str, Str
         if plan.hint > 0.0 {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.allocate_ui_with_layout(egui::vec2(plan.hint, h), egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add(egui::Label::new(RichText::new(&hint).color(tok.p.text_muted)).truncate()).on_hover_text(&hint_full);
+                    let label = Elided::new(egui::Label::new(RichText::new(&hint).color(tok.p.text_muted)));
+                    ui.add(if hint_full.is_empty() { label } else { label.tip(hint_full.as_str()) });
                 });
             });
         }

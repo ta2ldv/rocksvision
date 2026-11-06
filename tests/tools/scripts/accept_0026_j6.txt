@@ -1,0 +1,22 @@
+# 0026 J6: unknown comparator (scratch folder /private/tmp/rocksvision-wal0026/unknown-cmp; MANIFEST comparator renamed to rocksvision.TestCmp0026___, CRCs fixed). DRAFT for phase 2.
+# Expect: equal box widths, legend `x: file number order. Comparator 'rocksvision.TestCmp0026___' is not supported, so key order, overlap and gaps are not shown; widths are equal.`,
+#   one lane, no guides on hover/select, no gap tooltip, no caption line, axis middle `file number order ->` with no end keys.
+# Placeholders: PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y BOX_X BOX_Y (a box), EMPTY_X EMPTY_Y (space between boxes), CROP_MAP_X CROP_MAP_Y CROP_MAP_W CROP_MAP_H
+front
+winsize 1400 900
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /private/tmp/rocksvision-wal0026/unknown-cmp
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 2
+shot j6_01_map
+crop j6_01_map_crop {{CROP_MAP_X}} {{CROP_MAP_Y}} {{CROP_MAP_W}} {{CROP_MAP_H}}
+move {{EMPTY_X}} {{EMPTY_Y}}
+sleep 2
+shot j6_02_hover_gap
+click {{BOX_X}} {{BOX_Y}}
+sleep 1
+shot j6_03_select_no_guides

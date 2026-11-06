@@ -1,0 +1,4 @@
+front
+click 589 203
+sleep 1
+shot g03a_cf_dropdown

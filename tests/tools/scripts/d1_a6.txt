@@ -1,0 +1,16 @@
+# A6 wal-recycled: tooltips and Explanation of both WAL cards
+front
+move 680 283
+sleep 1.3
+shot a6_2_tip_000014
+click 680 283
+sleep 0.8
+move 1380 880
+shot a6_3_sel_000014
+move 518 283
+sleep 1.3
+shot a6_4_tip_000011
+click 518 283
+sleep 0.8
+move 1380 880
+shot a6_5_sel_000011

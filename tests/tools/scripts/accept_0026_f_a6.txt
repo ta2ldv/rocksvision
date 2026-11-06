@@ -1,0 +1,9 @@
+front
+winsize 900 700
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-sst
+click 773 120
+sleep 3
+shot a6_00_opened

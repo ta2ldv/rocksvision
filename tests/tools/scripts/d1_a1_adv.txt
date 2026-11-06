@@ -1,0 +1,17 @@
+# A1 advanced example: hide bytes at 1400x900 (Fits, no controls), show bytes, 900x560, back to 1400x900
+front
+click 549 842
+sleep 1.0
+move 1380 880
+shot a1_2_bytes_hidden_1400
+note show bytes again with Option+Cmd+3
+key 3 alt cmd
+sleep 1.0
+winsize 900 560
+sleep 1.5
+move 800 560
+shot a1_3_900x560_bytes
+winsize 1400 900
+sleep 1.5
+move 1380 880
+shot a1_4_back_1400

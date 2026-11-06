@@ -1,0 +1,26 @@
+# 0030 phase 2 DRAFT A5 WAL cards at widths + A6 StaleTail wording. Assumes: card tiers by inner width (>=160 / 120 / 72 / <72) with
+# glyph-first membership (check / circle / question), chips on short maps, StaleTail sentences in WAL tooltip + Explanation.
+# Run once per width (--set W=...): suggested 1400 / 1100 / 900 / 700. DIR = many-wal (A5) or examples/data/wal-recycled (A6).
+# Placeholders: DIR W H TAG PATHX PATHY GOX GOY MAPX MAPY PARKX PARKY CARDX CARDY (a WAL card)
+front
+winsize {{W}} {{H}}
+sleep 1
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{MAPX}} {{MAPY}}
+sleep 1.5
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_1_cards
+note A5/A6 hover a WAL card: tooltip must be unshortened
+move {{CARDX}} {{CARDY}}
+sleep 1.2
+shot {{TAG}}_2_card_tip
+move {{PARKX}} {{PARKY}}
+note A5/A6 select the card by click: Explanation map card
+click {{CARDX}} {{CARDY}}
+sleep 0.8
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_3_card_selected

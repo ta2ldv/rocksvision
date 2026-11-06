@@ -1,0 +1,6 @@
+front
+click 208 18
+sleep 0.6
+click 214 230
+sleep 0.8
+shot th_menu

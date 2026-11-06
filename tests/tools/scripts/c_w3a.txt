@@ -1,0 +1,8 @@
+front
+click 619 120
+key a cmd
+type {{DIR}}/examples/files/wal-plain/000004.log
+click 773 120
+sleep 2.0
+move 1380 880
+shot w3_0_open

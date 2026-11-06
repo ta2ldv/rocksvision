@@ -1,0 +1,38 @@
+front
+note STEP4 hover empty band left of 000018 (XCopy, A, bytes hidden)
+move 536 458
+sleep 2
+shot j1_04_hover_empty
+note STEP5 select 000018
+click 864 454
+sleep 1
+move 700 800
+sleep 0.5
+shot j1_05_select_000018
+note STEP4b hover 000018 box
+move 900 458
+sleep 2
+shot j1_07_hover_box
+note STEP6 click L0 title bar
+click 449 366
+sleep 1
+move 700 800
+sleep 0.5
+shot j1_06_level_card
+note STEP8 wheel in Fit mode must do nothing
+wheel 800 460 0 -120
+sleep 0.5
+shot j1_08_wheel_v
+wheel 800 460 0 -120 shift
+sleep 0.5
+shot j1_09_wheel_shift
+wheel 800 460 0 120 cmd
+sleep 0.5
+shot j1_10_wheel_cmd
+note STEP3 keys + - 0 c do nothing
+key equal
+key equal
+key c
+key 0
+sleep 0.5
+shot j1_03_after_keys

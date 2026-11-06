@@ -4,6 +4,7 @@
 //! methods below (the reader, path and cache are private).
 
 pub mod batch;
+pub mod summary;
 
 /// Shim: log framing moved to `format::log` (shared with MANIFEST decoding).
 pub use crate::format::log;

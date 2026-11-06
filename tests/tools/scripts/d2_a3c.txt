@@ -1,0 +1,16 @@
+front
+click 445 120
+sleep 1.2
+click 800 600
+key 0
+sleep 0.5
+move 880 680
+shot a3_7_900x700
+click 560 {{Y}}
+sleep 1.0
+move 880 680
+shot a3_8_900_click1
+click 560 {{Y}}
+sleep 1.0
+move 880 680
+shot a3_9_900_click2

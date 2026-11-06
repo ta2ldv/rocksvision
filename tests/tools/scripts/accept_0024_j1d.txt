@@ -1,0 +1,7 @@
+# J1d: choose CF cf_a in the map, find boxes.
+front
+click 583 204
+sleep 0.8
+click 508 252
+sleep 1
+shot j1d_01_cfa

@@ -1,0 +1,26 @@
+# 0026 J4b: many-wal summary box and lone WAL (LSM Map disabled reason unchanged). DRAFT for phase 2.
+# Placeholders: PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y WALSUM_X WALSUM_Y (the `+N older WAL files` box), CROP_BAND_X CROP_BAND_Y CROP_BAND_W CROP_BAND_H
+front
+winsize 1400 900
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-wal
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 4
+shot j4b_01_many
+crop j4b_01_band {{CROP_BAND_X}} {{CROP_BAND_Y}} {{CROP_BAND_W}} {{CROP_BAND_H}}
+click {{WALSUM_X}} {{WALSUM_Y}}
+sleep 1
+shot j4b_02_summary_selected
+note STEP lone WAL: open examples/data/wal-basic/000004.log; LSM Map must stay disabled with the unchanged reason (hover 1.8s)
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/wal-basic/000004.log
+click {{GO_X}} {{GO_Y}}
+sleep 2
+move {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 1.8
+shot j4b_03_lone_wal_disabled

@@ -1,0 +1,10 @@
+front
+winsize 1400 900
+sleep 1.5
+move 470 300
+sleep 1.5
+shot a5adv_1400_tip000146
+click 470 300
+sleep 0.8
+move 1380 880
+shot a5adv_1400_sel000146

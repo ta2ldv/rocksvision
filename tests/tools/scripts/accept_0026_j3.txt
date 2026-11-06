@@ -1,0 +1,56 @@
+# 0026 J3: tooltip placement and the Show Tooltips gate (multilevel-db). DRAFT for phase 2. Run in XCopy and Amiga Tool Style, matrix A (and B).
+# Placeholders: PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y; per anchor a before point and the box point: TOP_X TOP_Y (box near map top), BOT_X BOT_Y (bottom), LEFT_X LEFT_Y, RIGHT_X RIGHT_Y,
+#   WALBOX_X WALBOX_Y (a WAL box), AWAY_X AWAY_Y (neutral point with nothing under it), VIEW_X VIEW_Y (View menu), TOOLTIPS_ITEM_X TOOLTIPS_ITEM_Y (Show Tooltips), QUIT: `key q cmd`.
+# Expect each pair: before = no tooltip, after = tooltip next to the box, inside the window, not covering the box text, not bottom-left over the hex pane; rounded corners; bg differs from boxes/menus.
+front
+winsize {{W}} {{H}}
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 2
+move {{AWAY_X}} {{AWAY_Y}}
+sleep 0.5
+shot j3_top_before
+move {{TOP_X}} {{TOP_Y}}
+sleep 2
+shot j3_top_after
+move {{AWAY_X}} {{AWAY_Y}}
+sleep 0.5
+shot j3_bottom_before
+move {{BOT_X}} {{BOT_Y}}
+sleep 2
+shot j3_bottom_after
+move {{AWAY_X}} {{AWAY_Y}}
+sleep 0.5
+shot j3_left_before
+move {{LEFT_X}} {{LEFT_Y}}
+sleep 2
+shot j3_left_after
+move {{AWAY_X}} {{AWAY_Y}}
+sleep 0.5
+shot j3_right_before
+move {{RIGHT_X}} {{RIGHT_Y}}
+sleep 2
+shot j3_right_after
+move {{AWAY_X}} {{AWAY_Y}}
+sleep 0.5
+shot j3_wal_before
+move {{WALBOX_X}} {{WALBOX_Y}}
+sleep 2
+shot j3_wal_after
+note STEP tooltips OFF via View > Show Tooltips; hover a box: no tooltip; Explanation still has every fact
+click {{VIEW_X}} {{VIEW_Y}}
+click {{TOOLTIPS_ITEM_X}} {{TOOLTIPS_ITEM_Y}}
+sleep 0.5
+move {{TOP_X}} {{TOP_Y}}
+sleep 2
+shot j3_off_hover
+click {{TOP_X}} {{TOP_Y}}
+sleep 1
+shot j3_off_explanation
+note STEP quit and relaunch (same HOME) is a second launch-and-drive run: accept_0026_j3b.txt; see below. Then re-enable and hover.
+key q cmd

@@ -1,0 +1,6 @@
+front
+key esc
+sleep 0.8
+key esc
+sleep 0.8
+shot h_after_esc

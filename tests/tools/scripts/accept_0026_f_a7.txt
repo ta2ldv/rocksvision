@@ -1,0 +1,47 @@
+front
+click 700 119
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-wal
+key return
+sleep 3
+click 446 118
+sleep 6
+click 700 700
+sleep 0.4
+shot a7_00_many
+key tab
+key up
+sleep 0.4
+shot a7_01_newest
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+key left
+sleep 0.6
+shot a7_02_left_past_oldest

@@ -1,0 +1,31 @@
+# R7: item 6 tooltip crop; item 10 journey: select 000018, dclick -> SST, Back (button) restores xN + pan, second Back -> table/CURRENT.
+front
+note ITEM6 tooltip crop (x2.2 panned)
+move 750 311
+sleep 0.3
+move 756 313
+sleep 1.8
+shot r7_00_tip
+crop r7_00_tip_crop 420 460 420 230
+note ITEM10 select 000018
+click 756 313
+sleep 0.8
+move 900 430
+sleep 0.6
+shot r7_01_selected
+crop r7_01_before 420 190 1180 130
+note ITEM10 DCLICK 000018
+dclick 756 313
+sleep 2
+shot r7_02_sst
+note ITEM10 BACK via button
+click 456 151
+sleep 2
+move 900 430
+sleep 0.6
+shot r7_03_after_back
+crop r7_03_after 420 190 1180 130
+note ITEM10 SECOND BACK via Option+Left
+key left alt
+sleep 1.5
+shot r7_04_second_back

@@ -1,0 +1,8 @@
+# R4: same app (own PID): open db-levels, discovery shot.
+front
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+shot r4_01_opened

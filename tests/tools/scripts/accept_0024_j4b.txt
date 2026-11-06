@@ -1,0 +1,37 @@
+# J4b: relaunch with the SAME HOME: tooltips still off; then turn on, tooltips return.
+front
+winsize 1400 900
+sleep 1
+shot j4b_00_launch
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+note HOVER box (expect no tooltip: setting persisted off)
+move 905 241
+sleep 0.3
+move 915 245
+sleep 1.8
+shot j4b_01_hover_box_after_relaunch
+note HOVER LSM Map (expect none)
+move 443 119
+sleep 1.8
+shot j4b_02_hover_lsmmap_after_relaunch
+click 208 18
+sleep 1
+shot j4b_03_menu_after_relaunch
+click 237 494
+sleep 1
+note HOVER box (expect tooltip again)
+move 905 241
+sleep 0.3
+move 915 245
+sleep 1.8
+shot j4b_04_hover_box_on_again
+move 443 119
+sleep 1.8
+shot j4b_05_hover_lsmmap_on_again
+crop j4b_05_crop 150 90 1000 160

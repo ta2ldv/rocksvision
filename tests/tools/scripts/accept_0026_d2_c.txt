@@ -1,0 +1,24 @@
+front
+move 536 462
+sleep 2
+shot d2_02_hover_empty
+click 864 458
+sleep 1
+move 700 800
+sleep 0.5
+shot d2_03_select_000018
+move 900 462
+sleep 2
+shot d2_04_hover_box
+wheel 800 462 0 -120
+wheel 800 462 0 -120 shift
+wheel 800 462 0 120 cmd
+key equal
+key c
+key 0
+sleep 0.5
+shot d2_05_after_wheel_keys
+click 449 368
+sleep 1
+move 700 800
+shot d2_06_level_card

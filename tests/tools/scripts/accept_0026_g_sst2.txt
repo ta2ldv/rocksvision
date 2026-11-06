@@ -1,0 +1,21 @@
+front
+click 1163 204
+click 1163 204
+click 1163 204
+click 1163 204
+sleep 0.8
+move 700 900
+shot g_sst_03_zoom4
+move 700 400
+sleep 2.3
+shot g_sst_04_hover_zoomed
+drag 900 400 600 400
+sleep 0.8
+move 700 900
+shot g_sst_05_drag_pan
+wheel 700 400 -300 0 shift
+sleep 0.8
+shot g_sst_06_shift_wheel
+wheel 700 400 0 -200
+sleep 0.8
+shot g_sst_07_wheel_v

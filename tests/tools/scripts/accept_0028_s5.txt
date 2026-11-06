@@ -1,0 +1,13 @@
+front
+click 648 297
+sleep 1.5
+move 700 930
+shot g08_wal_000148_selected
+dclick 842 297
+sleep 3
+move 700 930
+shot g09_wal_000150_opened
+key left alt
+sleep 2
+move 700 930
+shot g10_back_map_restored_wal

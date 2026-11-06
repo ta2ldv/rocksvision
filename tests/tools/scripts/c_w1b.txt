@@ -1,0 +1,15 @@
+front
+click 460 230
+sleep 0.8
+click 875 613
+sleep 0.8
+move 1380 880
+shot w1_3_box_selected
+dclick 875 613
+sleep 1.6
+move 1380 880
+shot w1_4_opened
+click 462 150
+sleep 1.0
+move 1380 880
+shot w1_5_back

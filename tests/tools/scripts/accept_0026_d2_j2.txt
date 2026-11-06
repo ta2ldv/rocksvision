@@ -1,0 +1,39 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+click 446 118
+sleep 3
+move 700 880
+shot j2_01_A_cf0
+click 592 204
+sleep 0.7
+click 501 271
+sleep 1.2
+move 700 880
+shot j2_02_A_cf_events
+winsize 900 700
+sleep 1.5
+move 500 640
+shot j2_03_B_cf_events
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 0.5
+key equal cmd
+sleep 1.5
+winfo
+move 500 640
+shot j2_04_C_160

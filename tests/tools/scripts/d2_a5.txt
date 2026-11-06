@@ -1,0 +1,26 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+click 592 204
+sleep 0.8
+click {{CFX}} {{CFY}}
+sleep 1.0
+move 1380 880
+shot {{TAG}}_1400
+move 330 283
+sleep 1.4
+shot {{TAG}}_1400_tip
+winsize 1100 800
+sleep 1.5
+move 1080 780
+shot {{TAG}}_1100
+winsize 900 800
+sleep 1.5
+shot {{TAG}}_900

@@ -1,0 +1,13 @@
+front
+key esc
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click 773 120
+sleep 2.5
+click 446 118
+sleep 3
+click 592 204
+sleep 0.7
+click 501 251
+sleep 1.2

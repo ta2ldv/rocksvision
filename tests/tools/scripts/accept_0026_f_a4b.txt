@@ -1,0 +1,16 @@
+front
+click 654 224
+click 654 224
+click 654 224
+sleep 0.5
+move 400 560
+shot a4_02_zoomed
+drag 460 249 600 249
+sleep 0.6
+shot a4_03_axis_drag
+wheel 575 406 0 -100
+sleep 0.6
+shot a4_04_scroll_v
+wheel 575 406 0 -100
+sleep 0.6
+shot a4_05_scroll_v2

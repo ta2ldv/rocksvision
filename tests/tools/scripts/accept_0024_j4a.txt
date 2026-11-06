@@ -1,0 +1,51 @@
+# J4a (XCopy, fresh HOME): item 16: Show Tooltips off.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+click 910 241
+sleep 0.8
+note CONTROL tooltips ON: hover box
+move 915 245
+sleep 1.8
+shot j4_00_on_box
+crop j4_00_on_box_crop 400 190 700 140
+note View menu -> Show Tooltips
+click 208 18
+sleep 1
+shot j4_01_menu_on
+click 237 494
+sleep 1
+click 208 18
+sleep 1
+shot j4_02_menu_off
+key esc
+sleep 0.5
+note HOVER box with tooltips off
+move 905 241
+sleep 0.3
+move 915 245
+sleep 1.8
+shot j4_03_off_box
+crop j4_03_off_box_crop 400 190 700 140
+note HOVER LSM Map
+move 443 119
+sleep 1.8
+shot j4_04_off_lsmmap
+crop j4_04_off_lsmmap_crop 150 90 1000 160
+note HOVER Back
+move 456 151
+sleep 1.8
+shot j4_05_off_back
+crop j4_05_off_back_crop 390 125 700 100
+note HOVER A+
+move 1452 120
+sleep 1.8
+shot j4_06_off_aplus
+crop j4_06_off_aplus_crop 1000 90 450 120

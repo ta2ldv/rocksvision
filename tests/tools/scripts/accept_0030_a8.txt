@@ -1,0 +1,56 @@
+# 0030 phase 2 DRAFT A8 Table/Map split. Assumes: byte pane content cap for CURRENT, per-mode splits, double-click on the handle resets only
+# the active mode, comparator lines collapsed to one.
+# Placeholders: DIR (advanced example), W H (1400 900), PATHX PATHY GOX GOY, CURRENTX CURRENTY, OBSX OBSY (Observed levels in Structure),
+#   TABLEX TABLEY MAPSEGX MAPSEGY (Table / Map segments), HANDLEX HANDLEY (Table split handle), HANDLE_DRAGY (drag target y), MHANDLEX MHANDLEY (Map handle), PARKX PARKY, RESETX RESETY
+front
+winsize {{W}} {{H}}
+sleep 1
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{CURRENTX}} {{CURRENTY}}
+sleep 0.6
+click {{OBSX}} {{OBSY}}
+sleep 1.2
+move {{PARKX}} {{PARKY}}
+shot a8_1_table_fresh
+note A8.1 count rows in a8_1 (a)
+click {{MAPSEGX}} {{MAPSEGY}}
+sleep 1.0
+shot a8_2_map
+click {{TABLEX}} {{TABLEY}}
+sleep 1.0
+move {{PARKX}} {{PARKY}}
+shot a8_3_table_after_map
+note A8.1 (b) must show the same count as (a) or more
+note A8.7 drag the Table split, then Map, then Table: kept
+drag {{HANDLEX}} {{HANDLEY}} {{HANDLEX}} {{HANDLE_DRAGY}}
+sleep 0.6
+shot a8_4_table_dragged
+click {{MAPSEGX}} {{MAPSEGY}}
+sleep 1.0
+shot a8_5_map_after_table_drag
+click {{TABLEX}} {{TABLEY}}
+sleep 1.0
+shot a8_6_table_drag_kept
+note A8.7 Map split drag then Table then Map
+click {{MAPSEGX}} {{MAPSEGY}}
+sleep 0.8
+drag {{MHANDLEX}} {{MHANDLEY}} {{MHANDLEX}} {{HANDLE_DRAGY}}
+sleep 0.6
+shot a8_7_map_dragged
+click {{TABLEX}} {{TABLEY}}
+sleep 0.8
+note A8.5 double-click in Table: Map split must stay
+dclick {{HANDLEX}} {{HANDLEY}}
+sleep 0.8
+shot a8_8_table_reset
+click {{MAPSEGX}} {{MAPSEGY}}
+sleep 0.8
+shot a8_9_map_split_intact
+note A8.5 Reset View resets both
+click {{RESETX}} {{RESETY}}
+sleep 0.8
+shot a8_10_reset_view

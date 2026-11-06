@@ -1,0 +1,10 @@
+front
+click 619 120
+key a cmd
+type {{DIR}}
+key return
+sleep 3
+click 446 118
+sleep 6
+move 700 900
+shot {{TAG}}_settled

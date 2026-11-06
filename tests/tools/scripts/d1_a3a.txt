@@ -1,0 +1,11 @@
+# A3 many-sst 1400x900: map shot, hover, click bar
+front
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-sst
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 1380 880
+shot a3_1_1400_bars

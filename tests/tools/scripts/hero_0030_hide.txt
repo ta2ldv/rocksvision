@@ -1,0 +1,5 @@
+front
+click 386 984
+sleep 1.0
+move 900 10
+shot hero_hidden

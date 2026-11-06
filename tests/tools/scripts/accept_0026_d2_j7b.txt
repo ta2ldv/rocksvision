@@ -1,0 +1,12 @@
+front
+click 446 118
+sleep 3
+click 592 204
+sleep 0.7
+click 501 251
+sleep 1.2
+move 864 458
+sleep 0.4
+dclick 864 458
+sleep 3
+shot j7b_01_after_dclick_sst

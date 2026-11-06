@@ -1,0 +1,8 @@
+front
+move 683 278
+sleep 2.2
+shot rec_hover_000014
+click 683 278
+sleep 1
+move 700 800
+shot rec_select_000014

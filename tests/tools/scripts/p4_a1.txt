@@ -1,0 +1,15 @@
+# P4 item 1 discovery: open db-levels, LSM Map.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click 773 120
+sleep 2.5
+click 443 119
+sleep 2
+shot p4_01_map
+click 583 204
+sleep 0.8
+shot p4_01_combo

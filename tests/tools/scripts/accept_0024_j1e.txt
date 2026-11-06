@@ -1,0 +1,6 @@
+# J1e: double-click on-disk box 000013 (cf_a L0 lane 1) -> SST opens.
+front
+note DCLICK on-disk box 000013
+dclick 972 292
+sleep 2
+shot j1e_01_sst

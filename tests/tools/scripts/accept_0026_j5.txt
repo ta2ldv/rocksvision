@@ -1,0 +1,80 @@
+# 0026 J5: navigation mode (db-levels at setting C, or the opt-in large SST scratch fixture from 0024: bash tests/tools/mk-scratch-p4-0024.sh / optin-p4.sh). DRAFT for phase 2.
+# Run: --set W=900 --set H=700 and app zoom 160% (ZOOM_STEPS x `key equal cmd` done BEFORE this script, or add lines). Resize steps: W0..W4 widths crossing the fit threshold (e.g. 1400 1200 1000 900 800).
+# Assumes D1 strip (right end, in order): Center  Fit  -  +  xN ; keys `c` Center, `0` Fit, `+`/`-`; WAL band Up/Down; pinned level titles; axis overview (optional per coordinator).
+# App zoom 160% (setting C): as 0024 j5b, `key equal cmd` x7 with sleep 0.5 between, before the map is opened (0024: "zoom to 160 percent (or ceiling)"; read the zoom label in the shot to confirm).
+# Wheel ops now exist: `wheel X Y DX DY [shift|cmd]` (see STEP9). Pinch: NOT RUN (no pinch op).
+# Placeholders: DIR PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y MAP_X MAP_Y (scene point), CENTER_X CENTER_Y FIT_X FIT_Y PLUS_X PLUS_Y MINUS_X MINUS_Y ZOOMN_X ZOOMN_Y,
+#   AXIS_X1 AXIS_Y AXIS_X2 (axis overview, optional), CFSEL_X CFSEL_Y CFITEM1_X CFITEM1_Y CFITEM2_X CFITEM2_Y, BOX_X BOX_Y (a box to select), CROP_STRIP_X CROP_STRIP_Y CROP_STRIP_W,
+#   BACK_X BACK_Y, WAL1_X WAL1_Y
+front
+winsize {{W}} {{H}}
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{DIR}}
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 2
+note STEP1 navigation mode: Center Fit - + xN visible
+shot j5_01_nav
+crop j5_01_strip {{CROP_STRIP_X}} {{CROP_STRIP_Y}} {{CROP_STRIP_W}} 40
+note STEP2 + twice then Center: zoom value unchanged by Center, content centred
+click {{PLUS_X}} {{PLUS_Y}}
+click {{PLUS_X}} {{PLUS_Y}}
+shot j5_02_zoomed
+crop j5_02_strip {{CROP_STRIP_X}} {{CROP_STRIP_Y}} {{CROP_STRIP_W}} 40
+click {{CENTER_X}} {{CENTER_Y}}
+sleep 0.5
+shot j5_03_center
+crop j5_03_strip {{CROP_STRIP_X}} {{CROP_STRIP_Y}} {{CROP_STRIP_W}} 40
+note STEP3 Fit: x1, controls stay visible
+click {{FIT_X}} {{FIT_Y}}
+sleep 0.5
+shot j5_04_fit
+note STEP4 keys c and 0 (map focused)
+click {{MAP_X}} {{MAP_Y}}
+key equal
+key c
+shot j5_05_key_c
+key 0
+shot j5_06_key_0
+note STEP5 resize slowly across the threshold: 5 captures, controls switch once per crossing
+winsize {{W0}} {{H}}
+shot j5_07_w0
+winsize {{W1}} {{H}}
+shot j5_08_w1
+winsize {{W2}} {{H}}
+shot j5_09_w2
+winsize {{W3}} {{H}}
+shot j5_10_w3
+winsize {{W4}} {{H}}
+shot j5_11_w4
+note STEP6 axis overview pans (optional feature): drag inside it
+drag {{AXIS_X1}} {{AXIS_Y}} {{AXIS_X2}} {{AXIS_Y}}
+shot j5_12_axis_drag
+note STEP7 keyboard path: Tab into the map, Up into WAL band, Enter, Back; then app zoom label and hex font unchanged vs j5_01
+key tab
+key up
+shot j5_13_kb
+key return
+sleep 2
+click {{BACK_X}} {{BACK_Y}}
+sleep 2
+shot j5_14_back
+note STEP8 select a box, switch CF, switch back: selection survives
+click {{BOX_X}} {{BOX_Y}}
+click {{CFSEL_X}} {{CFSEL_Y}}
+click {{CFITEM1_X}} {{CFITEM1_Y}}
+click {{CFSEL_X}} {{CFSEL_Y}}
+click {{CFITEM2_X}} {{CFITEM2_Y}}
+sleep 1
+shot j5_15_cf_roundtrip
+note STEP9 wheel in navigation mode: vertical wheel scrolls, shift+wheel pans, cmd+wheel zooms the MAP (app zoom label and hex font unchanged)
+click {{FIT_X}} {{FIT_Y}}
+wheel {{MAP_X}} {{MAP_Y}} 0 -120
+shot j5_16_wheel_v
+wheel {{MAP_X}} {{MAP_Y}} 0 -120 shift
+shot j5_17_shift_wheel_pan
+wheel {{MAP_X}} {{MAP_Y}} 0 120 cmd
+shot j5_18_cmd_wheel_zoom

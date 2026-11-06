@@ -1,0 +1,76 @@
+# 0030 phase 2 DRAFT B tooltips. Assumes: tooltip delay 0.30 s / grace 0.40 s, ONE rounded popup for elided cells and headers,
+# none for fully visible self-explanatory cells, 3-line CF cell tip, row-level hover updating in place, View > Show Tooltips toggle (persisted),
+# hex and map hover unchanged. No clicks while hovering. Shots at ~0.3 / 0.8 / 1.5 s.
+# Placeholders: DIR (advanced example), PATHX PATHY GOX GOY, WAL_ROWX WAL_ROWY (000150.log list item), TRUNCX TRUNCY (truncated "log number" cell),
+#   HEADX HEADY (elided header), FULLX FULLY ("blocks"), ROW2X ROW2Y (neighbour cell, same row), CURRENTX CURRENTY, OBSX OBSY, CFX CFY ("0 default"),
+#   TITLEX TITLEY, HEXX HEXY (a hex byte), MAPSEGX MAPSEGY, BOXX BOXY (a map box), PARKX PARKY, MENU_TOOLTIPSX MENU_TOOLTIPSY (View > Show Tooltips)
+front
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{WAL_ROWX}} {{WAL_ROWY}}
+sleep 1
+move {{PARKX}} {{PARKY}}
+sleep 0.5
+note B.1 truncated cell: exactly one rounded popup
+move {{TRUNCX}} {{TRUNCY}}
+shot b_trunc_t0
+sleep 0.3
+shot b_trunc_t1
+sleep 1.0
+shot b_trunc_t2
+note B.2 move along the row: content updates in place
+move {{ROW2X}} {{ROW2Y}}
+sleep 0.5
+shot b_row_move
+move {{PARKX}} {{PARKY}}
+sleep 0.5
+note B.3 header elided
+move {{HEADX}} {{HEADY}}
+sleep 0.6
+shot b_head_t1
+sleep 1.0
+shot b_head_t2
+move {{PARKX}} {{PARKY}}
+sleep 0.5
+note B.4 fully visible cell: none
+move {{FULLX}} {{FULLY}}
+sleep 0.6
+shot b_full_t1
+sleep 1.0
+shot b_full_t2
+move {{PARKX}} {{PARKY}}
+click {{CURRENTX}} {{CURRENTY}}
+sleep 0.6
+click {{OBSX}} {{OBSY}}
+sleep 1.0
+move {{PARKX}} {{PARKY}}
+sleep 0.5
+note B.5 CF cell: three-line meaning
+move {{CFX}} {{CFY}}
+sleep 0.8
+shot b_cf_t1
+sleep 1.0
+shot b_cf_t2
+move {{PARKX}} {{PARKY}}
+move {{TITLEX}} {{TITLEY}}
+sleep 1.2
+shot b_title
+note B.6 hex and map hover unchanged
+move {{PARKX}} {{PARKY}}
+move {{HEXX}} {{HEXY}}
+sleep 1.0
+shot b_hex_hover
+click {{MAPSEGX}} {{MAPSEGY}}
+sleep 1.0
+move {{BOXX}} {{BOXY}}
+sleep 1.0
+shot b_map_hover
+note B.7 toggle Show Tooltips off: nothing appears; relaunch keeps the setting
+click {{MENU_TOOLTIPSX}} {{MENU_TOOLTIPSY}}
+sleep 0.5
+move {{BOXX}} {{BOXY}}
+sleep 1.5
+shot b_tooltips_off

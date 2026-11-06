@@ -1,0 +1,6 @@
+# A4 unknown comparator: zoom with +, hover axis row for the tooltip
+front
+sleep 0.8
+move 575 281
+sleep 1.4
+shot a4_7_unkcmp_tip

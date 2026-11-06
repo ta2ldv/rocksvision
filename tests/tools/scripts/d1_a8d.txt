@@ -1,0 +1,53 @@
+# A8 clean split journey (each step has its own shot). Starts from any state with the advanced folder open.
+front
+click 207 213
+sleep 0.8
+click 300 524
+sleep 1.0
+click 517 151
+sleep 0.8
+click 1512 120
+sleep 1.0
+move 1380 880
+shot a8d_01_table_default
+note T1 drag Table split 824 -> 600
+drag 832 824 832 600
+sleep 0.8
+move 1380 880
+shot a8d_02_table_dragged
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8d_03_map_default_after_table_drag
+note M1 drag Map split 826 -> 651
+drag 832 826 832 651
+sleep 0.8
+move 1380 880
+shot a8d_04_map_dragged
+click 517 151
+sleep 1.0
+move 1380 880
+shot a8d_05_table_kept
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8d_06_map_kept
+click 517 151
+sleep 0.8
+note dblclick the Table handle at 600
+dclick 832 600
+sleep 0.8
+move 1380 880
+shot a8d_07_table_dblclick
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8d_08_map_after_table_dblclick
+click 1512 120
+sleep 1.0
+move 1380 880
+shot a8d_09_map_after_reset_view
+click 517 151
+sleep 1.0
+move 1380 880
+shot a8d_10_table_after_reset_view

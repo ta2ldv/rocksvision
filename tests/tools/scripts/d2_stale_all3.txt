@@ -1,0 +1,9 @@
+front
+click 592 204
+sleep 0.8
+click 490 251
+sleep 1.0
+click 517 283
+sleep 0.8
+move 1380 880
+shot sta_5_users_sel

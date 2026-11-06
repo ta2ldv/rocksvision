@@ -1,0 +1,15 @@
+# 0026 discovery: multilevel-db at 1400x900, map opened.
+front
+winsize 1400 900
+sleep 1
+winfo
+shot d_00_launch
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click 773 120
+sleep 2.5
+shot d_01_opened
+click 443 119
+sleep 3
+shot d_02_map

@@ -1,0 +1,18 @@
+front
+click 486 251
+sleep 1.5
+move 700 930
+shot g03_map_cf_users
+click 589 203
+sleep 0.5
+click 486 272
+sleep 1.5
+move 700 930
+shot g04_map_cf_orders
+click 589 203
+sleep 0.5
+click 486 251
+sleep 1.5
+move 875 612
+sleep 2.5
+shot g05_hover_l1_000094

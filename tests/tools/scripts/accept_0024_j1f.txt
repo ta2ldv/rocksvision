@@ -1,0 +1,8 @@
+# J1f: select SST row (format_version), open Copy menu.
+front
+click 508 355
+sleep 0.8
+shot j1f_01_row
+click 1325 121
+sleep 0.8
+shot j1f_02_copymenu

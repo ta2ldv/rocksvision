@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """RocksVision GUI driver: CGEvent mouse/keyboard + screencapture (python3 + pyobjc only).
 Usage: gui-drive.py [--set K=V ...] [--check] <cmd...> | script FILE   (see tests/tools/README.md)
+Ops: front winsize winfo click rclick dclick shift_click move|hover drag wheel(X Y DX DY [mods]) type key shot crop clip* note sleep.
 Coordinates are SCREEN POINTS. Every command is appended to $SHOT_DIR/action.log.
 No event is posted unless RocksVision is the frontmost app; held modifiers are always released."""
 import sys, time, subprocess, os, re, atexit
@@ -15,7 +16,7 @@ KEYS = {"return": 36, "enter": 76, "esc": 53, "tab": 48, "space": 49, "delete": 
         "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96,
         "equal": 24, "minus": 27, "comma": 43, "period": 47, "slash": 44, "lbracket": 33, "rbracket": 30}
 for _c, _k in zip("asdfhgzxcvbqweryt", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17]): KEYS[_c] = _k
-for _c, _k in zip("uiopljkn", [32, 34, 31, 35, 37, 38, 40, 45]): KEYS[_c] = _k
+for _c, _k in zip("uiopljknm", [32, 34, 31, 35, 37, 38, 40, 45, 46]): KEYS[_c] = _k
 for _c, _k in zip("1234567890", [18, 19, 20, 21, 23, 22, 26, 28, 25, 29]): KEYS[_c] = _k
 MODS = {"cmd": Q.kCGEventFlagMaskCommand, "shift": Q.kCGEventFlagMaskShift, "alt": Q.kCGEventFlagMaskAlternate,
         "ctrl": Q.kCGEventFlagMaskControl}
@@ -36,6 +37,7 @@ PID = [int(os.environ["ROCKSVISION_DRIVER_PID"])] if os.environ.get("ROCKSVISION
 
 def frontmost_app():
     from AppKit import NSWorkspace
+    _pump()
     return NSWorkspace.sharedWorkspace().frontmostApplication()
 
 def frontmost_name():
@@ -63,9 +65,66 @@ def se_process():
 
 def raw_post(e): Q.CGEventPost(Q.kCGHIDEventTap, e)
 
+def _pump():
+    """Let AppKit deliver pending activation notifications: NSWorkspace.frontmostApplication() is cached
+    per process and stays stale in a script without a running run loop (the 0026 ChatGPT incident)."""
+    from Foundation import NSRunLoop, NSDate
+    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.05))
+
+def window_owner_at(x=None, y=None):
+    """PID owning the topmost normal (layer 0, > 50x50, on-screen) window, or, with x/y, the topmost such
+    window containing that screen point. Straight from the window server (front-to-back order), no caching."""
+    infos = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID) or []
+    for w in infos:
+        if w.get("kCGWindowLayer", 1) != 0 or w.get("kCGWindowAlpha", 1) <= 0: continue
+        b = w.get("kCGWindowBounds") or {}
+        if b.get("Width", 0) < 50 or b.get("Height", 0) < 50: continue
+        if x is not None and not (b["X"] <= x < b["X"] + b["Width"] and b["Y"] <= y < b["Y"] + b["Height"]): continue
+        return int(w.get("kCGWindowOwnerPID", -1))
+    return None
+
+def guard_state(pid, x=None, y=None):
+    """(ok, detail): fresh checks that `pid` is the active application AND owns the topmost window (at x,y for
+    mouse events). Both must agree; nothing is cached between calls."""
+    _pump()
+    app = frontmost_app()
+    active = int(app.processIdentifier()) if app else None
+    # The menu bar (y < 24 pt) belongs to the ACTIVE app, not to a window below it.
+    top = active if (y is not None and y < 24) else window_owner_at(x, y)
+    ok = active == pid and top == pid
+    return ok, "active pid=%s (%s) topmost window pid=%s%s, want pid=%s" % (
+        active, (app.localizedName() if app else "?"), top, " at %.0f,%.0f" % (x, y) if x is not None else "", pid)
+
+def activate_bound():
+    app = target_app()
+    if app is not None:
+        from AppKit import NSApplicationActivateIgnoringOtherApps
+        app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+    time.sleep(0.6)
+
+MOUSE_LIKE = (Q.kCGEventMouseMoved, Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp, Q.kCGEventLeftMouseDragged,
+              Q.kCGEventRightMouseDown, Q.kCGEventRightMouseUp, Q.kCGEventScrollWheel)
+
+BURST = [False]  # inside a multi-click: the guard ran once just before; no per-event delay (egui double-click window is 0.3 s)
+
 def post(e):
-    if not frontmost_ok():
-        raise SystemExit("ABORT: %s is not the frontmost app (front=%r); no event sent" % (APP if PID[0] is None else "pid %d" % PID[0], frontmost_name()))
+    if BURST[0]: return raw_post(e)
+    if PID[0] is None:  # name-prefix fallback (cannot tell instances apart); --pid is the supported mode
+        if not frontmost_ok():
+            raise SystemExit("ABORT: %s is not the frontmost app (front=%r); no event sent" % (APP, frontmost_name()))
+        return raw_post(e)
+    x = y = None
+    if Q.CGEventGetType(e) in MOUSE_LIKE:
+        p = Q.CGEventGetLocation(e); x, y = p.x, p.y
+    ok, detail = guard_state(PID[0], x, y)
+    if not ok:
+        log("GUARD mismatch, event NOT posted: " + detail + "; trying `front` once")
+        activate_bound()
+        ok, detail = guard_state(PID[0], x, y)
+        if not ok:
+            log("GUARD ABORT: bound app is still not in front, no event sent: " + detail)
+            release_mods()
+            sys.exit(3)
     raw_post(e)
 
 def flags_of(mods):
@@ -107,10 +166,17 @@ def click(x, y, button="left", n=1, mods=()):
         move(x, y, fl)
         if button == "left": d, u, b = Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp, Q.kCGMouseButtonLeft
         else: d, u, b = Q.kCGEventRightMouseDown, Q.kCGEventRightMouseUp, Q.kCGMouseButtonRight
+        if n > 1:
+            # fresh guard once (aborts like post() does), then post the burst without per-event guard delay:
+            # per-event guard checks (about 50 ms each) stretched a double-click past egui's 0.3 s window in the 0026 D2 run.
+            probe = Q.CGEventCreateMouseEvent(None, Q.kCGEventMouseMoved, (x, y), Q.kCGMouseButtonLeft)
+            post(probe)
+            BURST[0] = True
         for i in range(1, n + 1):
             mouse(d, x, y, b, fl, i); time.sleep(0.03)
             mouse(u, x, y, b, fl, i); time.sleep(0.08)
     finally:
+        BURST[0] = False
         for m in mods: mod_up(m)
 
 def drag(x1, y1, x2, y2):
@@ -120,6 +186,21 @@ def drag(x1, y1, x2, y2):
     for i in range(1, steps + 1):
         mouse(Q.kCGEventLeftMouseDragged, x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps); time.sleep(0.03)
     mouse(Q.kCGEventLeftMouseUp, x2, y2, state=1); time.sleep(0.1)
+
+def wheel(x, y, dx, dy, mods=()):
+    """Scroll wheel at screen point (x, y): pixel units, dy>0 scrolls up / content down, dx>0 scrolls left (CGEvent
+    convention). Sent in 6 steps of dx/6, dy/6 so egui sees a smooth gesture. Pinch has no CGEvent equivalent here."""
+    for m in mods: mod_down(m)
+    try:
+        move(x, y, flags_of(mods))
+        n = 6
+        for _ in range(n):
+            e = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitPixel, 2, int(round(dy / n)), int(round(dx / n)))
+            Q.CGEventSetFlags(e, flags_of(mods))
+            post(e); time.sleep(0.03)
+        time.sleep(0.1)
+    finally:
+        for m in mods: mod_up(m)
 
 def key(name, mods=()):
     code = KEYS[name]
@@ -167,6 +248,25 @@ def shot(name):
     sw, sh = screen_pts(); iw, ih = img_size(s)
     log("shot %s: _s=%dx%d screen_pts=%dx%d factor=%.4f (screen_pt = _s_pixel * factor) window{pos,size}=%s" % (name, iw, ih, sw, sh, sw / iw, w))
 
+def winshot(name):
+    """Window-only capture (no shadow, `screencapture -o -l <windowid>`) of the largest on-screen layer-0 window of
+    --pid; full pixels (2x on Retina), NAME is a base name under SHOT_DIR or an absolute path (without .png)."""
+    if PID[0] is None: raise SystemExit("ABORT: winshot needs --pid")
+    infos = Q.CGWindowListCopyWindowInfo(Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements, Q.kCGNullWindowID) or []
+    best = None
+    for w in infos:
+        if int(w.get("kCGWindowOwnerPID", -1)) != PID[0] or w.get("kCGWindowLayer", 1) != 0: continue
+        b = w.get("kCGWindowBounds") or {}
+        area = b.get("Width", 0) * b.get("Height", 0)
+        if best is None or area > best[0]: best = (area, int(w["kCGWindowNumber"]), b)
+    if best is None: raise SystemExit("ABORT: winshot found no window of pid %d" % PID[0])
+    p = name if os.path.isabs(name) else os.path.join(SHOT_DIR, name)
+    if not p.endswith(".png"): p += ".png"
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    subprocess.run(["screencapture", "-x", "-o", "-l", str(best[1]), p], check=True)
+    iw, ih = img_size(p)
+    log("winshot %s: window id %d bounds(pts) %gx%g at %g,%g -> %dx%d px, %d bytes" % (p, best[1], best[2]["Width"], best[2]["Height"], best[2]["X"], best[2]["Y"], iw, ih, os.path.getsize(p)))
+
 LAST_SHOT = [None]  # full-resolution PNG of the most recent `shot` in this run
 
 def crop(name, x, y, w, h):
@@ -196,10 +296,12 @@ def run(cmd):
     elif op == "shift_click": x, y = f(); click(x, y, mods=("shift",))
     elif op in ("move", "hover"): x, y = f(); move(x, y)
     elif op == "drag": drag(*f())
+    elif op == "wheel": a = rest.split(); wheel(*map(float, a[:4]), mods=a[4:])  # wheel X Y DX DY [shift|cmd|alt|ctrl ...]
     elif op == "type": type_text(rest)
     elif op == "key": p = rest.split(); key(p[0], p[1:])
     elif op == "release_mods": release_mods()
     elif op == "shot": shot(rest.strip())
+    elif op == "winshot": winshot(rest.strip())
     elif op == "crop":
         a = rest.split(); crop(a[0], *map(float, a[1:5]))
     elif op == "note": log("NOTE " + rest)  # free text into action.log (step markers, expected values)
@@ -221,6 +323,13 @@ def run(cmd):
         except RuntimeError as e:
             raise SystemExit("ABORT: winsize needs Accessibility for the terminal (%s). Fallback: `winfo`, then "
                              "`drag` the bottom-right window corner by the size delta." % e)
+        time.sleep(0.8); log("window now " + winfo())
+    elif op == "winpos":
+        x, y = map(int, rest.split())
+        try:
+            osa('tell application "System Events" to tell %s to set position of window 1 to {%d, %d}' % (se_process(), x, y))
+        except RuntimeError as e:
+            raise SystemExit("ABORT: winpos needs Accessibility for the terminal (%s)" % e)
         time.sleep(0.8); log("window now " + winfo())
     elif op == "clip": t = pbpaste(); log("clipboard %d bytes:" % len(t)); print(repr(t.decode("utf-8", "replace")), flush=True)
     elif op == "clipclear": subprocess.run(["pbcopy"], input=b""); log("clipboard cleared")
@@ -244,9 +353,28 @@ def load_script(path, vars_):
     if bad: raise SystemExit("ABORT: unresolved placeholders (use --set NAME=VALUE), nothing executed:\n  " + "\n  ".join(bad))
     return out
 
+def selftest_guard():
+    """Proves the guard comparison without posting any event: the fresh front pid passes, any other pid fails,
+    a point outside every window yields no owner. Exit 0 when all hold."""
+    ok_fail = True
+    front = int(frontmost_app().processIdentifier()) if (_pump() or True) and frontmost_app() else None
+    top = window_owner_at()
+    print("fresh: active pid=%s, topmost window pid=%s" % (front, top))
+    if front is None or top is None:
+        print("SELFTEST SKIP: no frontmost application or no on-screen window"); return
+    good, d1 = guard_state(top) if front == top else (False, "")
+    bad, d2 = guard_state(top + 1 if top < 2**30 else 1)
+    print("bound=topmost pid -> ok=%s (%s)" % (good if front == top else "n/a (active != topmost window owner)", d1))
+    print("bound=other pid   -> ok=%s (%s)" % (bad, d2))
+    if bad: print("SELFTEST FAIL: a non-front pid passed the guard"); ok_fail = False
+    if front == top and not good: print("SELFTEST FAIL: the front pid did not pass"); ok_fail = False
+    if window_owner_at(-5000, -5000) is not None: print("SELFTEST FAIL: owner found at an off-screen point"); ok_fail = False
+    print("SELFTEST %s" % ("OK" if ok_fail else "FAILED")); sys.exit(0 if ok_fail else 1)
+
 def main(argv):
     vars_ = {"FIXTURES": os.path.normpath(os.path.join(HERE, "..", "fixtures")),
              "EXAMPLES": os.path.normpath(os.path.join(HERE, "..", "..", "examples")), "SHOT_DIR": SHOT_DIR}
+    if argv and argv[0] == "--selftest-guard": return selftest_guard()
     check = False
     while argv and argv[0] in ("--set", "--check", "--pid"):
         if argv[0] == "--check": check = True; argv = argv[1:]

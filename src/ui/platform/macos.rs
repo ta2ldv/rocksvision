@@ -53,6 +53,9 @@ pub struct NativeMenu {
     items: Vec<(MenuCmd, Retained<NSMenuItem>)>,
     /// Last applied (enabled, checked) per item.
     applied: Vec<(bool, bool)>,
+    /// Native item tooltips (View › Show Tooltips gates them too) and whether they are shown.
+    tips: Vec<(usize, String)>,
+    tips_on: bool,
 }
 
 impl NativeMenu {
@@ -71,7 +74,8 @@ impl NativeMenu {
             }
         }
         NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
-        Some(NativeMenu { _target: target, applied: vec![(true, false); items.len()], items })
+        let tips = tips_of(&tree());
+        Some(NativeMenu { _target: target, applied: vec![(true, false); items.len()], items, tips, tips_on: true })
     }
 
     /// Mirrors enabled/checked state from the app (only changed items are touched).
@@ -84,12 +88,42 @@ impl NativeMenu {
                 self.applied[i] = s;
             }
         }
+        let on = st.prefs().tooltips();
+        if on != self.tips_on {
+            for (i, t) in &self.tips {
+                if let Some((_, item)) = self.items.get(*i) {
+                    item.setToolTip(on.then(|| NSString::from_str(t)).as_deref());
+                }
+            }
+            self.tips_on = on;
+        }
     }
 
     pub fn take_commands(&mut self) -> Vec<MenuCmd> {
         let tags: Vec<isize> = QUEUE.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
         tags.into_iter().filter_map(|t| usize::try_from(t).ok().and_then(|i| self.items.get(i)).map(|x| x.0)).collect()
     }
+}
+
+/// (item index, tooltip text) of every item with a tooltip, in the order `submenu` adds items.
+fn tips_of(nodes: &[MenuNode]) -> Vec<(usize, String)> {
+    fn walk(nodes: &[MenuNode], i: &mut usize, out: &mut Vec<(usize, String)>) {
+        for n in nodes {
+            match n {
+                MenuNode::Item { cmd, tip, .. } => {
+                    if let Some(t) = tip {
+                        out.push((*i, menu::tip(t, *cmd)));
+                    }
+                    *i += 1;
+                }
+                MenuNode::Submenu { items, .. } => walk(items, i, out),
+                MenuNode::Separator => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, &mut 0, &mut out);
+    out
 }
 
 fn submenu(mtm: MainThreadMarker, target: &MenuTarget, title: &str, nodes: &[MenuNode], items: &mut Vec<(MenuCmd, Retained<NSMenuItem>)>) -> Retained<NSMenuItem> {

@@ -1,0 +1,17 @@
+front
+click 700 700
+sleep 0.5
+shot a5_00_map_confirmed
+key tab
+sleep 0.4
+shot a5_01_tab
+key up
+sleep 0.4
+shot a5_02_up
+key return
+sleep 2.5
+shot a5_03_enter
+click 460 150
+sleep 2
+move 700 800
+shot a5_04_back

@@ -1,0 +1,36 @@
+# 0026 J2: db-levels (multi-level, empty level) and level cards, matrix B/C. DRAFT for phase 2.
+# Run: --set W=900 --set H=700 (B), plus app zoom 160% for C. Optionally in all six themes (static capture only): THEME_ITEM_X/Y per theme in the View menu.
+# Placeholders: PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y CFSEL_X CFSEL_Y CFITEM_X CFITEM_Y (cf_users or cf_events entry), TITLE_EMPTY_X TITLE_EMPTY_Y (an `empty` level frame title),
+#   TITLE_L1_X TITLE_L1_Y, BOX_ANY_X BOX_ANY_Y, CROP_MAP_X CROP_MAP_Y CROP_MAP_W CROP_MAP_H, VIEW_X VIEW_Y (View menu), THEME_ITEM_X THEME_ITEM_Y.
+# Expect: no 150 pt header column, titles in one line (hiding order note, bytes, status), box shows at least the file number, empty level `L3 · empty (0 files in MANIFEST)`.
+front
+winsize {{W}} {{H}}
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-levels
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 2
+shot j2_01_default_cf
+click {{CFSEL_X}} {{CFSEL_Y}}
+click {{CFITEM_X}} {{CFITEM_Y}}
+sleep 1
+shot j2_02_other_cf
+note STEP click empty-level title, then an L1+ title
+click {{TITLE_EMPTY_X}} {{TITLE_EMPTY_Y}}
+sleep 1
+shot j2_03_empty_level_card
+click {{TITLE_L1_X}} {{TITLE_L1_Y}}
+sleep 1
+shot j2_04_l1_card
+note STEP hover a box (tooltip placement, one pair)
+move {{BOX_ANY_X}} {{BOX_ANY_Y}}
+sleep 2
+shot j2_05_hover
+note STEP static theme capture: open View menu, pick next theme, shoot (repeat per theme by re-running with new THEME_ITEM)
+click {{VIEW_X}} {{VIEW_Y}}
+click {{THEME_ITEM_X}} {{THEME_ITEM_Y}}
+sleep 1
+shot j2_06_theme

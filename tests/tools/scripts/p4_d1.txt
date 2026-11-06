@@ -1,0 +1,14 @@
+# P4 item 7 part 1: scratch copy of db-levels, CURRENT, Observed levels table.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/levels-copy
+click 773 120
+sleep 2.5
+click 313 524
+sleep 1.5
+move 900 750
+sleep 0.4
+shot p4_14_levels_table

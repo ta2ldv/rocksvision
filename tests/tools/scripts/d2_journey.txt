@@ -1,0 +1,46 @@
+front
+click 208 18
+sleep 0.6
+click 214 230
+sleep 0.6
+click {{TX}} {{TY}}
+sleep 1.0
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/many-sst
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 1380 880
+click 826 406
+sleep 1.0
+move 1380 880
+shot {{N}}_j_a3_zoom
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+click 592 204
+sleep 0.8
+click 501 273
+sleep 1.0
+move 1380 880
+shot {{N}}_j_a5_cards
+key m cmd shift
+key up
+sleep 0.6
+shot {{N}}_j_a2_ring_up
+move 850 472
+sleep 1.5
+shot {{N}}_j_map_tip
+click 556 151
+sleep 1
+click 211 296
+sleep 1
+move 535 426
+sleep 1.5
+shot {{N}}_j_b_table_tip

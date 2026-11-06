@@ -1,0 +1,8 @@
+# P4 item 8: full-window shots of the map, 1400x900 then 900x560; then quit.
+front
+shot p4_08_map_1400
+winsize 900 560
+sleep 1.5
+shot p4_08_map_900x560
+key q cmd
+sleep 1

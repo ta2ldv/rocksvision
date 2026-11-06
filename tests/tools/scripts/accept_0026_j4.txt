@@ -1,0 +1,61 @@
+# 0026 J4: WAL band, one folder per run. DRAFT for phase 2. Generate folders first: bash tests/tools/mk-wal-fixtures-0026.sh
+# Run: --set DIR=<folder> (see table) --set EXPECT=<text>; one run per row, XCopy, matrix A (and C once for many-wal).
+#   DIR=/Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db   EXPECT: `– not scanned`/`… scanning` then `✔ <n> rec · seq a..b`
+#   DIR=/Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint   EXPECT: `· empty (0 B)`, membership per CF (3 CFs) honest (0-byte file: see report, "none seen" vs "unknown" decided by the app)
+#   DIR=/private/tmp/rocksvision-wal0026/no-wal       EXPECT: `No WAL files found in this folder.`
+#   DIR=/private/tmp/rocksvision-wal0026/corrupt-wal  EXPECT: `✖ corrupt at 0x..` (byte 54 of 108 flipped)
+#   DIR=/private/tmp/rocksvision-wal0026/big-wal      EXPECT: `≈ partial: first N rec` (17.9 MB > 16 MiB limit), membership `unknown`
+#   DIR=/private/tmp/rocksvision-wal0026/many-wal     EXPECT: `+N older WAL files (...)` summary box; WAL 32-file summary cap: some WALs NotScanned; click summary -> counts, first 50 names
+#   DIR=/private/tmp/rocksvision-wal0026/multi-cf     EXPECT: 000014.log membership seen for 2 CFs (CF0, CF1), corrupt at recycled tail (known, D0 report); 000011.log Done
+# Placeholders: PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y CFSEL_X CFSEL_Y CFITEM1_X CFITEM1_Y CFITEM2_X CFITEM2_Y (two different CFs),
+#   WAL1_X WAL1_Y (first/newest WAL box), WALSUM_X WALSUM_Y (summary box, many-wal only), CROP_BAND_X CROP_BAND_Y CROP_BAND_W CROP_BAND_H (WAL band rect), BACK_X BACK_Y (Back button).
+# Assumed D1 UI: WAL band pinned above L0 levels, click selects (WAL card in Explanation), dclick opens WAL (history entry), Back returns with the same CF + WAL focused.
+front
+winsize 1400 900
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type {{DIR}}
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+note STEP1 immediately after the map opens: capture early (scan state may be `not scanned`/`scanning`)
+sleep 0.2
+shot j4_01_early
+crop j4_01_band_early {{CROP_BAND_X}} {{CROP_BAND_Y}} {{CROP_BAND_W}} {{CROP_BAND_H}}
+sleep 3
+shot j4_02_settled
+crop j4_02_band_settled {{CROP_BAND_X}} {{CROP_BAND_Y}} {{CROP_BAND_W}} {{CROP_BAND_H}}
+note STEP2 expected: {{EXPECT}}
+note STEP3 switch CF twice: no WAL box may disappear (count boxes before/after)
+click {{CFSEL_X}} {{CFSEL_Y}}
+click {{CFITEM1_X}} {{CFITEM1_Y}}
+sleep 1
+shot j4_03_cf1
+click {{CFSEL_X}} {{CFSEL_Y}}
+click {{CFITEM2_X}} {{CFITEM2_Y}}
+sleep 1
+shot j4_04_cf2
+note STEP4 hover WAL box (tooltip must carry lifecycle text with `per MANIFEST`), click (WAL card), double-click (opens WAL), Back (same CF, WAL focused)
+move {{WAL1_X}} {{WAL1_Y}}
+sleep 2
+shot j4_05_hover_wal
+click {{WAL1_X}} {{WAL1_Y}}
+sleep 1
+shot j4_06_wal_card
+dclick {{WAL1_X}} {{WAL1_Y}}
+sleep 2
+shot j4_07_wal_opened
+click {{BACK_X}} {{BACK_Y}}
+sleep 2
+shot j4_08_back_to_map
+note STEP5 keyboard: Tab into the map, Up from the top level frame enters the WAL band, Enter opens, Back (esc not used)
+key tab
+key up
+shot j4_09_kb_wal_focus
+key return
+sleep 2
+shot j4_10_kb_opened
+click {{BACK_X}} {{BACK_Y}}
+sleep 2
+shot j4_11_kb_back

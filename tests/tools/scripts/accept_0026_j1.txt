@@ -1,0 +1,60 @@
+# 0026 J1 (XCopy and Amiga Tool Style, fresh HOME): multilevel-db, CF cf_users, matrix A/B/C. DRAFT for phase 2.
+# Run per matrix setting: --set W=1400 --set H=900  (A) | 900 700 (B) | 900 700 plus app zoom 160% (C: ZOOM_STEPS x `key equal cmd`).
+# Placeholders (known only after D1): PATH_X PATH_Y GO_X GO_Y (path field/Go), MAP_BTN_X MAP_BTN_Y (LSM Map button),
+#   CFSEL_X CFSEL_Y (CF selector in the strip), CFITEM_X CFITEM_Y (cf_users entry), STRIP_X STRIP_Y (strip right end: Center must be ABSENT),
+#   MAP_X MAP_Y (any point over the scene), EMPTY_X EMPTY_Y (empty lane-2 band left of 000018), BOX18_X BOX18_Y (000018), TITLE_L0_X TITLE_L0_Y (L0 title bar),
+#   CROP_MAP_X CROP_MAP_Y CROP_MAP_W CROP_MAP_H (map rect).
+# Assumes: no Center/Fit/-/+/xN in the strip (Fit mode); wheel does nothing: NOT DRIVABLE, gui-drive.py has no wheel/pinch command (coordinator to supply or mark NOT RUN);
+#   keys `+` `-` `0` `c` do nothing on the map; L0 title `L0 · 2 files · 4.1 KiB · ✔ 2 on disk · 2 overlap lanes`; axis ends "u-000" / "u-024"; caption sentence.
+front
+winsize {{W}} {{H}}
+sleep 1
+winfo
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 2
+note STEP1 expect Fit mode, no navigation controls
+shot j1_01_map
+crop j1_01_strip {{CROP_MAP_X}} {{STRIP_Y}} {{CROP_MAP_W}} 40
+note STEP2 select cf_users
+click {{CFSEL_X}} {{CFSEL_Y}}
+click {{CFITEM_X}} {{CFITEM_Y}}
+sleep 1
+shot j1_02_cf_users
+note STEP3 keys + - 0 c must not change the map (compare with j1_02)
+click {{MAP_X}} {{MAP_Y}}
+key equal
+key equal
+key c
+key 0
+sleep 0.5
+shot j1_03_after_keys
+note STEP4 hover empty band left of 000018, 2s (tooltip: names 000016, "Lanes only stack overlapping L0 files.", NO u-009, NO "missing keys")
+move {{EMPTY_X}} {{EMPTY_Y}}
+sleep 2
+shot j1_04_hover_empty
+crop j1_04_hover_empty_crop {{CROP_MAP_X}} {{CROP_MAP_Y}} {{CROP_MAP_W}} {{CROP_MAP_H}}
+note STEP5 click 000018 (dashed guides; Explanation has Lane: 2 of 2 and Overlap: 1 in L0 ... 000016 on "u-010" ... "u-014" marked derived)
+click {{BOX18_X}} {{BOX18_Y}}
+sleep 1
+shot j1_05_select_000018
+note STEP6 click L0 title bar (level card)
+click {{TITLE_L0_X}} {{TITLE_L0_Y}}
+sleep 1
+shot j1_06_level_card
+note STEP7 tooltips visible with default setting; hover 000018 again for before/after pair
+move {{BOX18_X}} {{BOX18_Y}}
+sleep 2
+shot j1_07_hover_box
+note END J1 (assess each STEP from its shot plus action.log; wheel check NOT RUN unless a wheel op exists)
+note STEP8 wheel in Fit mode must do nothing (compare with j1_07): vertical, shift and cmd wheel over the scene
+wheel {{MAP_X}} {{MAP_Y}} 0 -120
+shot j1_08_wheel_v
+wheel {{MAP_X}} {{MAP_Y}} 0 -120 shift
+shot j1_09_wheel_shift
+wheel {{MAP_X}} {{MAP_Y}} 0 120 cmd
+shot j1_10_wheel_cmd

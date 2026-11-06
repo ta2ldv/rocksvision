@@ -1,0 +1,21 @@
+# 0026 J3b: run AFTER j3 with the SAME HOME (launch-and-drive.sh with the same home dir): tooltips must still be OFF, then back ON.
+# Placeholders: PATH_X PATH_Y GO_X GO_Y MAP_BTN_X MAP_BTN_Y TOP_X TOP_Y VIEW_X VIEW_Y TOOLTIPS_ITEM_X TOOLTIPS_ITEM_Y
+front
+winsize 1400 900
+sleep 1
+click {{PATH_X}} {{PATH_Y}}
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click {{GO_X}} {{GO_Y}}
+sleep 2.5
+click {{MAP_BTN_X}} {{MAP_BTN_Y}}
+sleep 2
+move {{TOP_X}} {{TOP_Y}}
+sleep 2
+shot j3b_still_off
+click {{VIEW_X}} {{VIEW_Y}}
+click {{TOOLTIPS_ITEM_X}} {{TOOLTIPS_ITEM_Y}}
+sleep 0.5
+move {{TOP_X}} {{TOP_Y}}
+sleep 2
+shot j3b_on_again

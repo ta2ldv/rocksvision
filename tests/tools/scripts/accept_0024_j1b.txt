@@ -1,0 +1,26 @@
+# J1b: continues on running PID (menu open from j1a). Items 3-5 and CF combo discovery.
+key esc
+sleep 0.5
+shot j1b_00_menu_closed
+note ITEM4 select box 000009 (single click) then click active LSM Map button
+click 910 241
+sleep 1
+shot j1b_01_box_selected
+crop j1b_01_strip 400 125 1050 140
+click 443 119
+sleep 1.5
+shot j1b_02_table_after_active_click
+note ITEM5 Shift+Cmd+M toggles
+key m cmd shift
+sleep 1.5
+shot j1b_03_after_shiftcmdm_1
+key m cmd shift
+sleep 1.5
+shot j1b_04_after_shiftcmdm_2
+key m cmd shift
+sleep 1.5
+shot j1b_05_map_again
+note open CF combo
+click 583 204
+sleep 1
+shot j1b_06_combo

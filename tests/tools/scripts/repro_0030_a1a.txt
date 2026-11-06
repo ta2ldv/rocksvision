@@ -1,0 +1,8 @@
+# 0030 P1 item 6 (A1): advanced example CF default map at 900x560
+front
+winsize 900 560
+sleep 1.5
+winfo
+move 1000 400
+sleep 0.5
+shot a1_1_900x560

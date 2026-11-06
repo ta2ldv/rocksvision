@@ -1,0 +1,7 @@
+front
+click 592 204
+sleep 0.7
+click 501 251
+sleep 1
+move 700 900
+shot d2_01_cf_users

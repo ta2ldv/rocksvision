@@ -1,0 +1,13 @@
+# open DIR (--set via env not available in launch-and-drive; this one opens multilevel-db)
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/multilevel-db
+click 773 120
+sleep 2.5
+click 446 118
+sleep 4
+move 700 1000
+shot d2_00_map_default_bytes_shown

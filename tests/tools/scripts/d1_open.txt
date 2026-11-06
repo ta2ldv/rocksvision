@@ -1,0 +1,11 @@
+# open DIR at window W x H (Go button GOX GOY), shot TAG
+front
+winsize {{W}} {{H}}
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+move 1380 880
+shot {{TAG}}

@@ -1,0 +1,9 @@
+# 0030 hero: size the window to the full display and capture window-only (probe)
+front
+winpos 0 38
+winsize 1728 1079
+winpos 0 38
+winfo
+sleep 1
+winshot /private/tmp/rocksvision-0030/hero-shots/probe_window
+shot hero_probe

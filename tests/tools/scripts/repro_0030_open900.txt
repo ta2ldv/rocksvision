@@ -1,0 +1,12 @@
+# open DIR at narrow window (Go button at screen 1039,120), then shot TAG
+front
+winsize {{W}} {{H}}
+sleep 1
+winfo
+click 619 120
+key a cmd
+type {{DIR}}
+click 1039 120
+sleep 2.5
+move 900 650
+shot {{TAG}}

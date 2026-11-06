@@ -174,6 +174,11 @@ pub fn escape_key(bytes: &[u8], max: usize) -> String {
     out
 }
 
+/// `s` cut to at most `max` characters, ending in `…` when cut.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() > max { format!("{}…", s.chars().take(max).collect::<String>()) } else { s.to_string() }
+}
+
 pub fn human_size(n: u64) -> String {
     const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
@@ -185,9 +190,35 @@ pub fn human_size(n: u64) -> String {
     if i == 0 { format!("{n} B") } else { format!("{v:.1} {} ({n} B)", U[i]) }
 }
 
+/// "2026-11-06 09:47:10 UTC" (whole seconds; days-to-civil of the proleptic Gregorian calendar,
+/// H. Hinnant's algorithm). Times before 1970 are "before 1970".
+pub fn utc_time(t: std::time::SystemTime) -> String {
+    let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) else { return "before 1970".into() };
+    let s = d.as_secs();
+    let (days, rem) = ((s / 86_400) as i64, s % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC", rem / 3600, rem / 60 % 60, rem % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn utc_time_known_dates() {
+        let at = |s: u64| utc_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(s));
+        assert_eq!(at(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(at(951_782_400), "2000-02-29 00:00:00 UTC");
+        assert_eq!(at(1_793_958_430), "2026-11-06 09:47:10 UTC");
+        assert_eq!(utc_time(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1)), "before 1970");
+    }
     #[test]
     fn crc32c_known_vectors() {
         // RFC 3720 test vector: 32 zero bytes.

@@ -1,0 +1,38 @@
+front
+click 207 213
+sleep 0.8
+click 300 524
+sleep 1.2
+move 1380 880
+sleep 0.4
+move 450 270
+sleep 0.5
+shot b2_cf_t1
+sleep 1.0
+shot b2_cf_t2
+move 520 270
+sleep 0.6
+shot b2_row_move_cf_to_file
+move 700 272
+sleep 0.8
+shot b2_row_move_to_size
+move 1380 880
+sleep 0.4
+move 713 151
+sleep 1.3
+shot b2_title
+move 1380 880
+sleep 0.4
+move 520 226
+sleep 1.2
+shot b2_header_file
+move 760 226
+sleep 1.2
+shot b2_header_smallest
+move 1380 880
+sleep 0.4
+move 450 300
+sleep 0.8
+click 450 300
+sleep 0.8
+shot b2_cf_row_selected

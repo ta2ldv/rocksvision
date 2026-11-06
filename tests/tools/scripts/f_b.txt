@@ -1,0 +1,40 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 207 213
+sleep 0.8
+click 300 524
+sleep 1.2
+click 517 151
+sleep 1
+move 1380 880
+sleep 0.5
+note case a: no-tip cell (Size) 1 s, jump to File cell same row, still
+move 740 297
+sleep 1.0
+move 630 297
+sleep 0.5
+shot b_a_0.5
+sleep 0.5
+shot b_a_1.0
+sleep 0.6
+shot b_a_1.6
+move 1380 880
+sleep 0.6
+note case b: from the CF cell with its tip open, to the File cell of the next row
+move 450 300
+sleep 1.4
+shot b_b_cf_tip_open
+move 630 324
+sleep 0.5
+shot b_b_0.5
+sleep 0.5
+shot b_b_1.0
+sleep 0.6
+shot b_b_1.6
+move 1380 880

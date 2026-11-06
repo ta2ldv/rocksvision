@@ -1,0 +1,9 @@
+front
+click 465 411
+sleep 0.8
+move 1380 880
+shot a7_2_level_selected
+click 465 439
+sleep 0.8
+move 1380 880
+shot a7_3_cf_selected

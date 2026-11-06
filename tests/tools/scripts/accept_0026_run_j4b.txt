@@ -1,0 +1,28 @@
+front
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-wal0026/multi-cf-sst
+click 773 120
+sleep 2.5
+click 446 118
+sleep 4
+move 700 900
+shot j4b_01_map
+move 498 278
+sleep 2
+shot j4b_02_hover_wal4
+move 619 278
+sleep 2
+shot j4b_03_hover_wal8
+click 498 278
+sleep 1
+move 700 900
+sleep 0.5
+shot j4b_04_select_wal4
+dclick 498 278
+sleep 2.5
+shot j4b_05_wal_opened
+click 460 150
+sleep 2
+move 700 900
+shot j4b_06_back

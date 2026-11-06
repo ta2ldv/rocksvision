@@ -1,0 +1,5 @@
+# Task 0024 Back repro, pass 1 (coordinates only): fresh launch shot, no clicks. Ends by quitting the app.
+front
+sleep 1
+shot p1_00_launch
+key q cmd

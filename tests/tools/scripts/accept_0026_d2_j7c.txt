@@ -1,0 +1,6 @@
+front
+click 864 458
+sleep 0.6
+key return
+sleep 3
+shot j7c_01_after_enter_sst

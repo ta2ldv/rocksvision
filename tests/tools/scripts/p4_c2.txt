@@ -1,0 +1,8 @@
+# P4 item 6: Observed levels node, note about invalid CURRENT.
+front
+click 313 396
+sleep 1.5
+move 900 700
+sleep 0.4
+shot p4_13_levels
+crop p4_13_note 400 120 760 200

@@ -1,0 +1,22 @@
+# J1g: items 6,7. Copy menu is open from j1f. SST 000013 open, format_version row selected.
+front
+clipclear
+click 1355 230
+sleep 0.5
+clipsave j1g_clip_before
+note ITEM6 LSM Map from SST
+click 443 119
+sleep 2
+shot j1g_01_map_from_sst
+crop j1g_01_strip 400 125 1050 200
+note ITEM7 Back
+click 456 151
+sleep 2
+shot j1g_02_after_back
+clipclear
+click 1325 121
+sleep 0.8
+click 1355 230
+sleep 0.5
+clipsave j1g_clip_after
+shot j1g_03_after_copy

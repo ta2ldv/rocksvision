@@ -3,6 +3,7 @@
 //! item maps to one `app::Action`; the same action is used by the toolbar, the panel chevrons
 //! and the keyboard. `shortcut_table()` is the single source of shortcut text.
 
+use super::panels::TipExt;
 use super::theme::{THEMES, Tokens};
 use crate::app::{Action, AppState, Panel};
 use eframe::egui;
@@ -105,6 +106,10 @@ pub enum MenuCmd {
     Theme(usize),
     TogglePanel(Panel),
     ResetView,
+    /// View › LSM Map (Shift+⌘M): the toolbar button's action.
+    LsmMap,
+    /// View › Show Tooltips (checked, persisted).
+    ToggleTooltips,
     /// Next (true) / previous field in span order — window key `]` / `[`.
     StepField(bool),
     /// Next (true) / previous sibling structure — window key `Shift+]` / `Shift+[`.
@@ -126,6 +131,9 @@ fn item(cmd: MenuCmd, title: &'static str, shortcut: Option<Shortcut>) -> MenuNo
 /// Reset View contract (toolbar tooltip and native menu item tooltip); shown through `tip`,
 /// which appends the shortcut ("… (Shift+⌘R)" / "… (Ctrl+Shift+R)").
 pub const RESET_VIEW_TIP: &str = "Restore default panel widths, the records/bytes split, panel visibility and 100% zoom. Keeps the open file, selection, search and theme. Does not resize the window.";
+/// LSM Map menu item tooltip (the toolbar button has context-specific texts, `toolbar`).
+pub const LSM_MAP_TIP: &str = "Show the live SST files of the active MANIFEST as a map by column family and level";
+
 /// Reset View tooltip while the view is already at its defaults (button disabled).
 pub const RESET_VIEW_DEFAULT_TIP: &str = "View is already at defaults (window size is not part of the view)";
 
@@ -165,6 +173,8 @@ pub fn tree() -> Vec<MenuNode> {
                 MenuNode::Separator,
                 MenuNode::Submenu { title: "Theme", items: themes },
                 MenuNode::Separator,
+                MenuNode::Item { cmd: C::LsmMap, title: "LSM Map", shortcut: shift_cmd("m"), hidden: false, tip: Some(LSM_MAP_TIP) },
+                MenuNode::Separator,
                 item(C::TogglePanel(Panel::Navigation), "Navigation Panel", alt_cmd("1")),
                 item(C::TogglePanel(Panel::Explanation), "Explanation Panel", alt_cmd("2")),
                 item(C::TogglePanel(Panel::Bytes), "Byte View", alt_cmd("3")),
@@ -176,6 +186,7 @@ pub fn tree() -> Vec<MenuNode> {
                 MenuNode::Item { cmd: C::StepStructure(false), title: "Previous Structure  Shift+[", shortcut: None, hidden: false, tip: Some("Previous sibling structure in file order (Shift+[)") },
                 MenuNode::Separator,
                 MenuNode::Item { cmd: C::ResetView, title: "Reset View", shortcut: shift_cmd("r"), hidden: false, tip: Some(RESET_VIEW_TIP) },
+                item(C::ToggleTooltips, "Show Tooltips", None),
             ],
         },
         MenuNode::Submenu { title: "Help", items: vec![item(C::Help, "RocksVision Help", None), item(C::Shortcuts, "Keyboard Shortcuts", None)] },
@@ -184,7 +195,7 @@ pub fn tree() -> Vec<MenuNode> {
 
 impl MenuCmd {
     /// The application action of this item (None for items handled natively).
-    pub fn action(self, _st: &AppState) -> Option<Action> {
+    pub fn action(self, st: &AppState) -> Option<Action> {
         use MenuCmd as C;
         Some(match self {
             C::About => Action::ShowAbout,
@@ -203,6 +214,8 @@ impl MenuCmd {
             C::Theme(i) => Action::SetTheme(THEMES.get(i)?.id),
             C::TogglePanel(p) => Action::TogglePanel(p),
             C::ResetView => Action::ResetView,
+            C::LsmMap => Action::ShowLsmMap,
+            C::ToggleTooltips => Action::SetTooltips(!st.prefs().tooltips()),
             C::StepField(f) => Action::StepField(f),
             C::StepStructure(f) => Action::StepStructure(f),
             C::Help => Action::ShowHelp,
@@ -219,6 +232,8 @@ impl MenuCmd {
             C::ZoomIn | C::ZoomInPlus => (st.can_zoom_in(), false),
             C::Theme(i) => (true, THEMES.get(i).map(|t| t.id == st.prefs().theme_id()).unwrap_or(false)),
             C::TogglePanel(p) => (true, st.prefs().shown(p)),
+            C::LsmMap => st.session().lsm_map_entry_state(),
+            C::ToggleTooltips => (true, st.prefs().tooltips()),
             _ => (true, false),
         }
     }
@@ -271,6 +286,8 @@ fn window_keys(l: KeyLabels) -> Vec<(String, &'static str)> {
         ("Up Down PgUp PgDn Home End".to_string(), "Move through table rows"),
         ("Left / Right".to_string(), "Fold / unfold the selected tree node"),
         ("Enter".to_string(), "Follow the selected row's link"),
+        ("Arrows / Home / End".to_string(), "LSM Map: move between file boxes (Enter opens)"),
+        ("+ / - / 0".to_string(), "LSM Map: map zoom in / out / Fit (never the app zoom)"),
         ("] / [".to_string(), "Next / previous field (span order)"),
         ("Shift+] / Shift+[".to_string(), "Next / previous structure (file order)"),
         ("Click a byte".to_string(), "Select the field that holds it (the byte stays outlined)"),
@@ -323,7 +340,7 @@ pub fn show_fallback(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, nodes: &[Me
                 let mut r = ui.add_enabled(enabled, b);
                 tok.menu_item_hover(ui, &r);
                 if let Some(t) = tip {
-                    r = r.on_hover_text(self::tip(t, *cmd));
+                    r = r.tip(self::tip(t, *cmd));
                 }
                 if r.clicked() {
                     chosen = Some(*cmd);
@@ -381,6 +398,8 @@ mod tests {
         assert_eq!(t.iter().filter(|x| x.1 == "Zoom In").count(), 1);
         assert_eq!(tip_in("Hide Navigation", MenuCmd::TogglePanel(Panel::Navigation), KeyLabels::Mac), "Hide Navigation (Option+⌘1)");
         assert_eq!(find("Back"), "Option+Left");
+        assert_eq!(find("LSM Map"), "Shift+⌘M", "never ⌘M (Minimize)");
+        assert!(t.iter().all(|x| x.1 != "Show Tooltips"), "no shortcut for Show Tooltips");
         assert_eq!(tip_in(RESET_VIEW_TIP, MenuCmd::ResetView, KeyLabels::Mac), format!("{RESET_VIEW_TIP} (Shift+⌘R)"));
         assert_eq!(panel_keys(KeyLabels::Mac), "Option+⌘1/2/3");
         for (k, _) in &t {
@@ -401,6 +420,7 @@ mod tests {
         assert_eq!(find("Navigation Panel"), "Ctrl+Alt+1");
         assert_eq!(find("Zoom Out"), "Ctrl+−");
         assert_eq!(find("Back"), "Alt+Left");
+        assert_eq!(find("LSM Map"), "Ctrl+Shift+M");
         assert_eq!(tip_in("Hide Navigation", MenuCmd::TogglePanel(Panel::Navigation), l), "Hide Navigation (Ctrl+Alt+1)");
         assert_eq!(panel_keys(l), "Ctrl+Alt+1/2/3");
         assert_eq!(Shortcut { cmd: true, shift: true, alt: true, key: "x" }.label_in(l), "Ctrl+Alt+Shift+X");

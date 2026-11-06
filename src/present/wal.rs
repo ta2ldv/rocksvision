@@ -411,7 +411,11 @@ impl LogInspector {
             NodeKind::LogRecords { start, .. } => self.records_view(*start, cancel),
             NodeKind::LogRecord(o) => self.record_view(*o),
             NodeKind::WalOp { rec, idx } => self.op_view(*rec, *idx),
-            NodeKind::ManifestLevels => super::manifest::levels_view(&manifest::observed_levels(self.reader(), cancel), self.path().parent(), exists),
+            NodeKind::ManifestLevels => {
+                let via = self.path().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "MANIFEST".into());
+                let src = super::manifest::LevelsSource { via, dir: self.path().parent(), exists, wals: None, active: super::manifest::Active::NoCurrent };
+                super::manifest::levels_view(&manifest::observed_levels(self.reader(), cancel), &src)
+            }
             _ => error_view("Unsupported node", Status::Unsupported, "node not handled by the log inspector"),
         }
     }

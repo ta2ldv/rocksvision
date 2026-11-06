@@ -1,0 +1,4 @@
+front
+click 549 495
+sleep 1
+shot d_03_hidebytes

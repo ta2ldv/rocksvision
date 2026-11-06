@@ -1,0 +1,35 @@
+# 0030 P1 items 1b + 2: CF cell + title tooltips, then A8 Table/Map/Table and Reset View. Observed levels table is open.
+front
+note B2 hover CF cell "0 default"
+move 464 302
+sleep 0.3
+shot b2_cf_t1
+sleep 1.0
+shot b2_cf_t2
+move 1380 900
+sleep 0.5
+note B2 hover title
+move 713 151
+sleep 0.3
+shot b2_title_t1
+sleep 1.0
+shot b2_title_t2
+move 1380 900
+sleep 0.4
+note A8 before: Table, 1400x900, byte pane shown
+shot a8_1_table_before
+note A8 click Map segment
+click 557 151
+sleep 1.2
+move 1380 900
+shot a8_2_map
+note A8 click Table segment
+click 517 151
+sleep 1.2
+move 1380 900
+shot a8_3_table_after
+note A8 Reset View
+click 1512 120
+sleep 1.0
+move 1380 900
+shot a8_4_after_reset_view

@@ -1,0 +1,12 @@
+# P4 item 6: open MANIFEST by path next to a garbage CURRENT.
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0024/scratch/badcurrent/MANIFEST-000005
+click 773 120
+sleep 2.5
+move 900 650
+sleep 0.4
+shot p4_12_opened

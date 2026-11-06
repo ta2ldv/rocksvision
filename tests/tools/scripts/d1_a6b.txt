@@ -1,0 +1,5 @@
+# A6/A5: open the CF selector, choose cf_two, then hover/select the WAL cards (membership glyphs)
+front
+click 592 203
+sleep 0.8
+shot a6_6_cf_dropdown

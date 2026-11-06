@@ -1,0 +1,37 @@
+# J1a (XCopy, fresh HOME): items 1,2,3(view menu). Coordinates from disc shots, factor 1.08.
+# LSM Map button 443,119; path field 619,120; Go 773,120; View menu 208,18
+front
+winsize 1400 900
+sleep 1
+winfo
+shot j1_01_launch
+note ITEM1 hover disabled LSM Map 1.8s
+move 443 119
+sleep 1.8
+shot j1_01_hover
+crop j1_01_hover_crop 150 90 600 160
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+shot j1_02_opened
+crop j1_02_toolbar_before 150 90 1300 40
+note ITEM1b hover now-enabled LSM Map
+move 443 119
+sleep 1.8
+shot j1_02_hover_enabled
+crop j1_02_hover_enabled_crop 150 90 600 160
+note ITEM2 click LSM Map
+click 443 119
+sleep 2
+shot j1_03_map
+crop j1_03_toolbar_active 150 90 1300 40
+move 443 119
+sleep 1.8
+shot j1_03_hover_active
+crop j1_03_hover_active_crop 150 90 600 160
+note ITEM3 open View menu
+click 208 18
+sleep 1
+shot j1_03_viewmenu

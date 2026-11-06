@@ -1,0 +1,21 @@
+# A1 many-lanes (40 overlapping L0 files) at 1400x900 bytes shown
+front
+click 619 120
+key a cmd
+type /private/tmp/rocksvision-0030/many-lanes
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 1380 880
+shot a1_5_lanes_entry
+key 0
+sleep 1.0
+shot a1_6_lanes_fit_key
+sleep 8
+shot a1_7_idle_a
+sleep 2
+shot a1_8_idle_b
+key c
+sleep 1.0
+shot a1_9_center

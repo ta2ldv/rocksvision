@@ -1,0 +1,29 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 1380 {{PY}}
+shot a1_h900
+winsize 1400 800
+sleep 1.2
+shot a1_h800
+winsize 1400 720
+sleep 1.2
+shot a1_h720
+winsize 1400 660
+sleep 1.2
+shot a1_h660
+winsize 1400 600
+sleep 1.2
+shot a1_h600
+winsize 1400 588
+sleep 1.2
+shot a1_h588
+sleep 2
+shot a1_h588_b

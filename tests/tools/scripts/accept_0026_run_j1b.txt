@@ -1,0 +1,8 @@
+front
+note EXPLANATION panel check: scroll down inside the Explanation panel
+wheel 1382 600 0 -300
+sleep 0.7
+shot j1_11_explain_scroll1
+wheel 1382 600 0 -600
+sleep 0.7
+shot j1_12_explain_scroll2

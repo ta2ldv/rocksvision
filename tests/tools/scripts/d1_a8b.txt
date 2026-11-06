@@ -1,0 +1,44 @@
+# A8: drag Table split up, Map, Table (kept); drag Map split, Table, Map; double-click in Table; Map intact; Reset View
+front
+drag 832 824 832 600
+sleep 0.8
+move 1380 880
+shot a8_4_table_dragged
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8_5_map_after_table_drag
+click 517 151
+sleep 1.0
+move 1380 880
+shot a8_6_table_drag_kept
+click 557 151
+sleep 0.8
+note map split drag from handle at its default position to y=650
+drag 832 824 832 650
+sleep 0.8
+move 1380 880
+shot a8_7_map_dragged
+click 517 151
+sleep 1.0
+move 1380 880
+shot a8_8_table_after_map_drag
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8_9_map_split_kept
+click 517 151
+sleep 0.8
+note double-click Table handle (now at y~600)
+dclick 832 600
+sleep 0.8
+move 1380 880
+shot a8_10_table_dblclick_reset
+click 557 151
+sleep 1.0
+move 1380 880
+shot a8_11_map_after_table_reset
+click 1512 120
+sleep 1.0
+move 1380 880
+shot a8_12_after_reset_view

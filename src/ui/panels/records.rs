@@ -1,15 +1,19 @@
-//! Center panel: view title/notes, observed LSM boxes, and the records/fields table.
+//! Center panel: view title/notes and the records/fields table — or, for the Observed levels in
+//! Map mode, the LSM Map (`lsm_map`) over the whole records area.
 //! Column widths come from the column's semantic role (`layout::column_width`).
 
-use super::{btn, btn_sized, chip, chip_word, status_meaning, status_text, strong, table_style};
-use crate::app::diagnosis;
-use crate::app::{Action, AppState, CopyKind};
+use super::{Elided, TipExt, btn, btn_sized, chip, chip_word, disabled_btn, latched_btn, status_meaning, status_text, table_style};
+use crate::app::state::NO_PREVIOUS_VIEW;
+use crate::app::{Action, AppState, CopyKind, MapMode, ScrollRequest};
+use crate::app::{diagnosis, explanation};
 use crate::model::{ColumnRole, NOT_CHECKED, NodeKind, Status};
 use crate::ui::layout::{LAYOUT, column_width, nb_units, plan_columns, status_column_width, table_need_h};
 use crate::ui::menu;
 use crate::ui::theme::Tokens;
 use eframe::egui::{self, RichText};
 use egui_extras::{Column as TCol, TableBuilder};
+
+const BACK_LABEL: &str = "◀ Back";
 
 /// Table body rows that stay visible at the minimum window (900×700): the byte pane shrinks
 /// first (see `ui::center`).
@@ -66,9 +70,11 @@ fn post_id() -> egui::Id {
     egui::Id::new("records_post_notes")
 }
 
-/// `scroll` is the one-shot "scroll this row into view" request taken from the app state (row,
-/// centered?).
-pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usize, bool)>) -> Vec<Action> {
+/// `req` holds the one-shot requests taken from the app state: `row` = "scroll this row into
+/// view" (row, centered?), `table` = the scroll offset Back restores (preferred when it lies
+/// within the table), `map_focus` = the LSM Map takes keyboard focus.
+pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, req: ScrollRequest) -> Vec<Action> {
+    let (scroll, table_offset) = (req.row, req.table);
     let mut acts = Vec::new();
     let top_y = ui.cursor().top();
     // F3: after a zoom, split or window resize the selected row is brought into view again
@@ -115,13 +121,34 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     // uncompacted frame) the header takes at most four text lines: one elided title line, the
     // first location line, the collapsed notes and one banner line; tooltips keep the full text.
     let sp_y = ui.spacing().item_spacing.y;
+    let sp_x = ui.spacing().item_spacing.x;
     let table_need = table_need_h(tok.header_height(ui), tok.row_height(ui), sp_y, ui.spacing().scroll.allocated_width(), TABLE_MIN_ROWS);
     let full_id = full_overhead_id(doc.view_kind(), &view.title);
     let full_over = ui.ctx().data(|d| d.get_temp::<f32>(full_id));
     let compact = header_compact(ui.available_height(), full_over, table_need);
-    let title_row = |ui: &mut egui::Ui, go_back: &mut bool| {
-        if btn(ui, tok, "◀ Back").on_hover_text(format!("Back ({})", menu::back_key(menu::KeyLabels::HOST))).clicked() && st.navigation().can_go_back() {
-            *go_back = true;
+    let levels = doc.view_kind() == Some(&NodeKind::ManifestLevels);
+    let map_mode = doc.map_shown();
+    let mut mode_click = None;
+    let title_row = |ui: &mut egui::Ui, go_back: &mut bool, mode_click: &mut Option<MapMode>| {
+        // Back is visibly disabled without history (0024 §4.6).
+        if st.navigation().can_go_back() {
+            if btn(ui, tok, BACK_LABEL).tip(format!("Back ({})", menu::back_key(menu::KeyLabels::HOST))).clicked() {
+                *go_back = true;
+            }
+        } else {
+            disabled_btn(ui, tok, BACK_LABEL).tip_disabled(NO_PREVIOUS_VIEW);
+        }
+        // Table | Map of the Observed levels view (no history entry).
+        if levels && !view.lsm.is_empty() {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for (m, label) in [(MapMode::Table, "Table"), (MapMode::Map, "Map")] {
+                let on = (m == MapMode::Map) == map_mode;
+                let r = if on { latched_btn(ui, tok, label) } else { btn(ui, tok, label) };
+                if r.tip(if m == MapMode::Map { "Show the levels as an LSM map" } else { "Show the levels table" }).clicked() && !on {
+                    *mode_click = Some(m);
+                }
+            }
+            ui.spacing_mut().item_spacing.x = sp_x;
         }
         if let Some(s) = view.status {
             match view.status_word {
@@ -160,13 +187,16 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
         }
         if compact {
             // The title takes what is left of the one line.
-            ui.add(egui::Label::new(RichText::new(&view.title).heading()).truncate()).on_hover_text(&view.title);
+            ui.add(Elided::new(egui::Label::new(RichText::new(&view.title).heading())));
         }
     };
     if compact {
-        ui.horizontal(|ui| title_row(ui, &mut go_back));
+        ui.horizontal(|ui| title_row(ui, &mut go_back, &mut mode_click));
     } else {
-        ui.horizontal_wrapped(|ui| title_row(ui, &mut go_back));
+        ui.horizontal_wrapped(|ui| title_row(ui, &mut go_back, &mut mode_click));
+    }
+    if let Some(m) = mode_click {
+        acts.push(Action::SetMapMode(m));
     }
     // 0020 §6: the search banner has a reserved line directly below the title, outside the
     // scrolling notes, so it never scrolls away; it is elided to one line (full text in the
@@ -175,7 +205,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     match &banner {
         Some(b) => {
             let label = egui::Label::new(RichText::new(b).small().color(tok.p.text));
-            let r = if compact { ui.add(label.truncate()).on_hover_text(b) } else { ui.add(label.wrap()) };
+            let r = if compact { ui.add(Elided::new(label)) } else { ui.add(label.wrap()) };
             ui.ctx().data_mut(|d| d.insert_temp(banner_rect_id(), [r.rect, ui.clip_rect()]));
         }
         None => ui.ctx().data_mut(|d| d.remove::<[egui::Rect; 2]>(banner_rect_id())),
@@ -184,8 +214,11 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     // Compact: the first line only, elided, the others in its tooltip. Count and unit are joined
     // for the screen (0020 UI ruling 6).
     if compact && let Some(first) = view.location.first() {
-        let all = view.location.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("\n");
-        let r = ui.add(egui::Label::new(RichText::new(nb_units(&first.text)).small().monospace().color(tok.p.text)).truncate().sense(egui::Sense::click())).on_hover_text(all);
+        let mut label = Elided::new(egui::Label::new(RichText::new(nb_units(&first.text)).small().monospace().color(tok.p.text)).sense(egui::Sense::click()));
+        if view.location.len() > 1 {
+            label = label.tip(view.location.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("\n"));
+        }
+        let r = ui.add(label);
         if let Some(t) = &first.link
             && r.clicked()
         {
@@ -196,7 +229,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
         match &w.link {
             Some(t) => {
                 let r = ui.add(egui::Label::new(RichText::new(nb_units(&w.text)).small().color(tok.p.accent_text).underline()).sense(egui::Sense::click()).wrap());
-                if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Go to this structure (Back returns)").clicked() {
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).tip("Go to this structure (Back returns)").clicked() {
                     acts.push(Action::Navigate { target: t.node.clone(), span: t.span });
                 }
             }
@@ -224,15 +257,19 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
         }
     });
     // Narrow height: the full notes would leave the table fewer than TABLE_MIN_ROWS rows.
-    let narrow = compact || ui.available_height() - notes_h - post < table_need;
+    // The map shows the notes as the one-line summary (full text in the tooltip/Explanation).
+    let narrow = compact || map_mode || ui.available_height() - notes_h - post < table_need;
     let notes_max = (ui.available_height() - post - table_need).max(small_h + 4.0);
     if narrow && !view.notes.is_empty() {
         let worst = view.notes.iter().find_map(|n| n.status);
         let col = worst.map(|s| tok.status(s)).unwrap_or(tok.p.text_muted);
         let first = view.notes.iter().find(|n| n.status.is_some()).unwrap_or(&view.notes[0]);
         let more = if view.notes.len() > 1 { format!("  (+{} more)", view.notes.len() - 1) } else { String::new() };
-        let all = view.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>().join("\n");
-        ui.add(egui::Label::new(RichText::new(format!("{}{more}", first.text)).small().color(col)).truncate()).on_hover_text(all);
+        let mut label = Elided::new(egui::Label::new(RichText::new(format!("{}{more}", first.text)).small().color(col)));
+        if view.notes.len() > 1 {
+            label = label.tip(view.notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>().join("\n"));
+        }
+        ui.add(label);
     }
     egui::ScrollArea::vertical().id_salt(("notes", epoch)).max_height(notes_max).auto_shrink([false, true]).show(ui, |ui| {
         for n in view.notes.iter().filter(|_| !narrow) {
@@ -243,47 +280,15 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     });
     let after_notes = ui.cursor().top();
     ui.separator();
-    // Observed LSM boxes (CF → level → SST files) above the table.
-    let mut box_click = None;
-    if doc.view_kind() == Some(&NodeKind::ManifestLevels) && !view.lsm.is_empty() {
-        egui::CollapsingHeader::new("Observed LSM shape (boxes; from MANIFEST, not history)").default_open(true).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt(("lsm_boxes", epoch)).max_height(LAYOUT.lsm_box_max_height).show(ui, |ui| {
-                let mut last = (String::new(), String::new());
-                for (i, f) in view.lsm.iter().enumerate() {
-                    let key = (f.cf.clone(), f.level.clone());
-                    if key.0 != last.0 {
-                        strong(ui, tok, format!("CF {}", key.0));
-                    }
-                    if key != last {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(format!("{:>3}", key.1)).monospace());
-                            for b in view.lsm.iter().skip(i) {
-                                if (b.cf.as_str(), b.level.as_str()) != (key.0.as_str(), key.1.as_str()) {
-                                    break;
-                                }
-                                let c = if b.status == Status::Present { tok.p.lsm_present } else { tok.p.lsm_missing };
-                                let resp = egui::Frame::new()
-                                    .fill(tok.p.lsm_bg)
-                                    .stroke(egui::Stroke::new(1.5, c))
-                                    .inner_margin(egui::Margin::symmetric(6, 3))
-                                    .corner_radius(tok.w.rounding)
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new(format!("{} {} · {} B\n{} …\n{}", b.status.symbol(), b.file, b.size, b.smallest, b.largest)).small().color(tok.p.text));
-                                    })
-                                    .response
-                                    .interact(egui::Sense::click());
-                                let resp = resp.on_hover_text(format!("{} · overlap: {}", b.status.label(), b.overlap));
-                                if resp.clicked() {
-                                    box_click = Some(b.row);
-                                }
-                            }
-                        });
-                        last = key;
-                    }
-                }
-            });
-        });
-        ui.separator();
+    // The LSM Map takes the whole rest of the records area (0024 §2); the table is not drawn.
+    if map_mode {
+        let post_now = ui.cursor().top() - after_notes;
+        ui.ctx().data_mut(|d| d.insert_temp(post_id(), post_now));
+        acts.extend(super::lsm_map::show(ui, st, tok, req.map_focus));
+        if go_back {
+            acts.push(Action::Back);
+        }
+        return acts;
     }
     // Columns that fit: Raw hex, then Encoding, then Len hide first; Status may become
     // icon-only; Offset keeps 10 monospace characters, 14 in tables with derived offsets
@@ -310,7 +315,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
         } else {
             "Show the columns hidden for lack of width (the table then scrolls horizontally)"
         };
-        if ui.small_button(label).on_hover_text(tip).clicked() {
+        if ui.small_button(label).tip(tip).clicked() {
             acts.push(Action::ToggleAllColumns);
         }
     }
@@ -360,6 +365,7 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
     let sp_y = ui.spacing().item_spacing.y;
     let body_rows = ((ui.available_height() - header_h - sp_y - hbar) / (row_h + sp_y)).floor().max(0.0);
     ui.ctx().data_mut(|d| d.insert_temp(rows_visible_id(), body_rows));
+    let mut scrolled = None;
     egui::ScrollArea::horizontal().id_salt(("tblh", &salt, epoch)).auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| {
         ui.set_width(table_w);
         let bg = ui.available_rect_before_wrap();
@@ -373,139 +379,174 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, scroll: Option<(usiz
             let col = if pos == rem_pos { TCol::remainder().at_least(LAYOUT.remainder_min).clip(true) } else { TCol::initial(col_w(ci)).at_least(min).resizable(true).clip(true) };
             tb = tb.column(col);
         }
-        if let Some((r, center)) = scroll.filter(|(r, _)| *r < nrows) {
-            tb = tb.scroll_to_row(r, center.then_some(egui::Align::Center));
-        }
-        tb.header(header_h, |mut h| {
-            for &ci in &order {
-                h.col(|ui| {
-                    let r = ui.max_rect().expand2(egui::vec2(spacing / 2.0, 2.0));
-                    tok.paint_header(ui.painter(), r);
-                    // A header narrower than its title — by column width or cut by the table's
-                    // horizontal scroll viewport — ends in "…" or shows nothing; never a
-                    // clipped glyph.
-                    let title = view.columns[ci].title;
-                    let text = RichText::new(title).font(header_font.clone()).strong().color(tok.p.header_fg);
-                    let visible = ui.max_rect().intersect(ui.clip_rect());
-                    let ell = ui.fonts_mut(|f| f.layout_no_wrap("…".into(), header_font.clone(), tok.p.header_fg).size().x);
-                    if visible.width() >= ui.max_rect().width() - 0.5 {
-                        ui.add(egui::Label::new(text).truncate()).on_hover_text(title);
-                    } else if visible.width() >= ell + 2.0 {
-                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(visible).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                        child.add(egui::Label::new(text).truncate()).on_hover_text(title);
-                    }
-                });
+        // Back: the saved scroll offset when it still lies within this table; otherwise the row
+        // request (select + scroll into view) is the fallback.
+        let max_off = (nrows as f32 * (row_h + sp_y) - body_rows * (row_h + sp_y)).max(0.0);
+        match table_offset.filter(|o| *o <= max_off + 0.5) {
+            Some(o) => tb = tb.vertical_scroll_offset(o),
+            None => {
+                if let Some((r, center)) = scroll.filter(|(r, _)| *r < nrows) {
+                    tb = tb.scroll_to_row(r, center.then_some(egui::Align::Center));
+                }
             }
-        })
-        .body(|body| {
-            body.rows(row_h, nrows, |mut row| {
-                let i = row.index();
-                let r = &view.rows[i];
-                let is_sel = sel_row == Some(i);
-                row.set_selected(is_sel);
-                for (pos, &ci) in order.iter().enumerate() {
-                    let mut cell = r.cells.get(ci).map(|c| c.as_str()).unwrap_or("");
-                    // Untrusted rows (decoded from a checksum-failed block) keep the dump's cell
-                    // word; the table shows the Invalid-derived "Untrusted" word instead.
-                    let untrusted_cell;
-                    if Some(ci) == status_idx && r.field.untrusted {
-                        untrusted_cell = format!("{} {}", r.field.status.symbol(), diagnosis::UNTRUSTED_WORD);
-                        cell = &untrusted_cell;
-                    }
-                    // A field without bytes has no offset/length: "—" (never a clipped "(").
-                    let role = view.columns[ci].role;
-                    let no_bytes = r.field.span.is_none() && matches!(role, ColumnRole::Offset | ColumnRole::Len) && (cell.starts_with('(') || cell == "-" || cell == "—");
-                    if no_bytes {
-                        cell = "—";
-                    }
-                    let full_cell = cell.to_string();
-                    // Not checked: no glyph and no status colour (design A2).
-                    let not_checked = Some(ci) == status_idx && r.field.not_checked.is_some();
-                    row.col(|ui| {
-                        if pos == 0 {
-                            let c = ui.clip_rect();
-                            body_clip.set(egui::Rect::from_x_y_ranges(hover_painter.clip_rect().x_range(), c.y_range()));
-                        }
-                        if pos == 0 && is_sel {
-                            // Left accent stripe on the selected row.
-                            let rr = ui.max_rect();
-                            ui.painter().rect_filled(egui::Rect::from_min_size(rr.left_top() - egui::vec2(4.0, 0.0), egui::vec2(LAYOUT.selected_stripe, rr.height())), 0.0, tok.p.sel_edge);
-                        }
-                        let mut t = RichText::new(cell).color(tok.p.text);
-                        if not_checked {
-                            t = t.color(tok.p.text_muted);
-                        } else if Some(ci) == status_idx {
-                            t = t.color(tok.status(r.field.status));
-                        }
-                        if pos == 0 && matches.contains(&i) {
-                            t = t.color(tok.p.match_fg).background_color(tok.p.match_bg).strong();
-                        }
-                        if is_sel {
-                            // Selection overrides row/status colors so they stay readable.
-                            t = t.color(tok.p.sel_fg);
-                        }
-                        let tip = if Some(ci) == status_idx && r.field.untrusted {
-                            diagnosis::UNTRUSTED_MEANING.to_string()
-                        } else if let Some(d) = r.field.not_checked.as_ref().filter(|_| not_checked) {
-                            d.clone()
-                        } else if no_bytes {
-                            "No bytes in the file (derived, inferred, default or metadata value)".to_string()
+        }
+        let out = tb
+            .header(header_h, |mut h| {
+                for &ci in &order {
+                    let mut elided = false;
+                    let mut visible_rect = egui::Rect::NOTHING;
+                    let (_, resp) = h.col(|ui| {
+                        let r = ui.max_rect().expand2(egui::vec2(spacing / 2.0, 2.0));
+                        tok.paint_header(ui.painter(), r);
+                        // A header narrower than its title — by column width or cut by the table's
+                        // horizontal scroll viewport — ends in "…" or shows nothing; never a
+                        // clipped glyph.
+                        let title = view.columns[ci].title;
+                        let text = RichText::new(title).font(header_font.clone()).strong().color(tok.p.header_fg);
+                        let visible = ui.max_rect().intersect(ui.clip_rect());
+                        visible_rect = visible;
+                        let ell = ui.fonts_mut(|f| f.layout_no_wrap("…".into(), header_font.clone(), tok.p.header_fg).size().x);
+                        if visible.width() >= ui.max_rect().width() - 0.5 {
+                            elided = super::was_elided(&ui.add(Elided::quiet(egui::Label::new(text))));
+                        } else if visible.width() >= ell + 2.0 {
+                            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(visible).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            elided = super::was_elided(&child.add(Elided::quiet(egui::Label::new(text))));
                         } else {
-                            full_cell.clone()
-                        };
-                        ui.add(egui::Label::new(t).truncate().selectable(false)).on_hover_text(tip);
+                            elided = true;
+                        }
                     });
-                }
-                let resp = row.response();
-                if resp.hovered() {
-                    // Edge cue so hover does not rely on the fill color alone (on a selected row
-                    // the selection fill and stripe stay; hover only adds the outline).
-                    let r = resp.rect.intersect(body_clip.get());
-                    if r.height() > 0.0 {
-                        hover_painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, tok.p.outline), egui::StrokeKind::Inside);
+                    // 0030 B-3: one tooltip per header cell, through the shared policy.
+                    if resp.hovered()
+                        && visible_rect.width() > 0.0
+                        && let Some(t) = explanation::header_tip(view, ci, elided)
+                    {
+                        let _ = resp.tip_at(visible_rect, t);
                     }
                 }
-                if resp.clicked() || resp.secondary_clicked() {
-                    clicked = Some(i);
-                }
-                if resp.double_clicked() {
-                    dbl = Some(i);
-                }
-                let has_span = r.field.span.is_some();
-                let has_key = r.field.key_bytes.is_some();
-                resp.context_menu(|ui| {
-                    for (k, label, enabled) in [
-                        (CopyKind::Value, "Copy value", true),
-                        (CopyKind::Key, "Copy key", has_key),
-                        (CopyKind::Hex, "Copy hex (max 64 KiB)", has_span),
-                        (CopyKind::Offset, "Copy offset", has_span),
-                        (CopyKind::RowTsv, "Copy row (TSV)", true),
-                    ] {
-                        let item = ui.add_enabled(enabled, egui::Button::new(label));
-                        tok.menu_item_hover(ui, &item);
-                        if item.clicked() {
-                            copy_act = Some((i, k));
-                            ui.close();
+            })
+            .body(|body| {
+                body.rows(row_h, nrows, |mut row| {
+                    let i = row.index();
+                    let r = &view.rows[i];
+                    let is_sel = sel_row == Some(i);
+                    row.set_selected(is_sel);
+                    // The cell under the pointer (visible rect, column, shown text, elided) for the
+                    // row's one tooltip; only that cell is recorded (architect N6).
+                    let mut hit: Option<(egui::Rect, usize, String, bool)> = None;
+                    for (pos, &ci) in order.iter().enumerate() {
+                        let mut cell = r.cells.get(ci).map(|c| c.as_str()).unwrap_or("");
+                        // Untrusted rows (decoded from a checksum-failed block) keep the dump's cell
+                        // word; the table shows the Invalid-derived "Untrusted" word instead.
+                        let untrusted_cell;
+                        if Some(ci) == status_idx && r.field.untrusted {
+                            untrusted_cell = format!("{} {}", r.field.status.symbol(), diagnosis::UNTRUSTED_WORD);
+                            cell = &untrusted_cell;
+                        }
+                        // A field without bytes has no offset/length: "—" (never a clipped "(").
+                        let role = view.columns[ci].role;
+                        let no_bytes = r.field.span.is_none() && matches!(role, ColumnRole::Offset | ColumnRole::Len) && (cell.starts_with('(') || cell == "-" || cell == "—");
+                        if no_bytes {
+                            cell = "—";
+                        }
+                        // Not checked: no glyph and no status colour (design A2).
+                        let not_checked = Some(ci) == status_idx && r.field.not_checked.is_some();
+                        row.col(|ui| {
+                            if pos == 0 {
+                                let c = ui.clip_rect();
+                                body_clip.set(egui::Rect::from_x_y_ranges(hover_painter.clip_rect().x_range(), c.y_range()));
+                            }
+                            if pos == 0 && is_sel {
+                                // Left accent stripe on the selected row.
+                                let rr = ui.max_rect();
+                                ui.painter().rect_filled(egui::Rect::from_min_size(rr.left_top() - egui::vec2(4.0, 0.0), egui::vec2(LAYOUT.selected_stripe, rr.height())), 0.0, tok.p.sel_edge);
+                            }
+                            let mut t = RichText::new(cell).color(tok.p.text);
+                            if not_checked {
+                                t = t.color(tok.p.text_muted);
+                            } else if Some(ci) == status_idx {
+                                t = t.color(tok.status(r.field.status));
+                            }
+                            if pos == 0 && matches.contains(&i) {
+                                t = t.color(tok.p.match_fg).background_color(tok.p.match_bg).strong();
+                            }
+                            if is_sel {
+                                // Selection overrides row/status colors so they stay readable.
+                                t = t.color(tok.p.sel_fg);
+                            }
+                            // The label has no tooltip of its own; the row shows one (0030 B-2).
+                            let lr = ui.add(Elided::quiet(egui::Label::new(t).selectable(false)));
+                            let vis = ui.max_rect().intersect(ui.clip_rect());
+                            if ui.ctx().pointer_hover_pos().is_some_and(|p| vis.contains(p)) {
+                                hit = Some((vis, ci, cell.to_string(), super::was_elided(&lr)));
+                            }
+                        });
+                    }
+                    let resp = row.response();
+                    // 0030 B-2: the row is the one hover target; the tooltip of the cell under the
+                    // pointer (shared policy `explanation::cell_tip`), anchored at that cell, so
+                    // moving along the row updates it in place and it follows the hover, never the
+                    // selected row.
+                    if resp.hovered()
+                        && let Some(p) = resp.hover_pos()
+                        && let Some((rect, ci, shown, elided)) = hit.as_ref().filter(|c| c.0.contains(p))
+                        && let Some(t) = explanation::cell_tip(view, i, *ci, shown, *elided)
+                    {
+                        let _ = resp.clone().tip_at(*rect, t);
+                    }
+                    if resp.hovered() {
+                        // Edge cue so hover does not rely on the fill color alone (on a selected row
+                        // the selection fill and stripe stay; hover only adds the outline).
+                        let r = resp.rect.intersect(body_clip.get());
+                        if r.height() > 0.0 {
+                            hover_painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, tok.p.outline), egui::StrokeKind::Inside);
                         }
                     }
-                    if r.field.link.is_some() || r.field.open_path.is_some() {
-                        ui.separator();
-                        let item = ui.button("Follow link ›");
-                        tok.menu_item_hover(ui, &item);
-                        if item.clicked() {
-                            dbl = Some(i);
-                            ui.close();
-                        }
+                    if resp.clicked() || resp.secondary_clicked() {
+                        clicked = Some(i);
                     }
+                    if resp.double_clicked() {
+                        dbl = Some(i);
+                    }
+                    let has_span = r.field.span.is_some();
+                    let has_key = r.field.key_bytes.is_some();
+                    resp.context_menu(|ui| {
+                        for (k, label, enabled) in [
+                            (CopyKind::Value, "Copy value", true),
+                            (CopyKind::Key, "Copy key", has_key),
+                            (CopyKind::Hex, "Copy hex (max 64 KiB)", has_span),
+                            (CopyKind::Offset, "Copy offset", has_span),
+                            (CopyKind::RowTsv, "Copy row (TSV)", true),
+                        ] {
+                            let item = ui.add_enabled(enabled, egui::Button::new(label));
+                            tok.menu_item_hover(ui, &item);
+                            if item.clicked() {
+                                copy_act = Some((i, k));
+                                ui.close();
+                            }
+                        }
+                        if r.field.link.is_some() || r.field.open_path.is_some() {
+                            ui.separator();
+                            let item = ui.button("Follow link ›");
+                            tok.menu_item_hover(ui, &item);
+                            if item.clicked() {
+                                dbl = Some(i);
+                                ui.close();
+                            }
+                        }
+                    });
                 });
             });
-        });
+        // The table's scroll offset goes to the session when it changes (what Back restores).
+        let y = out.state.offset.y;
+        if (y - st.session().table_scroll()).abs() > 0.5 {
+            scrolled = Some(y);
+        }
     });
+    if let Some(y) = scrolled {
+        acts.push(Action::SetTableScroll(y));
+    }
     if let Some((i, k)) = copy_act {
         acts.push(Action::CopyRow(i, k));
-    }
-    if let Some(j) = box_click {
-        acts.push(Action::SelectRow(j));
     }
     if go_back {
         acts.push(Action::Back);

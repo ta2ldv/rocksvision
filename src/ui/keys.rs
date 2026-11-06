@@ -3,7 +3,7 @@
 //! focused context: in the search field it steps through matches (Shift = previous); in another
 //! text field (path, offset) that field handles it; otherwise it follows the selected row.
 
-use crate::app::{Action, AppState, Panel, RowMove};
+use crate::app::{Action, AppState, MapMove, MapZoom, Panel, RowMove};
 use eframe::egui;
 
 /// Keys pressed this frame (egui-independent, so the mapping is unit-testable).
@@ -13,6 +13,14 @@ pub struct Keys {
     pub nav: bool,
     /// The search field had keyboard focus when the key was pressed.
     pub search_focused: bool,
+    /// The LSM Map had keyboard focus (click or Tab): arrows, Home/End and + - 0 are the map's.
+    pub map_focused: bool,
+    /// `+`/`=`, `-`, `0` without modifiers (map zoom while the map has focus).
+    pub plus: bool,
+    pub minus: bool,
+    pub zero: bool,
+    /// `c` without modifiers (map Center while the map has focus; 0026 §6.5).
+    pub center: bool,
     pub up: bool,
     pub down: bool,
     pub pgup: bool,
@@ -41,6 +49,8 @@ pub struct Keys {
     pub cmd_minus: bool,
     pub cmd_0: bool,
     pub shift_cmd_r: bool,
+    /// Shift+⌘M: LSM Map.
+    pub shift_cmd_m: bool,
     /// Option+⌘1/2/3: toggle Navigation / Explanation / Byte View.
     pub alt_cmd_digit: Option<u8>,
 }
@@ -48,15 +58,23 @@ pub struct Keys {
 pub fn read(ctx: &egui::Context, st: &AppState, menu_owns_accelerators: bool, search_id: egui::Id) -> Vec<Action> {
     let nav = !ctx.egui_wants_keyboard_input() && !st.prefs().modal_open();
     let search_focused = ctx.memory(|m| m.has_focus(search_id)) && !st.prefs().modal_open();
+    let map_focused = super::panels::lsm_map::has_focus(ctx, st);
     let k = ctx.input(|i| {
         let c = i.modifiers.command;
         let s = i.modifiers.shift;
         let a = i.modifiers.alt;
         let p = |k| i.key_pressed(k);
         use egui::Key as K;
+        let plain = !c && !a;
         Keys {
             nav,
             search_focused,
+            map_focused,
+            plus: plain && (p(K::Plus) || p(K::Equals)),
+            minus: plain && p(K::Minus),
+            zero: plain && p(K::Num0),
+            center: plain && !s && p(K::C),
+            shift_cmd_m: c && s && !a && p(K::M),
             up: p(K::ArrowUp),
             down: p(K::ArrowDown),
             pgup: p(K::PageUp),
@@ -115,7 +133,24 @@ pub fn map(k: &Keys, st: &AppState, menu_owns_accelerators: bool) -> Vec<Action>
     if let Some(a) = search_enter.clone().flatten() {
         acts.push(a);
     }
-    if k.nav {
+    // The focused LSM Map owns arrows, Home/End and + - 0 (a focused widget is not a text
+    // field, so `nav` holds); Enter follows the selected (= focused) box below.
+    if k.map_focused {
+        let mv =
+            [(k.left, MapMove::Left), (k.right, MapMove::Right), (k.up, MapMove::Up), (k.down, MapMove::Down), (k.home, MapMove::Home), (k.end, MapMove::End)].into_iter().find(|x| x.0).map(|x| x.1);
+        if let Some(m) = mv {
+            acts.push(Action::MapMove(m));
+        }
+        // In Fit mode the app ignores them (`MapState::navigable`); Fit there is a no-op.
+        for (pressed, z) in [(k.plus, MapZoom::In), (k.minus, MapZoom::Out), (k.zero, MapZoom::Fit), (k.center, MapZoom::Center)] {
+            if pressed {
+                acts.push(Action::MapZoom(z));
+            }
+        }
+        if k.enter && search_enter.is_none() {
+            acts.push(Action::FollowSelected);
+        }
+    } else if k.nav {
         let has_rows = st.session().view().map(|v| !v.rows.is_empty()).unwrap_or(false);
         if has_rows {
             let m = [(k.up, RowMove::Up), (k.down, RowMove::Down), (k.pgup, RowMove::PageUp), (k.pgdn, RowMove::PageDown), (k.home, RowMove::Home), (k.end, RowMove::End)]
@@ -140,13 +175,15 @@ pub fn map(k: &Keys, st: &AppState, menu_owns_accelerators: bool) -> Vec<Action>
             acts.push(if k.shift { Action::StepStructure(forward) } else { Action::StepField(forward) });
         }
     }
-    if k.f3 {
+    // Reviewer N3: like Esc, the search and Back keys do not act behind a modal window.
+    let modal = st.prefs().modal_open();
+    if k.f3 && !modal {
         acts.push(Action::SearchNext);
     }
-    if k.shift_f3 {
+    if k.shift_f3 && !modal {
         acts.push(Action::SearchPrev);
     }
-    if k.alt_left {
+    if k.alt_left && !modal {
         acts.push(Action::Back);
     }
     // Esc closes a modal (handled by the modal) instead of cancelling jobs.
@@ -167,6 +204,7 @@ pub fn map(k: &Keys, st: &AppState, menu_owns_accelerators: bool) -> Vec<Action>
             (k.cmd_minus, Action::ZoomOut),
             (k.cmd_0, Action::ZoomReset),
             (k.shift_cmd_r, Action::ResetView),
+            (k.shift_cmd_m, Action::ShowLsmMap),
         ] {
             if pressed {
                 acts.push(a);
@@ -245,6 +283,30 @@ mod tests {
         let s = st();
         let k = Keys { f3: true, alt_left: true, esc: true, ..Default::default() };
         assert_eq!(map(&k, &s, true), vec![Action::SearchNext, Action::Back, Action::CancelJobs]);
+        // Reviewer N3: behind a modal (Keyboard Shortcuts) none of them acts.
+        let mut m = st();
+        m.apply(Action::ShowShortcuts);
+        assert!(m.prefs().modal_open());
+        let k = Keys { f3: true, shift_f3: true, alt_left: true, esc: true, ..Default::default() };
+        assert_eq!(map(&k, &m, true), vec![]);
+    }
+
+    /// 0024: Shift+⌘M is LSM Map (menu-owned with a native menu); the focused map takes arrows,
+    /// Home/End and + - 0 (map zoom, never the app zoom); without map focus they stay the table's.
+    #[test]
+    fn lsm_map_keys() {
+        let s = st();
+        let k = Keys { shift_cmd_m: true, ..Default::default() };
+        assert!(map(&k, &s, true).is_empty(), "menu-owned Shift+⌘M");
+        assert_eq!(map(&k, &s, false), vec![Action::ShowLsmMap]);
+        let m = Keys { nav: true, map_focused: true, right: true, plus: true, ..Default::default() };
+        assert_eq!(map(&m, &s, true), vec![Action::MapMove(MapMove::Right), Action::MapZoom(MapZoom::In)]);
+        let m = Keys { nav: true, map_focused: true, home: true, zero: true, ..Default::default() };
+        assert_eq!(map(&m, &s, true), vec![Action::MapMove(MapMove::Home), Action::MapZoom(MapZoom::Fit)]);
+        let m = Keys { nav: true, map_focused: true, center: true, ..Default::default() };
+        assert_eq!(map(&m, &s, true), vec![Action::MapZoom(MapZoom::Center)], "c: Center (0026 §6.5)");
+        let t = Keys { nav: true, right: true, plus: true, ..Default::default() };
+        assert_eq!(map(&t, &s, true), vec![Action::ExpandSelectedNode], "no map focus: the tree's key, no zoom");
     }
 
     #[test]

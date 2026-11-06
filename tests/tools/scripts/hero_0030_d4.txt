@@ -1,0 +1,14 @@
+front
+click 386 984
+sleep 1.0
+click 896 583
+sleep 0.8
+key tab
+sleep 0.5
+winsize 1728 820
+sleep 1.5
+winpos 0 38
+sleep 0.8
+move 900 10
+sleep 0.8
+winshot /private/tmp/rocksvision-0030/hero/hero-short-d4

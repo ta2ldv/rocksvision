@@ -1,0 +1,18 @@
+front
+winsize 1400 900
+winpos 164 76
+sleep 1
+click 1512 120
+sleep 0.5
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 1380 880
+shot w1_1_map
+click 592 204
+sleep 0.8
+shot w1_2_cf_selector

@@ -1,0 +1,4 @@
+front
+click 592 204
+sleep 0.7
+shot d_04_cfmenu

@@ -1,0 +1,15 @@
+front
+dclick 482 286
+sleep 2.5
+shot j7e_01_wal_dclick
+click 460 150
+sleep 2
+move 700 880
+shot j7e_02_back_from_wal
+dclick 864 458
+sleep 2.5
+shot j7e_03_sst_dclick
+click 460 150
+sleep 2
+move 700 880
+shot j7e_04_back_from_sst

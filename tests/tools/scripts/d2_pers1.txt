@@ -1,0 +1,11 @@
+front
+click 210 18
+sleep 0.6
+click 234 493
+sleep 0.6
+click 210 18
+sleep 0.6
+shot pers_1_menu_after_off
+key esc
+key q cmd
+sleep 1.5

@@ -1,0 +1,9 @@
+# 0030 P1 item 1b: CURRENT -> Observed levels table
+front
+click 207 213
+sleep 0.8
+click 300 524
+sleep 1.2
+move 1380 900
+sleep 0.4
+shot b2_observed_table

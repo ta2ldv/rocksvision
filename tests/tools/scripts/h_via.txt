@@ -1,0 +1,20 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+wheel 292 380 0 -120
+sleep 0.6
+click 211 387
+sleep 1.2
+winsize 900 588
+sleep 1.5
+click 445 120
+sleep 0.3
+move 800 560
+shot via_1_entry
+sleep 2
+shot via_2_later

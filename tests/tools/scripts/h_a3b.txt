@@ -1,0 +1,10 @@
+front
+click 826 406
+sleep 1.5
+move 1380 880
+shot a3b_1_zoomed
+sleep 1.0
+click 745 406
+sleep 1.0
+move 1380 880
+shot a3b_2_box_clicked

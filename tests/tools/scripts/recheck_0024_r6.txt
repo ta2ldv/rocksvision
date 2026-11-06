@@ -1,0 +1,21 @@
+# R6: item 6 box hover tooltip (cf_users x1.5), then + and pan (item 10 setup).
+front
+note ITEM6 hover box 000018
+move 750 306
+sleep 0.3
+move 756 308
+sleep 1.8
+shot r6_01_hover_box
+crop r6_01_tip 600 250 700 260
+note ITEM10 + then drag pan
+click 1155 204
+sleep 0.6
+move 900 420
+sleep 0.6
+crop r6_02_strip 420 190 1180 40
+drag 1000 380 800 380
+sleep 0.8
+move 900 430
+sleep 0.6
+shot r6_03_panned
+crop r6_03_map 420 190 1180 130

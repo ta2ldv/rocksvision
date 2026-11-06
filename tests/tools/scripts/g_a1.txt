@@ -1,0 +1,16 @@
+front
+winsize 1400 900
+sleep 1.2
+click 556 151
+sleep 1.2
+winsize 900 588
+sleep 1.8
+move 800 560
+shot a1_1_900x588_entry
+sleep 2
+shot a1_2_entry_b
+click 600 400
+key 0
+sleep 1
+move 800 560
+shot a1_3_after_fit

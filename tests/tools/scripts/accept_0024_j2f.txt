@@ -1,0 +1,8 @@
+# J2f: repaint check at x2.2 (no state change).
+front
+move 800 420
+sleep 1
+move 810 430
+sleep 1
+shot j2f_01_zoom_repaint
+crop j2f_01_map 420 190 1180 130

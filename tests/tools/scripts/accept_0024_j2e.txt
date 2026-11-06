@@ -1,0 +1,12 @@
+# J2e: focus map by clicking empty map space, press '=' (map zoom in).
+front
+click 900 380
+sleep 0.6
+key equal
+sleep 0.8
+shot j2e_01_after_equal
+crop j2e_01_strip 420 190 1180 40
+key equal
+sleep 0.8
+shot j2e_02_after_equal2
+crop j2e_02_strip 420 190 1180 40

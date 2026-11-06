@@ -1,0 +1,19 @@
+# R9: item 9 discovery: look at every CF of db-levels at x1.
+front
+click 557 151
+sleep 1.5
+click 583 204
+sleep 0.8
+shot r9_01_combo
+click 508 227
+sleep 1
+move 900 600
+sleep 0.5
+shot r9_02_default
+click 583 204
+sleep 0.8
+click 508 277
+sleep 1
+move 900 600
+sleep 0.5
+shot r9_03_events

@@ -678,6 +678,15 @@ impl Logical {
 /// Reads the next logical record at or after `start`, keeping at most `keep`
 /// payload bytes (bounded by MAX_RECORD_BYTES). Returns None at end of file.
 pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logical> {
+    read_logical_until(r, start, keep, u64::MAX, &|| false)
+}
+
+/// `read_logical` that also stops a fragmented record once its fragments reach past
+/// `stop_at` (file offset) or `cancel()` turns true (checked per fragment): the record is
+/// returned with `Status::Limited` / `RECOVER_CAP` and `end` past `stop_at`, less than two
+/// 32 KiB blocks beyond it (the rest of the FIRST fragment's block plus one). Used by the bounded WAL summary (0026 D5); the WAL views read
+/// with `read_logical` (unbounded `stop_at`, never cancelled here).
+pub fn read_logical_until(r: &dyn RangeRead, start: u64, keep: usize, stop_at: u64, cancel: &dyn Fn() -> bool) -> Option<Logical> {
     let keep = keep.min(MAX_RECORD_BYTES);
     let mut it = PhysIter::new(r, start);
     let mut cur: Option<Logical> = None;
@@ -729,6 +738,11 @@ pub fn read_logical(r: &dyn RangeRead, start: u64, keep: usize) -> Option<Logica
                 FragRole::Middle | FragRole::Last => {
                     append(l, &p, &payload, keep);
                     l.end = p.end;
+                    if ro == FragRole::Middle && (l.end > stop_at || cancel()) {
+                        let note = format!("reading stopped after {} fragment(s) at 0x{:x}, before LAST (byte bound 0x{stop_at:x})", l.frag_count, l.end);
+                        l.fail(Status::Limited, CheckKind::Limit, Trust::Partial, RECOVER_CAP, note);
+                        return cur;
+                    }
                     if ro == FragRole::Last {
                         if l.status == Status::Present && l.total_len > MAX_RECORD_BYTES as u64 {
                             let note = format!("record of {} bytes exceeds the {} byte reassembly cap", l.total_len, MAX_RECORD_BYTES);

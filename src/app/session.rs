@@ -7,9 +7,11 @@
 
 use super::hex::HexState;
 use super::jobs::ViewTarget;
+use super::lsm_map::{self, MapEntry, MapMode, MapState, Unavailable};
 use super::navigation::{HistEntry, HistoryOp, Navigation, PendingSel, ViewReply};
+use super::view_prefs::SplitRole;
 use crate::discover::{DirEntry, FileKind};
-use crate::limits::LIMITS;
+use crate::limits::{LIMITS, WAL_SUMMARY_FILES};
 use crate::model::*;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
@@ -72,6 +74,29 @@ impl TreeNode {
     }
 }
 
+/// The folder line under the Navigation title: counts and the explicit layout status (0024
+/// §1). A standard DB and a checkpoint look alike, so no provenance is claimed; a missing WAL
+/// is neutral.
+pub fn folder_note(entries: &[DirEntry], trunc: bool, blocked: Option<&str>) -> String {
+    let n = |k: FileKind| entries.iter().filter(|e| e.kind == k).count();
+    let (cur, man, wal) = (n(FileKind::Current), n(FileKind::Manifest), n(FileKind::Wal));
+    let layout = match (cur > 0, man > 0) {
+        // Parsed and failed (MANIFEST missing / CURRENT invalid): say so (D2b finding 5).
+        (true, _) if blocked.is_some() => format!("CURRENT present · live SST files unknown: {}", blocked.unwrap_or_default()),
+        // Not parsed yet: the levels view says which MANIFEST CURRENT names and whether it exists.
+        (true, _) => "CURRENT present".to_string(),
+        (false, true) => "CURRENT absent: MANIFEST opened directly (not confirmed as the active one)".to_string(),
+        (false, false) => "no CURRENT or MANIFEST: no live-file layout".to_string(),
+    };
+    format!("{layout} · {} SST · {man} MANIFEST · {}{}", n(FileKind::Sst), crate::model::wal_words(wal), if trunc { " · listing truncated" } else { "" })
+}
+
+/// `NNNNNN.sst` (or `.ldb`) → file number (the SST the LSM Map entry focuses).
+pub fn sst_number(p: &Path) -> Option<u64> {
+    let name = p.file_name()?.to_str()?;
+    name.strip_suffix(".sst").or_else(|| name.strip_suffix(".ldb"))?.parse().ok()
+}
+
 pub struct DocumentSession {
     generation: u64,
     path_input: String,
@@ -93,8 +118,22 @@ pub struct DocumentSession {
     sel_node: Option<usize>,
     view: Option<View>,
     view_kind: Option<NodeKind>,
-    /// History and the view request in flight (0020 §1).
+    /// History and the view request in flight (0020 §1); survives file switches (0024 §4).
     nav: Navigation,
+    /// Table/Map mode, CF, pan, map zoom and focus of the Observed levels view.
+    map: MapState,
+    /// WAL files of the levels view's folder with their background summaries (0026 item 4);
+    /// taken over from the levels view, reset with the file like the map.
+    wals: Option<WalInventory>,
+    /// Records table vertical scroll offset of the view shown (points; reported by the records
+    /// panel), and a one-shot offset to restore (Back).
+    table_scroll: f32,
+    table_restore: Option<f32>,
+    /// Why this file's live SSTs cannot be observed (`View::lsm_blocked` of a view shown).
+    lsm_blocked: Option<String>,
+    /// The folder listing of `dir` has arrived (or failed), and whether it was truncated.
+    listed: bool,
+    dir_trunc: bool,
     /// One-shot request for the tree to scroll this node into view (a reveal).
     tree_scroll: Option<usize>,
     hex: HexState,
@@ -123,6 +162,13 @@ impl DocumentSession {
             view: None,
             view_kind: None,
             nav: Navigation::default(),
+            map: MapState::default(),
+            wals: None,
+            table_scroll: 0.0,
+            table_restore: None,
+            lsm_blocked: None,
+            listed: false,
+            dir_trunc: false,
             tree_scroll: None,
             hex: HexState::default(),
             status_msg: "Open a RocksDB data folder or a single WAL / SST / MANIFEST / CURRENT file.".into(),
@@ -183,6 +229,40 @@ impl DocumentSession {
     /// History and the view request in flight.
     pub fn navigation(&self) -> &Navigation {
         &self.nav
+    }
+    /// The LSM Map state of the levels view.
+    pub fn map(&self) -> &MapState {
+        &self.map
+    }
+    /// WAL files of the levels view's folder and their summaries (None: no levels view shown
+    /// for this file, or its folder was not listed).
+    pub fn wal_inventory(&self) -> Option<&WalInventory> {
+        self.wals.as_ref()
+    }
+    /// A WAL summary is still Scanning.
+    pub fn wal_scan_pending(&self) -> bool {
+        self.wals.as_ref().is_some_and(|w| w.files.iter().any(|f| f.summary == WalSummary::Scanning))
+    }
+    /// Records table scroll offset (points) of the view shown.
+    pub fn table_scroll(&self) -> f32 {
+        self.table_scroll
+    }
+    /// The Observed levels view is shown in Map mode.
+    pub fn map_shown(&self) -> bool {
+        self.map.mode() == MapMode::Map && self.view_kind == Some(NodeKind::ManifestLevels)
+    }
+    /// The CF the map shows for the view shown (`MapState::shown_cf`), if any.
+    pub fn shown_cf(&self) -> Option<u32> {
+        self.view.as_ref().and_then(|v| self.map.shown_cf(&v.lsm))
+    }
+    /// The split role of the view shown (0030 A8): the levels view has its own Table and Map
+    /// splits; every other view shares the records split.
+    pub fn split_role(&self) -> SplitRole {
+        match (self.view_kind == Some(NodeKind::ManifestLevels), self.map.mode()) {
+            (true, MapMode::Map) => SplitRole::Map,
+            (true, MapMode::Table) => SplitRole::LevelsTable,
+            (false, _) => SplitRole::Records,
+        }
     }
     /// The view requested and not answered yet (`Navigation::pending_target`; kept here for the
     /// integration tests in tests/*.rs).
@@ -261,14 +341,12 @@ impl DocumentSession {
     pub(super) fn set_status_msg(&mut self, s: impl Into<String>) {
         self.status_msg = s.into();
     }
-    pub(super) fn set_dir_note(&mut self, s: impl Into<String>) {
-        self.dir_note = s.into();
-    }
     pub(super) fn mark_stat_started(&mut self) {
         self.last_stat = Instant::now();
     }
 
-    /// Ends the file session: new generation, no file/tree/view/history/hex page.
+    /// Ends the file session: new generation, no file/tree/view/hex page, nothing in flight. The
+    /// history survives (Back may return to the previous file); `reset_history` ends it.
     pub(super) fn close(&mut self) {
         self.generation += 1;
         self.file = None;
@@ -281,7 +359,12 @@ impl DocumentSession {
         self.sel_node = None;
         self.view = None;
         self.view_kind = None;
-        self.nav.reset();
+        self.nav.drop_inflight();
+        self.map = MapState::default();
+        self.wals = None;
+        self.table_scroll = 0.0;
+        self.table_restore = None;
+        self.lsm_blocked = None;
         self.tree_scroll = None;
         // A new file starts at page 0 with the Go-to placeholder (design B3).
         self.hex = HexState::default();
@@ -300,6 +383,7 @@ impl DocumentSession {
         self.dir = Some(dir);
         self.dir_entries.clear();
         self.dir_note = "Scanning folder…".into();
+        self.listed = false;
     }
 
     pub(super) fn is_dir(&self, d: &Path) -> bool {
@@ -308,16 +392,10 @@ impl DocumentSession {
 
     /// Folder listing arrived. Returns the file to auto-open (CURRENT, else MANIFEST) if asked.
     pub(super) fn scanned(&mut self, entries: Vec<DirEntry>, trunc: bool, auto_open: bool) -> Option<PathBuf> {
-        let n = |k: FileKind| entries.iter().filter(|e| e.kind == k).count();
-        self.dir_note = format!(
-            "{} WAL · {} SST · {} MANIFEST · CURRENT {}{}",
-            n(FileKind::Wal),
-            n(FileKind::Sst),
-            n(FileKind::Manifest),
-            if n(FileKind::Current) > 0 { "yes" } else { "no" },
-            if trunc { " · listing truncated" } else { "" }
-        );
+        self.dir_trunc = trunc;
+        self.dir_note = folder_note(&entries, trunc, self.blocked_here());
         self.dir_entries = entries;
+        self.listed = true;
         if auto_open && self.file.is_none() {
             return self.dir_entries.iter().find(|e| e.kind == FileKind::Current).or_else(|| self.dir_entries.iter().find(|e| e.kind == FileKind::Manifest)).map(|e| e.path.clone());
         }
@@ -327,6 +405,12 @@ impl DocumentSession {
     pub(super) fn scan_failed(&mut self, e: String) {
         self.dir_note.clear();
         self.path_error = Some(format!("cannot list folder: {e}"));
+        self.listed = true;
+    }
+    /// A cancelled folder scan: the listing is final (empty) for availability.
+    pub(super) fn scan_cancelled(&mut self) {
+        self.dir_note = "Folder scan cancelled".into();
+        self.listed = true;
     }
 
     pub(super) fn opened(&mut self, label: String, children: Vec<Child>, file_len: u64, mtime: Option<SystemTime>) {
@@ -469,6 +553,122 @@ impl DocumentSession {
         self.tree_scroll.take()
     }
 
+    /// A new root context (folder or file opened by path): Back starts empty.
+    pub(super) fn reset_history(&mut self) {
+        self.nav.reset();
+    }
+    /// `req` is the view request in flight.
+    pub(super) fn on_view_reply_is_ours(&self, req: u64) -> bool {
+        self.nav.is_inflight(req)
+    }
+    /// Undoes the request in flight before a file switch (a popped Back entry is kept).
+    pub(super) fn drop_inflight(&mut self) {
+        self.nav.undo_inflight();
+    }
+    /// A cross-file history entry (the view shown before a file switch).
+    pub(super) fn push_history(&mut self, e: HistEntry) {
+        self.nav.push(e);
+    }
+    pub(super) fn map_mut(&mut self) -> &mut MapState {
+        &mut self.map
+    }
+
+    /// The WAL files to summarise now, highest numbers first, at most `WAL_SUMMARY_FILES`
+    /// scanned per inventory (the rest say why); marked Scanning. `again`: the map is shown
+    /// again, so files left unscanned by a cancel or a refused job are requested once more
+    /// (never a Done / Partial / Corrupt one); otherwise only never-requested files.
+    pub(super) fn plan_wal_scan(&mut self, again: bool) -> Vec<PathBuf> {
+        let Some(w) = self.wals.as_mut() else { return Vec::new() };
+        let used = w.files.iter().filter(|f| !matches!(f.summary, WalSummary::NotScanned(_))).count();
+        let want = |s: &WalSummary| if again { s.rescannable() } else { *s == WalSummary::NotScanned(NotScannedWhy::Pending) };
+        let mut idle: Vec<usize> = (0..w.files.len()).filter(|&i| want(&w.files[i].summary)).collect();
+        idle.sort_by_key(|&i| std::cmp::Reverse(w.files[i].number));
+        let room = WAL_SUMMARY_FILES.saturating_sub(used);
+        let mut out = Vec::new();
+        for (k, i) in idle.into_iter().enumerate() {
+            let f = &mut w.files[i];
+            if k < room {
+                f.summary = WalSummary::Scanning;
+                out.push(f.path.clone());
+            } else {
+                f.summary = WalSummary::NotScanned(NotScannedWhy::BeyondCap);
+            }
+        }
+        out
+    }
+    /// A WAL summary arrived (applied only to a file still Scanning).
+    pub(super) fn wal_scanned(&mut self, path: &Path, s: WalSummary) {
+        if let Some(f) = self.wals.as_mut().and_then(|w| w.files.iter_mut().find(|f| f.path == path && f.summary == WalSummary::Scanning)) {
+            f.summary = s;
+        }
+    }
+    /// The summary job ended early (cancelled, refused, failed): files still Scanning become
+    /// not scanned with the reason.
+    pub(super) fn wal_scan_ended(&mut self, why: NotScannedWhy) {
+        for f in self.wals.iter_mut().flat_map(|w| w.files.iter_mut()).filter(|f| f.summary == WalSummary::Scanning) {
+            f.summary = WalSummary::NotScanned(why.clone());
+        }
+    }
+    /// The records panel reports the table's scroll offset (what Back restores).
+    pub(super) fn set_table_scroll(&mut self, y: f32) {
+        self.table_scroll = if y.is_finite() { y.max(0.0) } else { 0.0 };
+    }
+    /// Back: the saved offset is restored once by the records panel.
+    pub(super) fn restore_table_scroll(&mut self, y: f32) {
+        self.table_scroll = y.max(0.0);
+        self.table_restore = Some(y.max(0.0));
+    }
+    pub(super) fn take_table_restore(&mut self) -> Option<f32> {
+        self.table_restore.take()
+    }
+
+    /// The open file's kind by name (CURRENT, MANIFEST, SST …).
+    fn file_kind(&self) -> Option<FileKind> {
+        self.file.as_deref().and_then(|p| p.file_name()).map(|n| crate::discover::classify(&n.to_string_lossy()))
+    }
+
+    /// (enabled, active) of the LSM Map entry — the toolbar button and the View menu item share
+    /// it: active while the map is shown (clicking returns to the table), else enabled when
+    /// available.
+    pub fn lsm_map_entry_state(&self) -> (bool, bool) {
+        let shown = self.map_shown();
+        (shown || self.lsm_map_availability().is_ok(), shown)
+    }
+
+    /// The one availability rule of the LSM Map (toolbar button, menu item, key, Explanation
+    /// line): where the entry leads, or why it is unavailable. No I/O: the open file's kind, the
+    /// folder listing and the views already shown.
+    pub fn lsm_map_availability(&self) -> Result<MapEntry, Unavailable> {
+        // A view of this file said why its live files cannot be observed (typed, `lsm_blocked`).
+        if let Some(why) = &self.lsm_blocked {
+            return Err(Unavailable(why.clone()));
+        }
+        if self.view_kind == Some(NodeKind::ManifestLevels) && self.view.is_some() {
+            return Ok(MapEntry::Shown);
+        }
+        let kind = self.file_kind();
+        if matches!(kind, Some(FileKind::Current | FileKind::Manifest)) {
+            return Ok(MapEntry::InFile);
+        }
+        // The folder of the open file (or the folder alone).
+        let same_dir = match (self.file.as_deref().and_then(|f| f.parent()), self.dir.as_deref()) {
+            (Some(p), Some(d)) => p == d,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let entries: &[DirEntry] = if same_dir { &self.dir_entries } else { &[] };
+        let via = entries.iter().find(|e| e.kind == FileKind::Current).or_else(|| entries.iter().find(|e| e.kind == FileKind::Manifest));
+        let name = self.file.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+        match (via, kind) {
+            // The file's folder is being listed (OpenFile / OpenPath of a file scans its parent).
+            (None, Some(FileKind::Sst)) if same_dir && !self.listed => Err(Unavailable(lsm_map::LISTING.into())),
+            (Some(e), _) => Ok(MapEntry::Via { path: e.path.clone(), focus: self.file.as_deref().and_then(sst_number), from: name.filter(|_| kind == Some(FileKind::Sst)) }),
+            (None, Some(FileKind::Sst)) => Err(Unavailable(lsm_map::lone_sst(name.as_deref().unwrap_or("This SST")))),
+            (None, _) if self.dir.is_some() && same_dir => Err(Unavailable(lsm_map::NO_CURRENT.into())),
+            _ => Err(Unavailable(lsm_map::NEED_FOLDER.into())),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn push_test_node(&mut self, n: TreeNode) {
         self.nodes.push(n);
@@ -502,7 +702,15 @@ impl DocumentSession {
     /// (blocks checked since the tree was listed, e.g. one opened and found Invalid before
     /// Back); every view also carries the tallies of the file's other table view nodes (review
     /// S2), so Back to the layout table refreshes "Data blocks via index" too.
-    pub(super) fn show_view(&mut self, kind: NodeKind, view: View) {
+    pub(super) fn show_view(&mut self, kind: NodeKind, mut view: View) {
+        // The levels view's WAL listing becomes the session's inventory (summaries of the same
+        // files are kept, so showing the view again does not rescan them).
+        if let Some(mut w) = view.wals.take().filter(|_| kind == NodeKind::ManifestLevels) {
+            if let Some(old) = &self.wals {
+                w.keep_summaries(old);
+            }
+            self.wals = Some(w);
+        }
         for (k, t) in view.tally.map(|t| (kind.clone(), t)).into_iter().chain(view.tallies.iter().cloned()) {
             for n in self.nodes.iter_mut().filter(|n| n.kind == k && n.role == ChildRole::View) {
                 n.tally = Some(t);
@@ -511,6 +719,22 @@ impl DocumentSession {
         }
         self.view_kind = Some(kind);
         self.view = Some(view);
+        // A new table starts at its top (Back restores its own offset after this).
+        self.table_scroll = 0.0;
+        self.table_restore = None;
+        if let Some(b) = self.view.as_ref().and_then(|v| v.lsm_blocked.clone()) {
+            self.lsm_blocked = Some(b);
+            // The folder note of this file's folder now says why (no "CURRENT present" alone).
+            if self.listed && self.blocked_here().is_some() {
+                self.dir_note = folder_note(&self.dir_entries, self.dir_trunc, self.blocked_here());
+            }
+        }
+    }
+
+    /// The block reason of the open file when it lies in the listed folder.
+    fn blocked_here(&self) -> Option<&str> {
+        let here = self.file.as_deref().and_then(|f| f.parent()).is_some_and(|p| self.dir.as_deref() == Some(p));
+        self.lsm_blocked.as_deref().filter(|_| here)
     }
 
     /// Selects a tree node (None = the file root). Returns the node kind to show.

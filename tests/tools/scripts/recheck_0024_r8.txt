@@ -1,0 +1,23 @@
+# R8: item 8: SST via folder list -> LSM Map (single press), then another SST -> LSM Map pressed twice quickly.
+front
+note ITEM8a dclick 000018.sst in folder list
+dclick 211 338
+sleep 2
+shot r8_01_sst
+note ITEM8a LSM Map once
+click 443 119
+sleep 2
+move 900 600
+sleep 0.6
+shot r8_02_map_focus
+note ITEM8b dclick 000020.sst in folder list
+dclick 211 359
+sleep 2
+shot r8_03_sst
+note ITEM8b LSM Map twice quickly
+click 443 119
+click 443 119
+sleep 2
+move 900 600
+sleep 0.6
+shot r8_04_map_focus_twice

@@ -1,0 +1,11 @@
+front
+click 184 404
+sleep 0.8
+click 330 404
+sleep 0.8
+move 1380 880
+shot w3_3_batch
+click 184 423
+sleep 0.8
+move 1380 880
+shot w3_4_batch_expanded

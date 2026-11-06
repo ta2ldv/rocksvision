@@ -1,0 +1,19 @@
+# 0030 P1 item 3 (A2 keyboard variant): LSM Map toolbar, no click on map, Up, Tab, Up
+front
+note A2 click toolbar LSM Map (only click)
+click 445 120
+sleep 1.2
+move 1380 900
+shot a2_1_map_open
+note A2 key up (no map click)
+key up
+sleep 0.6
+shot a2_2_after_up
+note A2 key tab
+key tab
+sleep 0.6
+shot a2_3_after_tab
+note A2 key up
+key up
+sleep 0.6
+shot a2_4_after_tab_up

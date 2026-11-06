@@ -1,0 +1,17 @@
+# Discovery: fresh launch, 1400x900, then db-checkpoint.
+front
+winsize 1400 900
+sleep 1
+winfo
+shot d_00_launch
+crop d_00_toolbar 0 60 1400 130
+move 400 120
+sleep 1.8
+shot d_01_hover
+click 583 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+shot d_02_open
+key q cmd

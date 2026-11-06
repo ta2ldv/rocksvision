@@ -1,0 +1,19 @@
+# A3: hover bar, click bar, Home + Right, then + x3 via key equal
+front
+move 826 406
+sleep 1.3
+shot a3_2_bar_hover
+click 826 406
+sleep 1.0
+move 1380 880
+shot a3_3_bar_click
+key home
+sleep 0.5
+key right
+sleep 0.8
+shot a3_4_home_right
+key equal
+key equal
+key equal
+sleep 0.8
+shot a3_5_zoomx3

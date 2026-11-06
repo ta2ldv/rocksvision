@@ -1,0 +1,5 @@
+front
+click 516 151
+sleep 2
+move 700 930
+shot g11_table_cf_users

@@ -1,0 +1,13 @@
+front
+dclick 211 387
+sleep 1.8
+click 465 411
+sleep 0.8
+click 1305 373
+sleep 1.5
+move 1380 880
+shot a7_4_show_in_map
+click 462 150
+sleep 1.0
+move 1380 880
+shot a7_5_back_from_map

@@ -1,0 +1,8 @@
+# J2h: at x1.5 click + at its centre (1154,204), then - (1130 shifts) ; log each result with crops.
+front
+click 1154 204
+sleep 0.6
+move 900 420
+sleep 0.8
+shot j2h_01
+crop j2h_01_after_plus 420 190 1180 40

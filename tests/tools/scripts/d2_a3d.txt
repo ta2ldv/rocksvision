@@ -1,0 +1,13 @@
+front
+click 600 500
+key 0
+sleep 0.6
+shot a3_10_fit
+key home
+sleep 0.5
+key right
+sleep 0.5
+key right
+sleep 0.8
+move 880 680
+shot a3_11_arrow_into_merged

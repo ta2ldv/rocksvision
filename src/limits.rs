@@ -2,6 +2,11 @@
 //! I/O or work per request. Format constants (block sizes, magic numbers, tags) stay in their
 //! format modules. Nothing here depends on the UI; jobs, parsers and the UI all read from here.
 
+// ---- Tooltips ----
+/// Characters of a value's / cell's full text a tooltip repeats (one cap for every elided
+/// label, value and table cell; architect S4).
+pub const TIP_TEXT_CHARS: usize = 4096;
+
 // ---- I/O ----
 /// Hard cap for a single range read (protects against malformed handles/lengths).
 pub const MAX_READ: u64 = 96 * 1024 * 1024;
@@ -31,6 +36,11 @@ pub const BLOCK_CACHE_ITEMS: usize = 32;
 pub const BLOCK_CACHE_BYTES: usize = 64 << 20;
 /// Remembered block handles (for re-reading evicted derived spaces).
 pub const KNOWN_BLOCK_HANDLES: usize = 100_000;
+/// Highest LSM level placed in the observed levels. RocksDB's `num_levels` is a small int
+/// (default 7; options validate it far below this); the MANIFEST varint is not bounded, so a
+/// hostile `level` would make the levels view/map materialise levels 0..=level. Files above it
+/// are reported as problems instead.
+pub const MAX_LEVELS: u32 = 64;
 /// Live files tracked while replaying a MANIFEST.
 pub const MAX_LIVE_FILES: usize = 200_000;
 /// Materialized fields per VersionEdit.
@@ -80,6 +90,24 @@ pub const LIST_CHECK_BYTES: u64 = 16 << 20;
 /// Block trailers whose compression type byte is read for the root summary.
 pub const COMPRESSION_SAMPLE: usize = 4096;
 
+// ---- WAL overview of the LSM Map (0026 item 4) ----
+/// WAL files listed in the WAL inventory of a folder (the rest is reported as truncated).
+pub const MAX_WAL_LISTED: usize = 1000;
+/// WAL files summarised per folder in the background (the highest numbers first); the others
+/// stay "not scanned" with this cap as the reason.
+pub const WAL_SUMMARY_FILES: usize = 32;
+/// File bytes one WAL summary reads; a larger WAL is summarised up to here (Partial). Checked
+/// per fragment, so the reader overshoots by less than two 32 KiB log blocks (the rest of the
+/// first fragment's block plus one; also inside one huge fragmented record).
+pub const WAL_SUMMARY_BYTES: u64 = 16 << 20;
+/// Payload bytes kept per logical record while summarising (WriteBatch header, CF ids); a
+/// larger record still counts, but its CF ids are partial.
+pub const WAL_SUMMARY_RECORD_KEEP: usize = 1 << 20;
+/// Characters kept of a summary's Partial / Corrupt / Unreadable reason.
+pub const WAL_REASON_CHARS: usize = 200;
+/// CF ids collected per WAL summary (more ids mark the CF set partial).
+pub const WAL_SUMMARY_CFS: usize = 4096;
+
 // ---- application ----
 pub struct Limits {
     pub hex_bytes_per_row: u64,
@@ -95,7 +123,19 @@ pub struct Limits {
     pub max_io_inflight: usize,
     /// Navigation (Back) history entries.
     pub history: usize,
+    /// LSM Map boxes laid out per frame (after culling and density merging).
+    pub map_boxes: usize,
 }
 
-pub const LIMITS: &Limits =
-    &Limits { hex_bytes_per_row: 16, hex_page_bytes: 64 * 1024, interp_bytes: 64, copy_cap: 64 * 1024, page_rows: 20, change_check_secs: 2, busy_repaint_ms: 100, max_io_inflight: 16, history: 200 };
+pub const LIMITS: &Limits = &Limits {
+    hex_bytes_per_row: 16,
+    hex_page_bytes: 64 * 1024,
+    interp_bytes: 64,
+    copy_cap: 64 * 1024,
+    page_rows: 20,
+    change_check_secs: 2,
+    busy_repaint_ms: 100,
+    max_io_inflight: 16,
+    history: 200,
+    map_boxes: 4000,
+};

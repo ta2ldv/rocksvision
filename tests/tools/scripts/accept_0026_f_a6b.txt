@@ -1,0 +1,7 @@
+front
+key return
+sleep 3
+click 446 118
+sleep 4
+move 400 600
+shot a6_01_map

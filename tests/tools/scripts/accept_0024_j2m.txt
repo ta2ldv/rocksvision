@@ -1,0 +1,31 @@
+# J2m: item 15 Tab path: Back to the map (no focus request), click the Map segment, Tab x6 with crops.
+front
+click 456 151
+sleep 2
+shot j2m_00_back
+click 557 151
+sleep 0.6
+key tab
+sleep 0.5
+shot j2m_01
+crop j2m_01_c 395 125 760 190
+key tab
+sleep 0.5
+shot j2m_02
+crop j2m_02_c 395 125 760 190
+key tab
+sleep 0.5
+shot j2m_03
+crop j2m_03_c 395 125 760 190
+key tab
+sleep 0.5
+shot j2m_04
+crop j2m_04_c 395 125 760 190
+key tab
+sleep 0.5
+shot j2m_05
+crop j2m_05_c 395 125 760 190
+key tab
+sleep 0.5
+shot j2m_06
+crop j2m_06_c 395 125 760 190

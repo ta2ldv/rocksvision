@@ -68,6 +68,8 @@ pub struct DirEntry {
     pub name: String,
     pub kind: FileKind,
     pub size: u64,
+    /// Modification time observed by the listing (None: unavailable or a symlink).
+    pub mtime: Option<std::time::SystemTime>,
     pub is_symlink: bool,
 }
 
@@ -88,8 +90,11 @@ pub fn scan(dir: &Path) -> std::io::Result<(Vec<DirEntry>, bool)> {
             continue;
         }
         let name = e.file_name().to_string_lossy().into_owned();
-        let size = if ft.is_symlink() { 0 } else { e.metadata().map(|m| m.len()).unwrap_or(0) };
-        out.push(DirEntry { path: e.path(), kind: classify(&name), name, size, is_symlink: ft.is_symlink() });
+        // Symlinks are not followed: no size or modification time of their target.
+        let meta = if ft.is_symlink() { None } else { e.metadata().ok() };
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta.and_then(|m| m.modified().ok());
+        out.push(DirEntry { path: e.path(), kind: classify(&name), name, size, mtime, is_symlink: ft.is_symlink() });
     }
     out.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.name.cmp(&b.name)));
     Ok((out, truncated))

@@ -1,0 +1,12 @@
+# 0030 P1 exploration: open the advanced example folder, shot the window
+front
+winsize 1400 900
+sleep 1
+winfo
+shot explore_start
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+shot explore_open

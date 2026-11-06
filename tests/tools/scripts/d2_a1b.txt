@@ -1,0 +1,5 @@
+front
+click 1102 204
+sleep 1
+move 1380 560
+shot a1_h588_after_fit

@@ -1,0 +1,21 @@
+# A5 advanced example (3 WALs) map at widths, tall window so cards not chips
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 445 120
+sleep 1.5
+move 1380 880
+shot {{TAG}}_1400
+winsize 1100 800
+sleep 1.5
+shot {{TAG}}_1100
+winsize 900 800
+sleep 1.5
+shot {{TAG}}_900
+winsize 1400 900
+sleep 1.5

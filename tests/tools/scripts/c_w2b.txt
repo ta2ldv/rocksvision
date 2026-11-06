@@ -1,0 +1,9 @@
+front
+click 330 637
+sleep 0.8
+move 1380 880
+shot w2_1_block
+click 184 637
+sleep 0.8
+move 1380 880
+shot w2_1b_expanded

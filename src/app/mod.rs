@@ -15,6 +15,8 @@ pub mod explanation;
 pub mod hex;
 pub mod job_state;
 pub mod jobs;
+pub mod lsm_map;
+pub mod map_facts;
 pub mod navigation;
 pub mod prefs;
 pub mod provenance;
@@ -24,7 +26,7 @@ pub mod session;
 pub mod state;
 pub mod view_prefs;
 
-pub use actions::{Action, CopyKind, Effect, Panel, RowMove};
+pub use actions::{Action, CopyKind, Effect, MapMeasure, MapMode, MapMove, MapPick, MapZoom, Panel, RowMove};
 pub use job_state::JobState;
 pub use search::SearchState;
 pub use selection::SelectionState;

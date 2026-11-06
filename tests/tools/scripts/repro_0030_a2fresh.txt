@@ -1,0 +1,22 @@
+# 0030 P1 item 3 fresh-instance variant: folder open, CURRENT selected, toolbar LSM Map, no click on the map, Up
+front
+click 207 213
+sleep 0.8
+move 1380 880
+shot a2f_1_current
+click 445 120
+sleep 1.2
+move 1380 880
+shot a2f_2_map_open
+note A2f key up (no map click)
+key up
+sleep 0.6
+shot a2f_3_after_up
+note A2f key tab
+key tab
+sleep 0.6
+shot a2f_4_after_tab
+note A2f key up
+key up
+sleep 0.6
+shot a2f_5_after_tab_up

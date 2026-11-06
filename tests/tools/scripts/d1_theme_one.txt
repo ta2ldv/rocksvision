@@ -1,0 +1,17 @@
+front
+click 208 18
+sleep 0.6
+click 214 230
+sleep 0.6
+click {{TX}} {{TY}}
+sleep 1.2
+click 556 151
+sleep 0.8
+click 800 720
+sleep 0.6
+move 880 880
+sleep 0.4
+shot {{N}}_map_focus
+move 850 472
+sleep 1.4
+shot {{N}}_map_tip

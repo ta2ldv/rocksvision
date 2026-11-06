@@ -1,0 +1,18 @@
+front
+move 575 423
+sleep 2
+shot a6_02_hover_density
+click 654 248
+click 654 248
+click 654 248
+click 654 248
+sleep 0.8
+move 400 640
+shot a6_03_zoomed
+wheel 575 423 0 0
+wheel 575 423 -300 0 shift
+sleep 0.6
+shot a6_04_pan_shift_wheel
+wheel 575 423 -300 0 shift
+sleep 0.6
+shot a6_05_pan_again

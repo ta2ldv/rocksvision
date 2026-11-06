@@ -55,7 +55,7 @@ fn list_dir(d: &Path) -> String {
 
 fn facts_live(db: &DB, cfs: &[&str]) -> R<()> {
     let mut lf = db.live_files()?;
-    lf.sort_by(|a, b| (a.column_family_name.clone(), a.level, a.name.clone()).cmp(&(b.column_family_name.clone(), b.level, b.name.clone())));
+    lf.sort_by_key(|a| (a.column_family_name.clone(), a.level, a.name.clone()));
     println!("  live_files: CF | level | file | size | entries | deletions | smallest | largest");
     for f in &lf {
         println!(
@@ -558,6 +558,8 @@ fn expected_counts(name: &str) -> Vec<(&'static str, usize)> {
     match name {
         "basic-db" => vec![("default", 15)],
         "multilevel-db" => vec![("default", 37), ("cf_users", 25), ("cf_events", 26)],
+        // generated separately: `fixture-gen multilevel-advanced` (main.rs), checked in depth by multilevel-advanced-verify
+        "multilevel-advanced-db" => vec![("default", 170), ("cf_users", 170), ("cf_orders", 170)],
         "wal-basic" => vec![("default", 4), ("cf_two", 3)],
         "wal-fragmented" => vec![("default", 51)],
         "wal-recycled" => vec![("default", 6 + 50 + 4 + 6), ("cf_two", 4)],

@@ -1,0 +1,20 @@
+front
+click 896 583
+sleep 0.8
+move 900 10
+sleep 0.8
+winshot /private/tmp/rocksvision-0030/hero/hero-full-ring
+key tab
+sleep 0.6
+move 900 10
+sleep 0.5
+winshot /private/tmp/rocksvision-0030/hero/hero-full
+shot hero_full_ctx
+winsize 1728 820
+sleep 1.5
+winpos 0 38
+sleep 0.8
+move 900 10
+sleep 0.6
+winshot /private/tmp/rocksvision-0030/hero/hero-short
+shot hero_short_ctx

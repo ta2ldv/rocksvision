@@ -1,0 +1,26 @@
+front
+winsize 1400 900
+sleep 1
+click 619 120
+key a cmd
+type {{DIR}}
+click 773 120
+sleep 2.5
+click 207 213
+sleep 0.8
+click 300 524
+sleep 1.2
+click 517 151
+sleep 1
+move 1380 880
+move 1204 240
+sleep 1.4
+shot b_header_seq
+move 1380 880
+move 450 270
+sleep 1.0
+shot b_row_cf
+move 600 270
+sleep 0.8
+shot b_row_file
+move 1380 880

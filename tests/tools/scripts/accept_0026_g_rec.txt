@@ -1,0 +1,18 @@
+front
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/examples/data/wal-recycled
+key return
+sleep 3
+click 446 118
+sleep 5
+move 674 270
+sleep 2.3
+shot g_rec_hover_000014
+click 674 270
+sleep 1
+move 700 900
+shot g_rec_select_000014
+move 510 270
+sleep 2.3
+shot g_rec_hover_000011

@@ -1,0 +1,10 @@
+# J1i: item 9 retry - Option+Left with no history, immediate shot; then hover the disabled Back.
+front
+note OPTION+LEFT retry (no sleep before shot)
+key left alt
+shot j1i_01_optleft_now
+crop j1i_01_status 150 940 800 40
+move 456 151
+sleep 1.8
+shot j1i_02_back_hover
+crop j1i_02_back_hover_crop 390 125 700 100

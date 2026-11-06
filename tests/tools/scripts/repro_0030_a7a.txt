@@ -1,0 +1,6 @@
+# 0030 P1 item 4 prep: scroll the folder list to find 000058.sst
+front
+wheel 292 380 0 -120
+sleep 0.6
+move 1380 900
+shot a7_0_list_scrolled

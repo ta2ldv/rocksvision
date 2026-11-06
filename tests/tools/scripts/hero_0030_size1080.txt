@@ -1,0 +1,7 @@
+# 0030 hero probe: can the window be 1728x1080 pt (3456x2160 px)? Placed at y=37.
+front
+winpos 0 37
+winsize 1728 1080
+winpos 0 37
+winfo
+winshot /private/tmp/rocksvision-0030/hero-shots/probe_1080

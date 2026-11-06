@@ -1,0 +1,21 @@
+front
+click 556 151
+sleep 0.6
+key tab
+key tab
+key m cmd shift
+sleep 0.8
+key up
+sleep 0.6
+move 850 800
+shot a2off_1_up_tooltips_off
+key left
+sleep 0.5
+move 850 800
+shot a2off_2_left
+note re-enable Show Tooltips
+click 210 18
+sleep 0.6
+click 234 493
+sleep 0.6
+move 1380 860

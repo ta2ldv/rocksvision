@@ -1,0 +1,18 @@
+front
+key f cmd
+sleep 0.4
+type 0x
+key return
+sleep 0.8
+shot modal_1_search_match1
+click 259 18
+sleep 0.6
+click 306 102
+sleep 1.0
+shot modal_2_shortcuts_open
+key f3
+sleep 0.6
+shot modal_3_after_f3
+key esc
+sleep 0.5
+shot modal_4_closed

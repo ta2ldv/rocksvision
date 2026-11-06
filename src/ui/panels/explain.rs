@@ -3,10 +3,11 @@
 //! when no row is selected, the byte interpretations of the selection, or the status legend.
 //! Unsupported and Unknown are stated separately and never under Diagnosis.
 
-use super::{LEGEND, btn, chip, chip_word, fit_value, long_value, status_meaning, strong, title_line, value_tip};
+use super::{LEGEND, TipExt, btn, chip, chip_word, fit_value, long_value, status_meaning, strong, title_line, value_tip};
 use crate::app::diagnosis::{self, DiagLine, Diagnosis, Finding, NodeFailure, SUMMARY_LINES};
 use crate::app::explanation::{self, Failures, Subject, WhereText};
 use crate::app::hex::interpretations;
+use crate::app::map_facts::{MapFact, ValueKind};
 use crate::app::{Action, AppState, Panel};
 use crate::limits::LIMITS;
 use crate::model::{NodeKind, Span, Status, WhereLine};
@@ -27,12 +28,25 @@ pub fn show(ui: &mut egui::Ui, st: &AppState, tok: &Tokens) -> Vec<Action> {
     egui::ScrollArea::vertical().id_salt("explain").auto_shrink([false, false]).show(ui, |ui| {
         ui.set_max_width(ui.available_width());
         match explanation::subject(st.session(), st.selection()) {
-            Subject::Field { field: f, .. } => field(ui, st, tok, f, &mut acts),
-            Subject::WholeStructure => structure_card(ui, st, tok, &mut acts),
+            Subject::Field { row, field: f } => field(ui, st, tok, row, f, &mut acts),
+            Subject::WholeStructure => {
+                structure_card(ui, st, tok, &mut acts);
+                levels_ui(ui, st, tok);
+            }
             Subject::StructureRange { span: s, .. } | Subject::Raw(s) => selection_range(ui, st, tok, &s, &mut acts),
             Subject::Node | Subject::PendingStructure | Subject::Empty => {
-                if !node(ui, st, tok, &mut acts) {
-                    empty(ui, tok);
+                if let Some(u) = explanation::lsm_map_unavailable(st.session()) {
+                    ui.add(egui::Label::new(RichText::new(u).color(tok.p.text_muted)).wrap());
+                    ui.add_space(4.0);
+                }
+                if let Some(c) = explanation::map_card(st.session()) {
+                    map_card_ui(ui, tok, &c, &mut acts);
+                } else if !node(ui, st, tok, &mut acts) {
+                    if explanation::levels_summary(st.session()).is_empty() {
+                        empty(ui, tok);
+                    } else {
+                        levels_ui(ui, st, tok);
+                    }
                 }
             }
         }
@@ -66,7 +80,7 @@ fn location_ui(ui: &mut egui::Ui, location: &[WhereLine], acts: &mut Vec<Action>
     for w in location {
         match &w.link {
             Some(t) => {
-                if ui.link(nb_units(&w.text)).on_hover_text("Go to this structure (Back returns)").clicked() {
+                if ui.link(nb_units(&w.text)).tip("Go to this structure (Back returns)").clicked() {
                     acts.push(Action::Navigate { target: t.node.clone(), span: t.span });
                 }
             }
@@ -152,31 +166,46 @@ fn structure_card(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, acts: &mut Vec
         ui.add(egui::Label::new(RichText::new(&c.title).heading()).wrap());
     });
     ui.add_space(4.0);
-    section(ui, tok, "Meaning");
+    // 0030 B-8: no empty heading.
+    if c.meaning.is_some() || c.subtitle.is_some() || c.note.is_some() {
+        section(ui, tok, "Meaning");
+    }
+    if let Some(t) = c.meaning {
+        ui.add(egui::Label::new(t).wrap());
+    }
     if let Some(t) = c.subtitle {
         ui.add(egui::Label::new(t).wrap());
     }
     if let Some(n) = c.note {
         ui.add(egui::Label::new(RichText::new(nb_units(n)).color(tok.p.text_muted)).wrap());
     }
-    // Where: the structure's location lines (their first line is its range, 0020 §1).
-    where_ui(ui, tok, &c.where_);
-    location_ui(ui, c.location, acts);
+    // Where: the structure's location lines (their first line is its range, 0020 §1); without
+    // bytes one muted line instead of a heading (0030 B-8).
+    match &c.where_ {
+        WhereText::Prose(t) if c.location.is_empty() => {
+            ui.add(egui::Label::new(RichText::new(nb_units(t)).color(tok.p.text_muted)).wrap());
+        }
+        w => {
+            where_ui(ui, tok, w);
+            location_ui(ui, c.location, acts);
+        }
+    }
     // Diagnosis of the structure (same data as the node summary).
     if !c.failures.is_none() {
         ui.add_space(4.0);
         failures_ui(ui, tok, &c.failures, "card", acts);
     }
     table_legend(ui, tok, &c.legend);
-    if let Some(via) = c.via {
+    // Offered only while Back can go there (0024 §4: never a dead back-link).
+    if let Some(via) = c.via.filter(|_| st.navigation().can_go_back()) {
         ui.add_space(6.0);
-        if ui.link(format!("Referenced from: {via} ›")).on_hover_text("Back to where this link was followed (restores that selection)").clicked() && st.navigation().can_go_back() {
+        if ui.link(format!("Referenced from: {via} ›")).tip("Back to where this link was followed (restores that selection)").clicked() {
             acts.push(Action::Back);
         }
     }
     if let Some(sp) = c.decompressed {
         ui.add_space(6.0);
-        if btn(ui, tok, "Open decompressed view").on_hover_text(&sp.title).clicked() {
+        if btn(ui, tok, "Open decompressed view").tip(&sp.title).clicked() {
             acts.push(Action::HexShowSpace(sp.space));
         }
     }
@@ -196,40 +225,128 @@ fn selection_range(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, s: &Span, act
     // Compressed stored bytes: no byte maps to a field; offer the decompressed space.
     if let Some(sp) = c.decompressed {
         ui.add_space(6.0);
-        if btn(ui, tok, "Open decompressed view").on_hover_text(&sp.title).clicked() {
+        if btn(ui, tok, "Open decompressed view").tip(&sp.title).clicked() {
             acts.push(Action::HexShowSpace(sp.space));
         }
     }
     other_interpretations(ui, st, tok, Some(s), None, &[], !c.structure);
 }
 
-fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field, acts: &mut Vec<Action>) {
+/// Levels view summary: comparator per CF, files and bytes per level, the axis sentence.
+fn levels_ui(ui: &mut egui::Ui, st: &AppState, tok: &Tokens) {
+    let lines = explanation::levels_summary(st.session());
+    if lines.is_empty() {
+        return;
+    }
+    section(ui, tok, "Live SST files (MANIFEST)");
+    for l in lines {
+        ui.add(egui::Label::new(RichText::new(nb_units(&l)).monospace().color(tok.p.text)).wrap());
+    }
+}
+
+/// A selected levels row / map box: every fact the map tooltip shows (0024 §6.2).
+fn lsm_file_ui(ui: &mut egui::Ui, tok: &Tokens, c: &explanation::LsmFileCard) {
+    section(ui, tok, "LSM file");
+    facts_ui(ui, tok, &c.typed);
+    // The x-axis sentence stays on the map strip and the levels card (0030 UI final §5.2: the
+    // Key order fact carries the order here).
+    let col = if c.on_disk { tok.p.text } else { tok.status(Status::NotPresent) };
+    ui.add(egui::Label::new(RichText::new(&c.open).color(col)).wrap());
+}
+
+/// Facts with their source tag in a Small `text_muted` column on the right (0026 §5.1); key
+/// previews in monospace; values wrap (no horizontal scrolling).
+fn facts_ui(ui: &mut egui::Ui, tok: &Tokens, facts: &[MapFact]) {
+    // 0026 D2 F1: fixed-size cells, no nested right-to-left / wrapping layouts (those took the
+    // scroll area's whole height and pushed every value hundreds of points down).
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let tag_w = ["MANIFEST", "derived", "scan", "disk", "name"].iter().map(|t| ui.fonts_mut(|f| f.layout_no_wrap(t.to_string(), small.clone(), tok.p.text_muted).size().x)).fold(0.0, f32::max);
+    for f in facts {
+        ui.horizontal_top(|ui| {
+            let sp = ui.spacing().item_spacing.x;
+            ui.label(RichText::new(format!("{} ", f.label)).color(tok.p.text_muted));
+            let value_w = (ui.available_width() - tag_w - sp).max(40.0);
+            ui.allocate_ui_with_layout(egui::vec2(value_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(value_w);
+                let v = RichText::new(nb_units(&f.value)).color(tok.p.text);
+                let v = if f.kind == ValueKind::Key { v.monospace() } else { v };
+                ui.add(egui::Label::new(v).wrap());
+            });
+            ui.label(RichText::new(f.source.tag()).small().color(tok.p.text_muted));
+        });
+    }
+}
+
+/// The map's picked object (0026 §4–§5): a WAL, the older-WAL summary or a level — title,
+/// what it is, every fact with its source, and the way to open a WAL.
+fn map_card_ui(ui: &mut egui::Ui, tok: &Tokens, c: &explanation::MapCard, acts: &mut Vec<Action>) {
+    ui.add(egui::Label::new(RichText::new(&c.title).heading()).wrap());
+    if let Some(n) = c.note {
+        ui.add(egui::Label::new(RichText::new(n).color(tok.p.text_muted)).wrap());
+    }
+    ui.add_space(4.0);
+    facts_ui(ui, tok, &c.facts);
+    if let Some(o) = &c.open {
+        ui.add(egui::Label::new(RichText::new(o).color(tok.p.text)).wrap());
+    }
+    if let Some(n) = c.opens {
+        ui.add_space(6.0);
+        if btn(ui, tok, "Open WAL ›").clicked() {
+            acts.push(Action::OpenWal(n));
+        }
+    }
+}
+
+fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, row: usize, f: &crate::model::Field, acts: &mut Vec<Action>) {
     // Title + status.
     ui.horizontal_wrapped(|ui| {
         // Not checked: no chip (no status is claimed, design A9).
-        if f.untrusted {
-            chip_word(ui, tok, f.status, diagnosis::UNTRUSTED_WORD, diagnosis::UNTRUSTED_MEANING);
-        } else if f.not_checked.is_none() {
-            chip(ui, tok, f.status);
+        // The status sentence is the table tooltip's (`field_status_meaning`, architect N1).
+        if f.not_checked.is_none() {
+            let word = if f.untrusted { diagnosis::UNTRUSTED_WORD } else { f.status.label() };
+            chip_word(ui, tok, f.status, word, explanation::field_status_meaning(f));
         }
         ui.heading(&f.name);
     });
     ui.add_space(4.0);
-    // Meaning: what the field is and its decoded value.
-    section(ui, tok, "Meaning");
+    // 0030 B-8 (rules in `explanation::field_body`; this only renders them).
+    let explanation::FieldBody { show_value, no_bytes } = explanation::field_body(st.session(), st.selection(), f);
+    if !f.explain.is_empty() || show_value || !f.encoding.is_empty() || !f.raw.is_empty() || no_bytes.is_some() {
+        // Meaning: what the field is and its decoded value.
+        section(ui, tok, "Meaning");
+    }
     if !f.explain.is_empty() {
         ui.add(egui::Label::new(&f.explain).wrap());
     }
     // The decoded value once; its alternate notations sit in "Other byte interpretations".
-    long_value(ui, tok, &f.value);
+    if show_value {
+        long_value(ui, tok, &f.value);
+    }
     if !f.encoding.is_empty() {
         ui.add(egui::Label::new(RichText::new(format!("Encoding: {}", f.encoding)).color(tok.p.text_muted)).wrap());
     }
     if !f.raw.is_empty() {
         long_value(ui, tok, &f.raw);
     }
-    // Where: every address space, File first.
-    where_ui(ui, tok, &explanation::where_text(st.session(), st.selection(), f.span));
+    match &no_bytes {
+        Some(t) => {
+            ui.add(egui::Label::new(RichText::new(nb_units(t)).color(tok.p.text_muted)).wrap());
+        }
+        // Where: every address space, File first.
+        None => where_ui(ui, tok, &explanation::where_text(st.session(), st.selection(), f.span)),
+    }
+    // 0030 A7: the MANIFEST rows lead to the same file on the LSM Map (the existing entry
+    // focuses the open SST; Back returns).
+    if f.kind == crate::model::FieldKind::ManifestEvidence
+        && st.session().lsm_map_availability().is_ok()
+        && ui.link("Show in LSM Map ›").tip("Open the folder's LSM Map with this file selected (Back returns)").clicked()
+    {
+        acts.push(Action::ShowLsmMap);
+    }
+    let card = explanation::lsm_file_card(st.session(), row);
+    if let Some(c) = &card {
+        lsm_file_ui(ui, tok, c);
+    }
     // Diagnosis (or the separate Unsupported / Unknown statement); nothing for bytes that were
     // simply not checked.
     if let Some(fd) = diagnosis::finding(f.status, f.diag.as_deref(), &f.name).filter(|_| f.not_checked.is_none()) {
@@ -239,6 +356,12 @@ fn field(ui: &mut egui::Ui, st: &AppState, tok: &Tokens, f: &crate::model::Field
     // Derivation: what the status means and where the link leads.
     section(ui, tok, "Derivation");
     match &f.not_checked {
+        // A levels row: on disk / missing on disk (never the "absent optional part" legend).
+        _ if card.is_some() => {
+            let c = card.as_ref().map(|c| (c.derivation.as_str(), c.on_disk)).unwrap_or_default();
+            let col = if c.1 { tok.p.text } else { tok.status(Status::NotPresent) };
+            ui.add(egui::Label::new(RichText::new(c.0).color(col)).wrap());
+        }
         Some(d) => {
             ui.add(egui::Label::new(RichText::new(d).color(tok.p.text_muted)).wrap());
         }
@@ -391,10 +514,10 @@ fn diag_value(ui: &mut egui::Ui, tok: &Tokens, l: &DiagLine, acts: &mut Vec<Acti
     }
     let mut r = ui.add(lab);
     if !l.prose && l.link.is_none() {
-        r = r.on_hover_text(value_tip(&l.text));
+        r = r.tip(value_tip(&l.text));
     }
     if let Some(span) = l.link
-        && r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Select these bytes in their own offset space").clicked()
+        && r.on_hover_cursor(egui::CursorIcon::PointingHand).tip("Select these bytes in their own offset space").clicked()
     {
         acts.push(Action::SelectSpan(span));
     }

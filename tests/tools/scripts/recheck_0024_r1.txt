@@ -1,0 +1,43 @@
+# R1 (D2b, fresh HOME, XCopy): item 3 nothing-open tooltip, item 4a folder note, item 9 Back, item 2 legend at 1400x900 and 900x560.
+front
+winsize 1400 900
+sleep 1
+winfo
+note ITEM3 hover disabled LSM Map, nothing open
+move 440 119
+sleep 0.3
+move 443 119
+sleep 1.8
+shot r1_01_hover_nothing
+crop r1_01_hover_wide 150 90 1000 160
+click 619 120
+key a cmd
+type /Users/leventd/nexir/ai-central-command/tools/rocksvision/tests/fixtures/db-checkpoint
+click 773 120
+sleep 2.5
+shot r1_02_opened
+note ITEM9 Back disabled tooltip
+move 456 151
+sleep 0.3
+move 457 151
+sleep 1.8
+shot r1_03_back_hover
+crop r1_03_back_hover_crop 390 125 700 100
+note ITEM9 OPTION+LEFT with no history
+key left alt
+shot r1_04_optleft_now
+crop r1_04_status 150 940 800 40
+sleep 1
+shot r1_05_optleft_later
+note ITEM2 LSM Map at 1400x900
+click 443 119
+sleep 2
+move 900 600
+sleep 0.6
+shot r1_06_map_1400
+crop r1_06_strip 395 125 1000 110
+note ITEM2 900x560
+winsize 900 560
+sleep 1.5
+winfo
+shot r1_07_map_900x560

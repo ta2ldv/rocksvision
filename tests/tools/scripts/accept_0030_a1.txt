@@ -1,0 +1,42 @@
+# 0030 phase 2 DRAFT A1 (Fit/Center). Assumes: toolbar Fit button / key 0, Center / key C (map focused), LaneTier Full/Compact/Bar.
+# Placeholders (screen points, from a fresh `winfo` + exploration shot on the D1 package):
+#   DIR (scratch: /private/tmp/rocksvision-0030/many-lanes, many-sst, or the advanced example), W H, TAG,
+#   PATHX PATHY (path field), GOX GOY (Go), MAPX MAPY (LSM Map button), FITX FITY, CENTERX CENTERY, PARKX PARKY (inside window, empty), AREAX AREAY (empty map area)
+front
+winsize {{W}} {{H}}
+sleep 1
+winfo
+click {{PATHX}} {{PATHY}}
+key a cmd
+type {{DIR}}
+click {{GOX}} {{GOY}}
+sleep 2.5
+click {{MAPX}} {{MAPY}}
+sleep 1.5
+move {{PARKX}} {{PARKY}}
+shot {{TAG}}_1_entry
+note A1 entry applies Fit once: expect every level frame visible, titles readable
+note A1 key 0 (Fit) with map focused
+key 0
+sleep 0.8
+shot {{TAG}}_2_fit_key
+note A1 idle 10 s, two shots 2 s apart must be identical (no control flicker)
+sleep 8
+shot {{TAG}}_3_idle_a
+sleep 2
+shot {{TAG}}_4_idle_b
+note A1 key c (Center) keeps zoom xN
+key c
+sleep 0.8
+shot {{TAG}}_5_center_key
+note A1 toolbar Fit and Center buttons
+click {{FITX}} {{FITY}}
+sleep 0.8
+shot {{TAG}}_6_fit_button
+click {{CENTERX}} {{CENTERY}}
+sleep 0.8
+shot {{TAG}}_7_center_button
+note A1 resize to 900x560: controls appear once
+winsize 900 560
+sleep 1.5
+shot {{TAG}}_8_900x560

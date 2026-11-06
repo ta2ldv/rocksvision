@@ -1,0 +1,13 @@
+# P4 item 5: singular "1 file" (cf_events L0), then quit.
+front
+click 583 204
+sleep 0.8
+click 489 272
+sleep 1
+move 900 600
+sleep 0.5
+shot p4_05_events
+crop p4_05_header 400 175 330 130
+crop p4_05_summary 1160 170 280 340
+key q cmd
+sleep 1

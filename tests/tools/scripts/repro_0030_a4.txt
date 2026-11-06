@@ -1,0 +1,10 @@
+# 0030 P1 item 5 (A4): + zoom on many-sst, axis overview outline
+front
+click 656 247
+sleep 0.8
+click 656 247
+sleep 0.8
+move 900 690
+sleep 0.4
+shot a4_1_after_plus_x2
+crop a4_1_map_crop 420 150 340 300

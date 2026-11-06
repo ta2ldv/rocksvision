@@ -1,0 +1,13 @@
+# 0030 P1 item 6 (A1): press Fit at 900x560 (window 900x588)
+front
+note A1 click Fit
+click 608 227
+sleep 0.9
+move 1000 480
+sleep 0.4
+shot a1_2_after_fit
+note A1 click Fit again
+click 608 227
+sleep 0.9
+move 1000 480
+shot a1_3_after_fit_again
